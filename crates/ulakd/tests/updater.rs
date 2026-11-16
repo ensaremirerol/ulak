@@ -517,7 +517,7 @@ fn default_build_ignores_the_test_key_override_and_http() {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let committed = trust::parse_key(include_str!("../release-key.pub")).is_ok();
     assert!(
-        text.starts_with("ulakd 0.1.0 "),
+        text.starts_with(&format!("ulakd {} ", env!("CARGO_PKG_VERSION"))),
         "version override leaked: {text}"
     );
     assert_eq!(
