@@ -206,21 +206,22 @@ async fn install_flow(binary: String, r: Recipe) -> Result<(), String> {
         ));
     };
     let secs = r.install_timeout_secs;
-    let child = Command::new(&a[0])
-        .args(&a[1..])
+    let mut cmd = Command::new(&a[0]);
+    cmd.args(&a[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0)
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => format!(
-                "cannot install {name}: `{}` was not found in PATH (install it first)",
-                a[0]
-            ),
-            _ => format!("cannot run install command `{}`: {e}", a[0]),
-        })?;
+        .kill_on_drop(true);
+    // Own process group so a timeout can kill the whole install tree (Unix only).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "cannot install {name}: `{}` was not found in PATH (install it first)",
+            a[0]
+        ),
+        _ => format!("cannot run install command `{}`: {e}", a[0]),
+    })?;
     let pid = child.id();
     match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
         Err(_) => {
