@@ -25,9 +25,15 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=ULAK_GIT_SHA={sha}");
     println!("cargo:rerun-if-changed=build.rs");
-    if cfg!(not(target_os = "linux")) {
-        return;
+    // cfg!() here describes the build host; the target is what matters when cross-compiling.
+    #[cfg(unix)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        xkbcommon_link();
     }
+}
+
+#[cfg(unix)]
+fn xkbcommon_link() {
     let dirs = [
         "/usr/lib/x86_64-linux-gnu",
         "/usr/lib64",

@@ -22,3 +22,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (the PNG snapshot test needs a GPU, which the runner lacks)
         run: cargo test --workspace -- --skip snap_writes_a_png_per_scene
+  # Portability guard for the native UI: compile + lib tests only (no GPU snapshot/e2e tests).
+  ui-portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p ulak --locked
+      - run: cargo test -p ulak --lib --locked

@@ -1,12 +1,24 @@
 # ulakd (node daemon). Build: docker build -f Dockerfile.ulakd -t ulakd .
 # Run with --pid=host if it should see the host's processes for gaming detection.
-FROM rust:1.95-bookworm AS build
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS build
+ARG TARGETARCH
+# Cross-compile on the build host (never under QEMU). Builder is amd64; arm64 uses the cross gcc.
+RUN case "$TARGETARCH" in \
+      arm64) echo aarch64-unknown-linux-gnu > /triple \
+        && apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+        && rm -rf /var/lib/apt/lists/* ;; \
+      *) echo x86_64-unknown-linux-gnu > /triple ;; \
+    esac \
+ && rustup target add "$(cat /triple)"
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 WORKDIR /src
 COPY . .
 # .git is not in the build context; build.rs reads the sha from here.
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
-RUN cargo build --release -p ulakd
+RUN cargo build --release -p ulakd --target "$(cat /triple)" \
+ && cp "target/$(cat /triple)/release/ulakd" /ulakd
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tmux \
@@ -15,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && mkdir /data && chown ulakd /data
 # The binary sits in a directory the ulakd user can write, so `ulakd update --apply` can replace it.
 RUN mkdir -p /opt/ulakd/bin && chown ulakd /opt/ulakd/bin
-COPY --from=build --chown=ulakd /src/target/release/ulakd /opt/ulakd/bin/ulakd
+COPY --from=build --chown=ulakd /ulakd /opt/ulakd/bin/ulakd
 ENV PATH=/opt/ulakd/bin:$PATH
 ENV ULAKD_DIR=/data
 # Self-update is off in containers (the image is the unit of upgrade); set 1 to turn on the auto loop.

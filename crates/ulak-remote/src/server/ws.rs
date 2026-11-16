@@ -31,6 +31,15 @@ pub(crate) async fn ui(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Cross-site WebSocket hijacking: a browser always sends Origin, and cookies ride along
+    // automatically, so a present Origin must be ours unless the caller brought a bearer token.
+    if let Some(o) = headers.get(axum::http::header::ORIGIN) {
+        let bearer = headers.contains_key(axum::http::header::AUTHORIZATION);
+        let ours = h.origin.get().map(|s| s.trim_end_matches('/'));
+        if !bearer && ours != o.to_str().ok() {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
     // A UI client cert or a passkey session; both get the same capabilities.
     match h.ui_caller(&p, &headers, q.as_deref()) {
         Ok(id) => {

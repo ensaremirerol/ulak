@@ -2,7 +2,6 @@
 use crate::{errors::ConfigError, guard::GuardConfig};
 use std::{
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 use ulak_proto::{EnrollResponse, NodeId};
@@ -53,12 +52,12 @@ pub fn save(
             .then_some(())
             .ok_or(e)
     })?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(key)?
-        .write_all(key_pem.as_bytes())?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    // 0600 on Unix. Windows has no mode bits: the key inherits the ACL of the per-user config dir.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(key)?.write_all(key_pem.as_bytes())?;
     Ok(())
 }
 

@@ -211,11 +211,20 @@ pub fn ui_ws_url(hub: &str) -> Result<String, ConfigError> {
     Ok(d.trim_end_matches("daemon").to_owned() + "ui")
 }
 
-/// `$ULAK_DIR`, else `$XDG_CONFIG_HOME/ulak`, else `~/.config/ulak`.
+/// `$ULAK_DIR`; else Windows `%APPDATA%\ulak`, macOS `~/Library/Application Support/ulak`,
+/// elsewhere `$XDG_CONFIG_HOME/ulak`, else `~/.config/ulak`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn config_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("ULAK_DIR") {
         return d.into();
+    }
+    #[cfg(windows)]
+    if let Some(d) = std::env::var_os("APPDATA") {
+        return PathBuf::from(d).join("ulak");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(h) = std::env::var_os("HOME") {
+        return PathBuf::from(h).join("Library/Application Support/ulak");
     }
     if let Some(d) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(d).join("ulak");

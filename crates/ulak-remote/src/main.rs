@@ -1,9 +1,9 @@
 //! `ulak-remote`: the hub binary. Config by env: ULAK_DIR (default ./ulak-data), ULAK_ADDR
 //! (default 0.0.0.0:8443), ULAK_SANS (comma list, default localhost,127.0.0.1),
-//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
+//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncBufReadExt;
-use ulak_remote::{Ca, DeviceKind, Hub, HubConfig, Store};
+use ulak_remote::{Ca, DeviceKind, Hub, HubConfig, Store, TrustedProxies};
 
 fn parse_kind(s: &str) -> Option<DeviceKind> {
     match s.trim() {
@@ -63,7 +63,18 @@ async fn main() -> anyhow::Result<()> {
     // unless ULAK_RP_ID / ULAK_ORIGIN say otherwise, run passkeys for http://localhost:<port>.
     let dev_http = env("ULAK_DEV_HTTP").as_deref() == Some("1");
     let dev_port: u16 = num("ULAK_DEV_HTTP_PORT")?.unwrap_or(8080);
+    let http_addr: Option<SocketAddr> = env("ULAK_HTTP_ADDR")
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("bad ULAK_HTTP_ADDR: {e}"))?;
+    let trusted = TrustedProxies::parse(&env("ULAK_TRUSTED_PROXIES").unwrap_or_default())
+        .map_err(|e| anyhow::anyhow!("bad ULAK_TRUSTED_PROXIES: {e}"))?;
+    if http_addr.is_some_and(|a| !a.ip().is_loopback()) && trusted.is_empty() {
+        eprintln!("WARNING: ULAK_HTTP_ADDR is not loopback and ULAK_TRUSTED_PROXIES is empty: X-Forwarded-For is ignored, so every client behind the proxy shares one enrollment rate limit. Set ULAK_TRUSTED_PROXIES to the proxy address.");
+    }
     let cfg = HubConfig {
+        trusted_proxies: trusted,
         ask_timeout: ms("ULAK_ASK_TIMEOUT_MS")?.unwrap_or(d.ask_timeout),
         nudge_tick: ms("ULAK_NUDGE_TICK_MS")?.unwrap_or(d.nudge_tick),
         nudge_every_ms: num("ULAK_NUDGE_EVERY_MS")?.unwrap_or(d.nudge_every_ms),
@@ -83,6 +94,17 @@ async fn main() -> anyhow::Result<()> {
     let hub = Hub::new(store, ca, &sans, cfg)?;
     let running = hub.bind(addr).await?;
     println!("ulak-remote listening on https://{}", running.local_addr());
+    let http = match http_addr {
+        Some(a) => {
+            let r = hub.bind_http(a).await?;
+            println!(
+                "ULAK_HTTP_ADDR: plain http://{} (behind a TLS-terminating proxy)",
+                r.local_addr()
+            );
+            Some(r)
+        }
+        None => None,
+    };
     let dev = if dev_http {
         let r = hub
             .bind_dev_http(SocketAddr::from(([127, 0, 0, 1], dev_port)))
@@ -124,6 +146,9 @@ async fn main() -> anyhow::Result<()> {
     });
     tokio::signal::ctrl_c().await?;
     running.abort();
+    if let Some(h) = http {
+        h.abort();
+    }
     if let Some(d) = dev {
         d.abort();
     }

@@ -155,11 +155,15 @@ pub fn tail_detail(out: &str) -> String {
 }
 
 fn in_path(bin: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let ok = |p: &Path| {
-        p.metadata()
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
+    #[cfg(unix)]
+    fn exec(m: &std::fs::Metadata) -> bool {
+        std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    fn exec(_: &std::fs::Metadata) -> bool {
+        true
+    }
+    let ok = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && exec(&m));
     if bin.contains('/') {
         return ok(Path::new(bin));
     }

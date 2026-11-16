@@ -1,13 +1,26 @@
-# ulak-remote (the hub) with the browser UI bundled. Build: docker build -f Dockerfile.hub -t ulak-hub .
-FROM rust:1.95-bookworm AS hub-build
+# ulak-remote (the hub) with the browser UI bundled (/app/web = ULAK_WEB_DIR). Multi-arch: amd64 + arm64. Build: docker build -f Dockerfile.hub -t ulak-hub .
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS hub-build
+ARG TARGETARCH
+# Cross-compile on the build host (never under QEMU). Builder is amd64; arm64 uses the cross gcc.
+RUN case "$TARGETARCH" in \
+      arm64) echo aarch64-unknown-linux-gnu > /triple \
+        && apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+        && rm -rf /var/lib/apt/lists/* ;; \
+      *) echo x86_64-unknown-linux-gnu > /triple ;; \
+    esac \
+ && rustup target add "$(cat /triple)"
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 WORKDIR /src
 COPY . .
 # .git is not in the build context; build.rs reads the sha from here.
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
-RUN cargo build --release -p ulak-remote
+RUN cargo build --release -p ulak-remote --target "$(cat /triple)" \
+ && cp "target/$(cat /triple)/release/ulak-remote" /ulak-remote
 
-FROM rust:1.95-bookworm AS web-build
+# The wasm bundle is platform independent: built once, on the build host.
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS web-build
 WORKDIR /src
 COPY . .
 RUN rustup target add wasm32-unknown-unknown \
@@ -19,10 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home-dir /data ulak \
  && mkdir /data && chown ulak /data
-COPY --from=hub-build /src/target/release/ulak-remote /usr/local/bin/ulak-remote
+COPY --from=hub-build /ulak-remote /usr/local/bin/ulak-remote
 COPY --from=web-build /web /app/web
 ENV ULAK_DIR=/data ULAK_WEB_DIR=/app/web ULAK_ADDR=0.0.0.0:8443
 USER ulak
 VOLUME /data
-EXPOSE 8443
+# 8443: mTLS + web. 8080: plain HTTP for a reverse proxy, only when ULAK_HTTP_ADDR=0.0.0.0:8080 is set.
+EXPOSE 8443 8080
 ENTRYPOINT ["ulak-remote"]

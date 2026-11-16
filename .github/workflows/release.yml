@@ -1,4 +1,5 @@
 # Release pipeline. NEVER RUN YET: it has only been reviewed by eye (no actionlint available when written).
+# Build jobs only compile and upload artifacts; ONE job (sign) holds the secret, writes SHA256SUMS and signs everything.
 # Needs the repo secret ULAK_RELEASE_SIGNING_KEY (see scripts/gen-release-key.sh) and a real
 # crates/ulakd/release-key.pub committed. Docker images get the version tag from docker.yml (same tag trigger).
 name: release
@@ -53,8 +54,72 @@ jobs:
           for bin in ulakd ulak-remote ulak; do
             tar -C "target/$TARGET/release" -czf "dist/$bin-$TARGET.tar.gz" "$bin"
           done
-          (cd dist && sha256sum ./*.tar.gz | sed 's# \./# #' > SHA256SUMS)
-          cat dist/SHA256SUMS
+          ls -l dist
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: dist-linux
+          path: dist/*
+          if-no-files-found: error
+  # Native UI for Windows and macOS. The hub and daemon stay Linux-only (tmux, /proc, Docker).
+  # Intel macOS is cross-compiled on the Apple Silicon runner: no dependency on a (retiring) Intel runner label.
+  # No tests here (no GPU); ci.yml runs `cargo check` and the lib tests on both OSes.
+  build-ui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.7.8
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p ulak --target "${{ matrix.target }}"
+      - name: Package (zip on Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/ulak.exe" -DestinationPath "dist/ulak-${{ matrix.target }}.zip"
+      - name: Package (tar.gz on macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/ulak-${{ matrix.target }}.tar.gz" ulak
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  # The only job that sees the signing secret.
+  sign:
+    needs: [build, build-ui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
       - name: Sign (ed25519, detached raw signatures)
         env:
           SIGNING_KEY: ${{ secrets.ULAK_RELEASE_SIGNING_KEY }}
@@ -79,7 +144,7 @@ jobs:
             [ "$DRY_RUN" = true ] || exit 1
           fi
           cd dist
-          for f in ./*.tar.gz SHA256SUMS; do
+          for f in ./*.tar.gz ./*.zip SHA256SUMS; do
             openssl pkeyutl -sign -rawin -inkey "$key" -in "$f" -out "$f.sig"
             openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/pub.pem" -in "$f" -sigfile "$f.sig"
           done
@@ -91,7 +156,7 @@ jobs:
           path: dist/*
           if-no-files-found: error
   publish:
-    needs: build
+    needs: sign
     if: github.event_name == 'push' || !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:

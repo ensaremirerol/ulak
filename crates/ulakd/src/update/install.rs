@@ -10,9 +10,30 @@ use crate::errors::UpdateError;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+/// Mode 0755 on Unix; self-update is Unix-only in practice (the daemon is Linux), a no-op elsewhere.
+#[cfg(unix)]
+fn make_exec(p: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755))
+}
+#[cfg(not(unix))]
+fn make_exec(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+trait ModeExec {
+    fn mode_exec(&mut self) -> &mut Self;
+}
+impl ModeExec for std::fs::OpenOptions {
+    fn mode_exec(&mut self) -> &mut Self {
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(self, 0o755);
+        self
+    }
+}
 
 pub const CONFIRM_AFTER_SECS: u64 = 30;
 /// A marker whose first run is older than this is stale (reboot, long outage): do not roll back.
@@ -64,13 +85,13 @@ pub fn install(
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o755)
+        .mode_exec()
         .open(&tmp)
         .map_err(not_writable)?;
     let res = (|| -> Result<(), UpdateError> {
         f.write_all(new_bin)?;
         f.sync_all()?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        make_exec(&tmp)?;
         let prev = prev_path(exe);
         let _ = std::fs::remove_file(&prev);
         std::fs::copy(exe, &prev)?;
@@ -118,7 +139,7 @@ pub fn startup(conf_dir: &Path, exe: &Path, now_ms: u64) -> Result<Startup, Upda
             if prev.exists() {
                 let tmp = exe.with_file_name("ulakd.restore");
                 std::fs::copy(&prev, &tmp)?;
-                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+                make_exec(&tmp)?;
                 std::fs::rename(&tmp, exe)?;
             }
             std::fs::write(conf_dir.join(SKIP), &m.to)?;
@@ -143,6 +164,7 @@ pub fn skipped(conf_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let d = tempfile::tempdir().unwrap();

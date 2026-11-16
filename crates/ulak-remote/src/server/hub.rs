@@ -2,7 +2,7 @@ use super::{mcp, web, ws};
 use crate::*;
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -73,6 +73,8 @@ pub struct HubConfig {
     pub cert_days: i64,
     /// `/renew` is accepted only when the current cert has at most this many days left.
     pub renew_window_days: i64,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (default none).
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl Default for HubConfig {
@@ -93,6 +95,7 @@ impl Default for HubConfig {
             web_dir: None,
             cert_days: 90,
             renew_window_days: 30,
+            trusted_proxies: TrustedProxies::default(),
             thresholds: Thresholds::default(),
         }
     }
@@ -117,6 +120,8 @@ pub struct Hub {
     mcp_url: OnceLock<String>,
     first_san: String,
     pub(crate) webauthn: OnceLock<webauthn_rs::Webauthn>,
+    /// The browser origin in effect (config or default); `/ws/ui` upgrades must match it.
+    pub(crate) origin: OnceLock<String>,
     /// Pending passkey ceremonies by challenge id (5 min, single use).
     pub(crate) challenges: web::Challenges<web::Challenge>,
     // ponytail: in-memory per-IP window; resets on restart.
@@ -196,6 +201,7 @@ impl Hub {
                 .cloned()
                 .unwrap_or_else(|| "localhost".into()),
             webauthn: OnceLock::new(),
+            origin: OnceLock::new(),
             challenges: web::Challenges::default(),
             enroll_hits: Mutex::default(),
             cfg,
@@ -376,12 +382,21 @@ impl Hub {
         }
     }
 
-    fn router(self: &Arc<Self>) -> Router {
-        Router::new()
-            .route("/enroll", post(enroll))
-            .route("/renew", post(renew))
+    /// `mtls`: the HTTPS listener, which also carries the client-cert-only routes.
+    fn router(self: &Arc<Self>, mtls: bool) -> Router {
+        // Without mTLS these answer 404 rather than falling through to the SPA index.
+        let r = if mtls {
+            Router::new()
+                .route("/renew", post(renew))
+                .route("/ws/daemon", get(ws::daemon))
+        } else {
+            let gone = || async { StatusCode::NOT_FOUND };
+            Router::new()
+                .route("/renew", axum::routing::any(gone))
+                .route("/ws/daemon", axum::routing::any(gone))
+        };
+        r.route("/enroll", post(enroll))
             .route("/mcp", post(mcp::handle))
-            .route("/ws/daemon", get(ws::daemon))
             .route("/ws/ui", get(ws::ui))
             .route("/auth/register/start", post(web::register_start))
             .route("/auth/register/finish", post(web::register_finish))
@@ -423,6 +438,7 @@ impl Hub {
                 p => format!("https://{}:{p}", self.first_san),
             });
         // A bad passkey config (e.g. an IP as rp id) must not stop the hub; passkey routes answer 503.
+        let _ = self.origin.set(origin.clone());
         let wa = webauthn_rs::prelude::Url::parse(&origin)
             .map_err(|e| e.to_string())
             .and_then(|o| {
@@ -437,7 +453,7 @@ impl Hub {
             Err(e) => eprintln!("passkeys disabled (rp_id {rp_id}, origin {origin}): {e}"),
         }
         let acceptor = TlsAcceptor::from(self.tls.clone());
-        let router = self.router();
+        let router = self.router(true);
         let accept = tokio::spawn(async move {
             loop {
                 let Ok((tcp, remote)) = listener.accept().await else {
@@ -491,9 +507,9 @@ impl Hub {
         })
     }
 
-    /// DEVELOPMENT ONLY: serves the same router over plain HTTP on a loopback address (so a
-    /// browser treats `http://localhost` as a trusted origin for WebAuthn without a CA).
-    /// Refuses non-loopback addresses. Peers show no client cert, so only sessions work.
+    /// DEVELOPMENT ONLY: serves the plain-HTTP router on a loopback address (so a browser treats
+    /// `http://localhost` as a trusted origin for WebAuthn without a CA). Refuses non-loopback
+    /// addresses. Peers show no client cert, so only sessions work.
     pub async fn bind_dev_http(self: &Arc<Self>, addr: SocketAddr) -> std::io::Result<Running> {
         if !addr.ip().is_loopback() {
             return Err(std::io::Error::new(
@@ -501,20 +517,44 @@ impl Hub {
                 "dev http binds loopback addresses only",
             ));
         }
+        let run = self.bind_http(addr).await?;
+        eprintln!("WARNING: plain HTTP dev listener on http://{} (ULAK_DEV_HTTP): no TLS, development only", run.addr);
+        Ok(run)
+    }
+
+    /// Plain HTTP for a TLS-terminating reverse proxy (ULAK_HTTP_ADDR). No mTLS routes
+    /// (`/ws/daemon`, `/renew` answer 404) and no client certs, so only sessions authenticate.
+    /// The client IP honours `X-Forwarded-For` only from `cfg.trusted_proxies`. Call after `bind`
+    /// so the passkey origin is known.
+    pub async fn bind_http(self: &Arc<Self>, addr: SocketAddr) -> std::io::Result<Running> {
         let listener = TcpListener::bind(addr).await?;
         let addr = listener.local_addr()?;
-        eprintln!("WARNING: plain HTTP dev listener on http://{addr} (ULAK_DEV_HTTP): no TLS, development only");
-        let router = self.router();
+        let router = self.router(false);
+        let hub = self.clone();
         let accept = tokio::spawn(async move {
             loop {
                 let Ok((tcp, remote)) = listener.accept().await else {
                     continue;
                 };
-                let app = router.clone().layer(Extension(Peer {
-                    ip: remote.ip(),
-                    cn: None,
-                    not_after_ms: None,
-                }));
+                let hub = hub.clone();
+                let app =
+                    router
+                        .clone()
+                        .layer(axum::middleware::map_request(move |mut req: Request| {
+                            let ip = hub.cfg.trusted_proxies.client_ip(
+                                remote.ip(),
+                                req.headers()
+                                    .get_all("x-forwarded-for")
+                                    .iter()
+                                    .filter_map(|v| v.to_str().ok()),
+                            );
+                            req.extensions_mut().insert(Peer {
+                                ip,
+                                cn: None,
+                                not_after_ms: None,
+                            });
+                            std::future::ready(req)
+                        }));
                 tokio::spawn(async move {
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(TokioIo::new(tcp), TowerToHyperService::new(app))

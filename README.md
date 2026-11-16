@@ -54,6 +54,8 @@ Browser on localhost without TLS (development only): add `ULAK_DEV_HTTP=1` to th
 | `ULAK_SANS` | hub | server certificate names (default `localhost,127.0.0.1`) |
 | `ULAK_MCP_URL` | hub | MCP URL handed to agents |
 | `ULAK_RP_ID`, `ULAK_ORIGIN` | hub | WebAuthn relying party id and origin (default: first non-IP SAN) |
+| `ULAK_HTTP_ADDR` | hub | optional plain-HTTP listener for a TLS-terminating reverse proxy, e.g. `0.0.0.0:8080` (off when unset); see [the hub README](crates/ulak-remote/README.md#behind-a-reverse-proxy) |
+| `ULAK_TRUSTED_PROXIES` | hub | comma list of proxy IPs/CIDRs whose `X-Forwarded-For` is believed (default none) |
 | `ULAK_WEB_DIR` | hub | folder with the web build, served at `/` |
 | `ULAK_BOOTSTRAP_OTP` | hub | `node`, `ui` or `browser`: print a one-time code at start |
 | `ULAK_DEV_HTTP`, `ULAK_DEV_HTTP_PORT` | hub | `1` = also plain HTTP on 127.0.0.1 (default port 8080); rp_id `localhost` |
@@ -62,6 +64,14 @@ Browser on localhost without TLS (development only): add `ULAK_DEV_HTTP=1` to th
 | `ULAKD_OTP`, `ULAKD_FINGERPRINT` | ulakd join | answer the prompts non-interactively |
 | `ULAK_OTP`, `ULAK_FINGERPRINT` | ulak join | same for the native UI |
 | `ULAK_AGENT_TOKEN` | agents | set by the hub for each spawned agent (do not set yourself) |
+
+## Docker images
+
+`ghcr.io/<owner>/ulak-hub` and `ghcr.io/<owner>/ulakd` are published by `.github/workflows/docker.yml` for `linux/amd64` and `linux/arm64` (tags `latest`, the version, the commit sha). The hub image has the web build in `/app/web` (the default `ULAK_WEB_DIR`), keeps its state in the volume `/data`, and exposes 8443 (mTLS and web) and 8080 (plain HTTP, only listening when `ULAK_HTTP_ADDR=0.0.0.0:8080` is set). Reverse-proxy setup: [hub README](crates/ulak-remote/README.md#behind-a-reverse-proxy).
+
+```
+docker run -d -v ulak-data:/data -p 8443:8443 -e ULAK_SANS=hub.example.org ghcr.io/<owner>/ulak-hub
+```
 
 ## Blockers
 
@@ -83,6 +93,20 @@ scripts/build-web.sh          # wasm build; open the result via the hub (see abo
 - Web build: no logout button (API exists), no session renewal, the token is kept in memory only.
 - Hub: SQLite called synchronously in handlers, static files have no gzip/Range, challenges are lost on restart.
 - Everything is one hub, one user: no accounts or per-device permissions.
+
+## Platforms and release assets
+
+| Component | Platforms |
+|---|---|
+| Hub (`ulak-remote`) | Linux, Docker (amd64, arm64) |
+| Daemon (`ulakd`) | Linux only (needs tmux and `/proc`); on Windows run it inside WSL |
+| UI (`ulak`) | Linux, macOS (Apple Silicon and Intel), Windows 10+ (x86_64), and the browser build |
+
+A `v*` tag publishes, each with a detached ed25519 `.sig` plus a signed `SHA256SUMS`: `ulakd-`, `ulak-remote-` and `ulak-x86_64-unknown-linux-gnu.tar.gz`; `ulak-aarch64-apple-darwin.tar.gz`; `ulak-x86_64-apple-darwin.tar.gz`; `ulak-x86_64-pc-windows-msvc.zip`.
+
+The UI keeps its enrolment in `$ULAK_DIR`, else `%APPDATA%\ulak` (Windows), `~/Library/Application Support/ulak` (macOS), `$XDG_CONFIG_HOME/ulak` or `~/.config/ulak` (Linux). The key file is mode 0600 on Unix; on Windows it relies on the ACL of the per-user `%APPDATA%` directory (no extra hardening).
+
+The binaries are not code-signed or notarized. macOS Gatekeeper quarantines downloaded files: run `xattr -d com.apple.quarantine ulak` once. Windows SmartScreen warns on first run ("More info", "Run anyway"). Verify downloads against the signed `SHA256SUMS`.
 
 ## Versions, updates, releases
 Every binary reports its version (`ulak-remote --version`; hub `GET /api/version`, UI socket `HubVersion`/`NodeVersion`). The UI can ask nodes to check for and install updates (`UiToHub::CheckUpdate`/`UpdateNode`). Releases are built, signed (ed25519) and published by `.github/workflows/release.yml` on a `v*` tag; one-time key setup is `scripts/gen-release-key.sh`; service install and update behaviour are in `deploy/README.md`. Contract details: PROGRESS.md, "Versions and updates".

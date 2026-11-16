@@ -206,6 +206,12 @@ pub fn hostname() -> String {
     ["/proc/sys/kernel/hostname", "/etc/hostname"]
         .iter()
         .find_map(|p| std::fs::read_to_string(p).ok())
+        // Windows/macOS have no such files: fall back to the environment.
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .ok()
+        })
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
