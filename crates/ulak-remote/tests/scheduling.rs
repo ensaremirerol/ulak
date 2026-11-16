@@ -1,5 +1,5 @@
 use ulak_proto::*;
-use ulak_remote::{pick_node, Registry, ScheduleError, Thresholds};
+use ulak_remote::{pick_node, pick_node_where, Registry, ScheduleError, Thresholds};
 
 fn node(id: &str, state: NodeState, cpu: f32, gpu: Option<f32>, at: u64) -> NodeInfo {
     node_load(id, state, 0.1, cpu, gpu, at)
@@ -133,5 +133,27 @@ fn high_load_average_does_not_block_an_idle_node_by_default() {
     assert_eq!(
         pick_node(&nodes, &SpawnTarget::Node(nid("n")), &d).unwrap(),
         nid("n")
+    );
+}
+
+#[test]
+fn auto_skips_blocked_nodes() {
+    let nodes = [
+        node("a", NodeState::Idle, 10.0, None, 0),
+        node("b", NodeState::Idle, 30.0, None, 0),
+    ];
+    let blocked = |n: &NodeId| n.as_str() == "a";
+    assert_eq!(
+        pick_node_where(&nodes, &SpawnTarget::Auto, &limits(), blocked).unwrap(),
+        nid("b")
+    );
+    assert_eq!(
+        pick_node_where(&nodes, &SpawnTarget::Auto, &limits(), |_| true),
+        Err(ScheduleError::NoEligibleNode)
+    );
+    // An explicit target is not rerouted.
+    assert_eq!(
+        pick_node_where(&nodes, &SpawnTarget::Node(nid("a")), &limits(), blocked),
+        Err(ScheduleError::NodeNotEligible(nid("a")))
     );
 }

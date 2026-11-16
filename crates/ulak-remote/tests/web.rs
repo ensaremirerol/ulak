@@ -347,6 +347,18 @@ async fn snapshot(w: &mut Ws) {
         decode::<HubToUi>(&t).unwrap(),
         HubToUi::Snapshot { .. }
     ));
+    let m = w.next().await.unwrap().unwrap();
+    let Message::Text(t) = m else { panic!("{m:?}") };
+    assert!(matches!(
+        decode::<HubToUi>(&t).unwrap(),
+        HubToUi::Blockers { .. }
+    ));
+    let m = w.next().await.unwrap().unwrap();
+    let Message::Text(t) = m else { panic!("{m:?}") };
+    assert!(matches!(
+        decode::<HubToUi>(&t).unwrap(),
+        HubToUi::HubVersion(_)
+    ));
 }
 
 #[tokio::test]

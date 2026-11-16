@@ -10,6 +10,9 @@ name = "ulakd"
 name = "ulakd"
 path = "src/main.rs"
 
+[features]
+test-key = []
+
 [dependencies]
 ulak-proto = { path = "../ulak-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync", "signal"] }
@@ -23,6 +26,14 @@ serde_json = "1"
 sha2 = "0.11.1"
 x509-parser = "0.18"
 rcgen = "0.14"
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
 
 [dev-dependencies]
+# Test builds trust a test key and allow http (see src/update/trust.rs); never in a normal build.
+ulakd = { path = ".", features = ["test-key"] }
+axum = "0.8"
+tempfile = "3"
 ulak-remote = { path = "../ulak-remote" }

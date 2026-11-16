@@ -31,6 +31,10 @@ pub enum AgentError {
     NotRunning(String),
     #[error("agent {0} already exists")]
     AlreadyExists(String),
+    #[error("agent is not installed: {0}")]
+    Install(String),
+    #[error(transparent)]
+    Proto(#[from] ProtoError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -98,4 +102,37 @@ pub enum JoinError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum UpdateError {
+    #[error("no release signing key configured; updates are disabled (run scripts/gen-release-key.sh, commit crates/ulakd/release-key.pub and rebuild)")]
+    NoKey,
+    #[error("bad update config: {0}")]
+    Config(String),
+    #[error("update server: {0}")]
+    Http(String),
+    #[error("bad release data: {0}")]
+    Release(String),
+    #[error("the release has no asset named {0}")]
+    NoAsset(String),
+    #[error("download larger than the {0} byte limit")]
+    TooLarge(u64),
+    #[error("download truncated: got {got} of {want} bytes")]
+    Truncated { got: u64, want: u64 },
+    #[error("signature check failed for {0}")]
+    BadSignature(String),
+    #[error("checksum mismatch for {0}")]
+    BadChecksum(String),
+    #[error("unsafe or unexpected archive: {0}")]
+    Archive(String),
+    #[error(
+        "cannot write to {0}: the daemon user needs write access to the directory of its binary"
+    )]
+    NotWritable(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

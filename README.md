@@ -63,6 +63,10 @@ Browser on localhost without TLS (development only): add `ULAK_DEV_HTTP=1` to th
 | `ULAK_OTP`, `ULAK_FINGERPRINT` | ulak join | same for the native UI |
 | `ULAK_AGENT_TOKEN` | agents | set by the hub for each spawned agent (do not set yourself) |
 
+## Blockers
+
+If an agent comes back asking the user to log in (or cannot be installed on a node), the hub raises a permanent blocker for that agent kind on that node. It shows in the UI until you mark it resolved, and no agent of that kind starts on that node meanwhile; automatic placement picks another node. Other nodes and other agent kinds are unaffected.
+
 ## Tests
 
 ```sh
@@ -79,3 +83,9 @@ scripts/build-web.sh          # wasm build; open the result via the hub (see abo
 - Web build: no logout button (API exists), no session renewal, the token is kept in memory only.
 - Hub: SQLite called synchronously in handlers, static files have no gzip/Range, challenges are lost on restart.
 - Everything is one hub, one user: no accounts or per-device permissions.
+
+## Versions, updates, releases
+Every binary reports its version (`ulak-remote --version`; hub `GET /api/version`, UI socket `HubVersion`/`NodeVersion`). The UI can ask nodes to check for and install updates (`UiToHub::CheckUpdate`/`UpdateNode`). Releases are built, signed (ed25519) and published by `.github/workflows/release.yml` on a `v*` tag; one-time key setup is `scripts/gen-release-key.sh`; service install and update behaviour are in `deploy/README.md`. Contract details: PROGRESS.md, "Versions and updates".
+
+## Agent install and login blockers (ulakd)
+`ulakd` reads `agents.json` from its config dir (created with defaults on first run). Per agent binary: a `check`, an optional `install` argv (run without a shell, only from this local file), and `login_patterns`. A missing agent is installed before it is spawned; if that fails, or the agent asks the user to log in, the hub shows a permanent blocker, further spawns of that profile on that node are refused, and the tmux session stays open so you can attach and log in. Resolve the blocker in the UI when done.

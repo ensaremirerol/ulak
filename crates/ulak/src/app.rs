@@ -10,7 +10,10 @@ use crate::{
 use rune::Waker;
 use rune::{TextEdit, Tx};
 use std::collections::BTreeMap;
-use ulak_proto::{AgentId, DeviceKind, NodeId, QuestionId, ThreadId, UiToHub};
+use ulak_proto::{
+    AgentId, AgentProfile, Blocker, BlockerId, DeviceKind, NodeId, NodeState, QuestionId, ThreadId,
+    UiToHub,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use ulakd::config::Identity;
 
@@ -87,6 +90,17 @@ impl SpawnUi {
         AgentId::new(t).err().map(|e| e.to_string())
     }
 
+    /// Key of the profile the form would spawn (`claude`, `claude@/dir`); None while invalid.
+    pub fn profile_key(&self) -> Option<String> {
+        let f = self.form();
+        let dir = Some(f.config_dir.trim()).filter(|d| !d.is_empty());
+        AgentProfile::new(f.binary.trim(), vec![], dir.map(Into::into))
+            .ok()?
+            .key()
+            .ok()
+            .map(|k| k.as_str().to_owned())
+    }
+
     fn clear(&mut self) {
         for e in [
             &mut self.binary,
@@ -117,6 +131,10 @@ pub struct App {
     pub revoke_armed: Option<NodeId>,
     /// Frames the user asked for while not connected; flushed after the next `Connected`.
     pub offline: Vec<UiToHub>,
+    /// Blocker whose "Mark resolved" was clicked once (second click confirms).
+    pub resolve_armed: Option<BlockerId>,
+    /// "Update" clicked once for this node (`Some(None)` = Update all); second click confirms.
+    pub update_armed: Option<Option<NodeId>>,
     /// Browser sign-in screen state (`web_login`); never visible in the native app.
     pub login: crate::web_login::Login,
 }
@@ -167,9 +185,70 @@ impl App {
         }
     }
 
+    /// The blocker that stops the current spawn form from starting (explicit node, or Auto
+    /// when every idle node is blocked); the hub refuses these too.
+    pub fn spawn_blocker(&self) -> Option<&Blocker> {
+        let key = self.spawn.profile_key()?;
+        match &self.spawn.node {
+            Some(n) => self.ui.blockers_for(Some(n), &key).first().copied(),
+            None => {
+                let idle = |b: &Blocker| {
+                    self.ui
+                        .nodes
+                        .iter()
+                        .any(|n| &n.id == b.node() && n.state == NodeState::Idle)
+                };
+                let all_blocked = self
+                    .ui
+                    .nodes
+                    .iter()
+                    .filter(|n| n.state == NodeState::Idle)
+                    .all(|n| !self.ui.blockers_for(Some(&n.id), &key).is_empty());
+                let any = self
+                    .ui
+                    .blockers_for(None, &key)
+                    .into_iter()
+                    .find(|b| idle(b));
+                if all_blocked {
+                    any
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// First click arms, second click on the same blocker sends `ResolveBlocker`.
+    pub fn resolve_click(&mut self, id: &BlockerId) {
+        if self.resolve_armed.as_ref() == Some(id) {
+            self.resolve_armed = None;
+            self.dispatch(Intent::ResolveBlocker { id: id.clone() });
+        } else {
+            self.resolve_armed = Some(id.clone());
+        }
+    }
+
+    /// Updating restarts the daemon: first click arms, second click on the same target sends.
+    pub fn update_click(&mut self, node: Option<NodeId>) {
+        if self.update_armed.as_ref() == Some(&node) {
+            self.update_armed = None;
+            self.dispatch(Intent::UpdateNode { node });
+        } else {
+            self.update_armed = Some(node);
+        }
+    }
+
     /// Send the spawn form. Invalid input sends nothing and sets `ui.last_error`.
     pub fn submit_spawn(&mut self) {
         self.ui.last_error = None;
+        if let Some(b) = self.spawn_blocker() {
+            self.ui.last_error = Some(format!(
+                "{} on {}: resolve it first",
+                crate::model::kind_title(b.kind()),
+                b.node().as_str()
+            ));
+            return;
+        }
         let form = self.spawn.form();
         self.dispatch(Intent::Spawn(form));
         if self.ui.last_error.is_none() {

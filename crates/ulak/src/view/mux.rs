@@ -40,6 +40,8 @@ fn status_dot(k: &Kit, st: Option<&AgentStatus>) -> (Color, &'static str) {
         Some(AgentStatus::Running) => (k.c.success.icon, "running"),
         Some(AgentStatus::Exited(_)) => (k.c.text_faint, "exited"),
         Some(AgentStatus::Failed) => (k.c.danger.icon, "failed"),
+        Some(AgentStatus::Installing) => (k.c.text_accent, "installing"),
+        Some(AgentStatus::NeedsLogin) => (k.c.danger.icon, "needs login"),
     }
 }
 

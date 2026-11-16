@@ -16,7 +16,13 @@ pub use enroll::{Enrolled, Enroller, OtpOffer};
 pub use errors::*;
 pub use passkeys::{PasskeyInfo, Passkeys, Sessions};
 pub use registry::Registry;
-pub use scheduler::{pick_node, Thresholds};
+pub use scheduler::{pick_node, pick_node_where, Thresholds};
 pub use server::{Hub, HubConfig, Running};
-pub use store::{Mailbox, Questions, Store};
+pub use store::{Blockers, Mailbox, Questions, Store};
 pub use tokens::AgentTokens;
+
+/// Version of this build: the package version plus the git sha embedded by build.rs.
+pub fn version_info() -> ulak_proto::VersionInfo {
+    ulak_proto::VersionInfo::current(env!("CARGO_PKG_VERSION"), env!("ULAK_GIT_SHA"))
+        .expect("package version and git sha are short printable strings")
+}

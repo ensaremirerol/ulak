@@ -20,3 +20,12 @@ A one-time code (8 chars, 5 min, single use, 3 wrong codes lock until a new one 
 - Admin (session or UI cert): `GET /api/devices`, `POST /api/devices/otp`, `POST /api/devices/{id}/revoke`, `GET /api/passkeys`, `POST /api/passkeys/{id}/revoke`.
 
 `HubConfig` also has `cert_days` (90) and `renew_window_days` (30) for tests/tuning.
+
+## Blockers
+
+A blocker is a permanent problem for one agent profile on one node (`Login`: the agent asked the user to log in; `Install`: the agent binary is missing and ulakd could not install it). Stored in the `blockers` table; never expires, is never nudged, survives restarts, and is only closed by the user (`UiToHub::ResolveBlocker`).
+
+- `/ws/daemon` `AgentBlocked{agent, profile, kind, detail}` is recorded under the daemon's own device id; a repeat for the same node+profile+kind only updates the detail.
+- `/ws/ui` sends `Snapshot`, then `Blockers{blockers}`; later `BlockerOpened` / `BlockerClosed{id}`.
+- `Spawn` for a blocked (node, profile) is refused with `Error`; `SpawnTarget::Auto` skips blocked nodes (`pick_node_where`).
+- Resolving sends `BlockerResolved{profile}` to the node and the constant nudge "Login finished. Please continue." to the blocked agent if connected.

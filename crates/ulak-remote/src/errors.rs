@@ -1,4 +1,4 @@
-use ulak_proto::{AgentId, MessageId, NodeId, ProtoError, QuestionId};
+use ulak_proto::{AgentId, BlockerId, MessageId, NodeId, ProtoError, QuestionId};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -18,6 +18,17 @@ pub enum QuestionError {
     NotFound(QuestionId),
     #[error("question {0:?} was already answered")]
     AlreadyAnswered(QuestionId),
+    #[error(transparent)]
+    Invalid(#[from] ProtoError),
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BlockerError {
+    #[error("blocker {0:?} not found or already resolved")]
+    NotFound(BlockerId),
     #[error(transparent)]
     Invalid(#[from] ProtoError),
     #[error(transparent)]
@@ -89,11 +100,17 @@ pub enum ServerError {
     #[error(transparent)]
     Mailbox(#[from] MailboxError),
     #[error(transparent)]
+    Blocker(#[from] BlockerError),
+    #[error("{0}")]
+    Blocked(String),
+    #[error(transparent)]
     Device(#[from] DeviceError),
     #[error("node {0:?} is not connected")]
     NodeOffline(NodeId),
     #[error("no connected node runs agent {0:?}")]
     AgentUnplaced(AgentId),
+    #[error("node {node} speaks protocol {got}, the hub needs at least {min}")]
+    DaemonTooOld { node: String, got: u32, min: u32 },
     #[error("hello names a different node than the client certificate")]
     SpoofedHello,
     #[error("bad arguments: {0}")]

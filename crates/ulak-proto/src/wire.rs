@@ -29,11 +29,29 @@ pub enum DaemonToHub {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
+    /// The agent cannot work until the user fixes something (login) or ulakd could not install it.
+    AgentBlocked {
+        agent: AgentId,
+        profile: ProfileKey,
+        kind: BlockerKind,
+        detail: String,
+    },
+    /// First thing a current daemon sends after connecting.
+    Version(VersionInfo),
+    UpdateStatus(UpdateState),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToDaemon {
+    /// Look for a newer release in the daemon's own configured repo; report via `UpdateStatus`.
+    CheckUpdate,
+    /// Download, verify, install and restart; the daemon decides what to fetch.
+    UpdateNow,
+    /// The user fixed the blocker for this profile; spawning is allowed again.
+    BlockerResolved {
+        profile: ProfileKey,
+    },
     Spawn(SpawnSpec),
     Kill {
         agent: AgentId,
@@ -85,6 +103,16 @@ pub enum UiToHub {
         id: NodeId,
     },
     ListDevices,
+    ResolveBlocker {
+        id: BlockerId,
+    },
+    /// `node: None` = every connected node.
+    CheckUpdate {
+        node: Option<NodeId>,
+    },
+    UpdateNode {
+        node: Option<NodeId>,
+    },
     /// Oldest first; `thread: None` means every thread.
     MailboxLog {
         thread: Option<ThreadId>,
@@ -98,6 +126,14 @@ pub enum HubToUi {
     Snapshot {
         nodes: Vec<NodeInfo>,
         questions: Vec<Question>,
+    },
+    /// Sent right after Snapshot: every open blocker.
+    Blockers {
+        blockers: Vec<Blocker>,
+    },
+    BlockerOpened(Blocker),
+    BlockerClosed {
+        id: BlockerId,
     },
     NodeUpdate(NodeInfo),
     QuestionOpened(Question),
@@ -126,6 +162,16 @@ pub enum HubToUi {
     },
     MailboxLog {
         messages: Vec<Message>,
+    },
+    /// Sent right after Blockers on connect.
+    HubVersion(VersionInfo),
+    NodeVersion {
+        node: NodeId,
+        info: VersionInfo,
+    },
+    UpdateStatus {
+        node: NodeId,
+        status: UpdateState,
     },
     Error {
         message: String,

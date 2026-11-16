@@ -105,6 +105,8 @@ pub struct Hub {
     enroller: Enroller,
     tls: Arc<ServerConfig>,
     pub(crate) daemons: Mutex<HashMap<NodeId, mpsc::UnboundedSender<HubToDaemon>>>,
+    /// Per connected node: reported version and last update state; dropped on disconnect.
+    pub(crate) versions: Mutex<HashMap<NodeId, NodeMeta>>,
     pub(crate) ui: broadcast::Sender<HubToUi>,
     pub(crate) answered: broadcast::Sender<QuestionId>,
     /// Device ids whose open sockets must close (revocation).
@@ -119,6 +121,12 @@ pub struct Hub {
     pub(crate) challenges: web::Challenges<web::Challenge>,
     // ponytail: in-memory per-IP window; resets on restart.
     enroll_hits: Mutex<HashMap<IpAddr, Vec<u64>>>,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct NodeMeta {
+    pub version: Option<VersionInfo>,
+    pub update: Option<UpdateState>,
 }
 
 /// Handle to the running server. Dropping it does not stop the hub; call `abort`.
@@ -173,6 +181,7 @@ impl Hub {
             registry: Registry::default(),
             tls: Arc::new(tls),
             daemons: Mutex::default(),
+            versions: Mutex::default(),
             ui: broadcast::channel(256).0,
             answered: broadcast::channel(64).0,
             kick: broadcast::channel(16).0,
@@ -379,6 +388,7 @@ impl Hub {
             .route("/auth/login/start", post(web::login_start))
             .route("/auth/login/finish", post(web::login_finish))
             .route("/auth/logout", post(web::logout))
+            .route("/api/version", get(web::version))
             .route("/api/devices", get(web::devices))
             .route("/api/devices/otp", post(web::device_otp))
             .route("/api/devices/{id}/revoke", post(web::device_revoke))

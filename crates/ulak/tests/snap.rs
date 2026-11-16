@@ -3,7 +3,16 @@ use std::process::Command;
 
 #[test]
 fn snap_writes_a_png_per_scene() {
-    for scene in ["mux", "questions", "spawn", "mailbox", "devices", "busy"] {
+    for scene in [
+        "mux",
+        "questions",
+        "spawn",
+        "mailbox",
+        "devices",
+        "updates",
+        "busy",
+        "blockers",
+    ] {
         let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("tests/snapshots/{scene}.png"));
         let _ = std::fs::remove_file(&out);

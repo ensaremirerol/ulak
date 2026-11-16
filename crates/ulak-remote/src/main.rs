@@ -28,6 +28,16 @@ fn print_otp(hub: &Hub, kind: DeviceKind) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|a| a == "--version") {
+        let v = ulak_remote::version_info();
+        println!(
+            "ulak-remote {} ({}) proto {}",
+            v.version(),
+            v.git(),
+            v.proto()
+        );
+        return Ok(());
+    }
     let env = |k: &str| std::env::var(k).ok();
     let dir = PathBuf::from(env("ULAK_DIR").unwrap_or_else(|| "ulak-data".into()));
     let addr: SocketAddr = env("ULAK_ADDR")

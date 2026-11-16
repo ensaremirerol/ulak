@@ -4,8 +4,9 @@ use crate::{
     errors::{AgentError, HubError},
     renew,
     telemetry::{Probe, Probed},
+    update::Updater,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::BoxFuture, stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     ClientConfig, RootCertStore,
@@ -26,8 +27,24 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, WebSocketStream,
 };
 use ulak_proto::{
-    decode, encode, AgentId, AgentStatus, DaemonToHub, HubToDaemon, NodeId, NodeInfo, SpawnSpec,
+    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, HubToDaemon, NodeId, NodeInfo,
+    ProfileKey, SpawnSpec,
 };
+
+/// Something the host wants the hub to hear about, outside of a command's own reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    Status {
+        agent: AgentId,
+        status: AgentStatus,
+    },
+    Blocked {
+        agent: AgentId,
+        profile: ProfileKey,
+        kind: BlockerKind,
+        detail: String,
+    },
+}
 
 /// What the hub loop needs from the agent runtime. `Tmux` is the real one.
 pub trait AgentHost: Send + Sync + 'static {
@@ -49,6 +66,12 @@ pub trait AgentHost: Send + Sync + 'static {
     fn next_prompt_failure(&self) -> impl Future<Output = Option<AgentId>> + Send {
         std::future::pending()
     }
+    /// Resolves with the next install/login event; hosts without any keep the default: pending.
+    fn next_event(&self) -> impl Future<Output = Option<HostEvent>> + Send {
+        std::future::pending()
+    }
+    /// The user resolved the blocker of `profile`: re-arm login detection.
+    fn blocker_resolved(&self, _profile: &ProfileKey) {}
     /// Pane bytes until the receiver is dropped.
     fn attach(
         &self,
@@ -146,9 +169,13 @@ struct Session<'a, H> {
     known: HashSet<AgentId>,
     attached: HashMap<AgentId, JoinHandle<()>>,
     out: mpsc::UnboundedSender<DaemonToHub>,
+    updates: Option<Arc<Updater>>,
 }
 
-impl<H: AgentHost> Session<'_, H> {
+/// Spawns in flight (an install can take minutes; the loop must keep serving meanwhile).
+type Spawns<'a> = FuturesUnordered<BoxFuture<'a, (AgentId, Result<(), AgentError>)>>;
+
+impl<'a, H: AgentHost> Session<'a, H> {
     fn hello(&self) -> DaemonToHub {
         let mut agents: Vec<AgentId> = self.known.iter().cloned().collect();
         agents.sort();
@@ -196,23 +223,21 @@ impl<H: AgentHost> Session<'_, H> {
         self.emit(self.hello()).await;
     }
 
-    async fn handle(&mut self, cmd: HubToDaemon) {
+    async fn handle(&mut self, cmd: HubToDaemon, spawns: &mut Spawns<'a>) {
         match cmd {
             HubToDaemon::Spawn(spec) => {
                 let id = spec.agent_id().clone();
                 self.status(&id, AgentStatus::Starting).await;
-                match self.host.spawn(&spec).await {
-                    Ok(()) => {
-                        self.known.insert(id.clone());
-                        self.status(&id, AgentStatus::Running).await;
-                        self.emit(self.hello()).await;
+                let host = self.host;
+                spawns.push(
+                    async move {
+                        let r = host.spawn(&spec).await;
+                        (spec.agent_id().clone(), r)
                     }
-                    Err(e) => {
-                        eprintln!("ulakd: spawn {id:?} failed: {e}");
-                        self.status(&id, AgentStatus::Failed).await;
-                    }
-                }
+                    .boxed(),
+                );
             }
+            HubToDaemon::BlockerResolved { profile } => self.host.blocker_resolved(&profile),
             HubToDaemon::Kill { agent } => match self.host.kill(&agent).await {
                 Ok(()) => {
                     self.forget(&agent);
@@ -258,6 +283,50 @@ impl<H: AgentHost> Session<'_, H> {
                     h.abort();
                 }
             }
+            HubToDaemon::CheckUpdate => {
+                if let Some(u) = self.updates.clone() {
+                    tokio::spawn(async move { u.on_check().await });
+                }
+            }
+            HubToDaemon::UpdateNow => {
+                if let Some(u) = self.updates.clone() {
+                    tokio::spawn(async move { u.on_update_now().await });
+                }
+            }
+        }
+    }
+
+    async fn spawned(&mut self, id: AgentId, r: Result<(), AgentError>) {
+        match r {
+            Ok(()) => {
+                self.known.insert(id.clone());
+                self.status(&id, AgentStatus::Running).await;
+                self.emit(self.hello()).await;
+            }
+            Err(e) => {
+                eprintln!("ulakd: spawn {id:?} failed: {e}");
+                self.status(&id, AgentStatus::Failed).await;
+            }
+        }
+    }
+
+    async fn host_event(&self, e: HostEvent) {
+        match e {
+            HostEvent::Status { agent, status } => self.status(&agent, status).await,
+            HostEvent::Blocked {
+                agent,
+                profile,
+                kind,
+                detail,
+            } => {
+                self.emit(DaemonToHub::AgentBlocked {
+                    agent,
+                    profile,
+                    kind,
+                    detail,
+                })
+                .await
+            }
         }
     }
 
@@ -301,6 +370,22 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     H: AgentHost,
 {
+    run_session_with(ws, cfg, host, probe, None).await
+}
+
+/// [`run_session`] with a self-updater: sends `Version` right after Hello, mirrors its
+/// `UpdateStatus` to the hub and handles `CheckUpdate` / `UpdateNow`.
+pub async fn run_session_with<S, H>(
+    ws: WebSocketStream<S>,
+    cfg: &SessionCfg,
+    host: &H,
+    probe: &SharedProbe,
+    updates: Option<Arc<Updater>>,
+) -> Result<(), HubError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    H: AgentHost,
+{
     let (mut sink, mut stream) = ws.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<DaemonToHub>();
     let known: HashSet<AgentId> = host.list().await.unwrap_or_default().into_iter().collect();
@@ -311,8 +396,21 @@ where
         known,
         attached: HashMap::new(),
         out,
+        updates: updates.clone(),
     };
+    let mut spawns = Spawns::new();
     sink.send(Message::text(encode(&s.hello())?)).await?;
+    let mut status_rx = updates.as_ref().map(|u| u.subscribe());
+    if let Some(u) = &updates {
+        sink.send(Message::text(encode(&DaemonToHub::Version(
+            u.info().clone(),
+        ))?))
+        .await?;
+    }
+    if let Some(Some(st)) = status_rx.as_mut().map(|r| r.borrow_and_update().clone()) {
+        sink.send(Message::text(encode(&DaemonToHub::UpdateStatus(st))?))
+            .await?;
+    }
     let mut tick = tokio::time::interval(cfg.heartbeat);
     tick.tick().await; // the first tick fires immediately; Hello already covered it
     let result = loop {
@@ -321,13 +419,26 @@ where
                 None | Some(Ok(Message::Close(_))) => break Ok(()),
                 Some(Err(e)) => break Err(e.into()),
                 Some(Ok(Message::Text(t))) => match decode::<HubToDaemon>(t.as_str()) {
-                    Ok(cmd) => s.handle(cmd).await,
+                    Ok(cmd) => s.handle(cmd, &mut spawns).await,
                     Err(e) => eprintln!("ulakd: bad hub frame: {e}"),
                 },
                 Some(Ok(_)) => {}
             },
             _ = tick.tick() => s.tick(probe).await,
             Some(id) = host.next_prompt_failure() => s.prompt_failed(&id).await,
+            Some(e) = host.next_event() => s.host_event(e).await,
+            Some((id, r)) = spawns.next() => s.spawned(id, r).await,
+            Some(()) = async {
+                match status_rx.as_mut() {
+                    Some(r) => r.changed().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let st = status_rx.as_mut().and_then(|r| r.borrow_and_update().clone());
+                if let Some(st) = st {
+                    s.emit(DaemonToHub::UpdateStatus(st)).await;
+                }
+            }
             Some(m) = out_rx.recv() => {
                 if let Err(e) = sink.send(Message::text(encode(&m)?)).await {
                     break Err(e.into());
@@ -349,7 +460,7 @@ pub async fn run_forever<H: AgentHost>(
     host: &H,
     probe: SharedProbe,
 ) -> Result<std::convert::Infallible, HubError> {
-    run_forever_in(id, None, hostname, heartbeat, host, probe).await
+    run_forever_in(id, None, hostname, heartbeat, host, probe, None).await
 }
 
 /// Like [`run_forever`]; with `dir` it also renews the certificate (at start and every
@@ -361,6 +472,7 @@ pub async fn run_forever_in<H: AgentHost>(
     heartbeat: Duration,
     host: &H,
     probe: SharedProbe,
+    updates: Option<Arc<Updater>>,
 ) -> Result<std::convert::Infallible, HubError> {
     let url = daemon_ws_url(&id.hub_url)?;
     let cfg = SessionCfg {
@@ -393,7 +505,7 @@ pub async fn run_forever_in<H: AgentHost>(
         match connect(&url, tls).await {
             Ok(ws) => {
                 let started = Instant::now();
-                let session = run_session(ws, &cfg, host, &probe);
+                let session = run_session_with(ws, &cfg, host, &probe, updates.clone());
                 tokio::pin!(session);
                 let r = loop {
                     tokio::select! {

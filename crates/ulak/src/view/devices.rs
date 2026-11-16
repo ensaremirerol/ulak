@@ -207,6 +207,7 @@ pub fn view(s: &App, k: &Kit) -> El {
     for d in &s.ui.devices {
         c = c.child(device_row(s, k, d));
     }
+    c = c.child(super::nodes::view(s, k));
     c.scroll(ScrollSpec {
         stick_bottom: false,
     })

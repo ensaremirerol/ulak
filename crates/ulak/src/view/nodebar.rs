@@ -58,7 +58,7 @@ fn bar(k: &Kit, key: String, name: &str, pct: f32) -> El {
         )
 }
 
-fn chip(k: &Kit, n: &NodeInfo) -> El {
+fn chip(s: &App, k: &Kit, n: &NodeInfo) -> El {
     let id = n.id.as_str();
     let colors = match n.state {
         NodeState::Idle => &k.c.success,
@@ -73,7 +73,7 @@ fn chip(k: &Kit, n: &NodeInfo) -> El {
             bars = bars.child(bar(k, format!("node-{id}-gpu"), "GPU", g));
         }
     }
-    col()
+    let mut c = col()
         .key(format!("node-{id}"))
         .gap(4.0)
         .padding(8.0)
@@ -97,7 +97,27 @@ fn chip(k: &Kit, n: &NodeInfo) -> El {
                         .color(k.c.text_muted),
                 ),
         )
-        .child(bars)
+        .child(bars);
+    if s.ui
+        .updates
+        .get(&n.id)
+        .and_then(crate::model::available)
+        .is_some()
+    {
+        c = c.child(
+            row().child(pill(k, "update".into(), &k.c.info).key(format!("node-{id}-update"))),
+        );
+    }
+    let nb = s.ui.blockers.iter().filter(|b| b.node() == &n.id).count();
+    if nb > 0 {
+        c = c.child(
+            row().child(
+                pill(k, format!("! {}", plural(nb, "blocker")), &k.c.warning)
+                    .key(format!("node-{id}-blocker")),
+            ),
+        );
+    }
+    c
 }
 
 pub fn view(s: &App, k: &Kit) -> El {
@@ -106,7 +126,7 @@ pub fn view(s: &App, k: &Kit) -> El {
         r = r.child(text("No nodes yet").font(k.ty.small).color(k.c.text_faint));
     }
     for n in &s.ui.nodes {
-        r = r.child(chip(k, n));
+        r = r.child(chip(s, k, n));
     }
     r
 }

@@ -285,6 +285,15 @@ pub(crate) async fn logout(
 
 // ---- admin API ----
 
+pub(crate) async fn version(
+    State(h): State<Arc<Hub>>,
+    Extension(p): Extension<Peer>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    h.ui_caller(&p, &headers, None)?;
+    Ok(Json(crate::version_info()).into_response())
+}
+
 pub(crate) async fn devices(
     State(h): State<Arc<Hub>>,
     Extension(p): Extension<Peer>,

@@ -2,10 +2,13 @@
 //! Hub `Error` frames (and local validation errors) show inline via `ui.last_error`; the form
 //! clears when the agent appears (`App::settle_spawn`).
 use super::nodebar::state_label;
-use crate::app::{App, PROFILES};
+use crate::{
+    app::{App, PROFILES},
+    model::kind_title,
+};
 use rune::{col, row, text, El, ScrollSpec};
 use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl, TextArea, TextInput};
-use ulak_proto::{NodeInfo, NodeState};
+use ulak_proto::{BlockerKind, NodeInfo, NodeState};
 
 fn field(k: &Kit, label: &str, input: El) -> El {
     col()
@@ -19,10 +22,21 @@ fn target_button(k: &Kit, s: &App, n: Option<&NodeInfo>) -> El {
     let (key, label) = match n {
         None => ("target-auto".to_owned(), "Auto".to_owned()),
         Some(n) => {
-            let note = match n.state {
+            let mut note = match n.state {
                 NodeState::Idle => String::new(),
                 _ => format!(" - not eligible: {}", state_label(&n.state)),
             };
+            if let Some(b) = s.spawn.profile_key().and_then(|key| {
+                s.ui.blockers_for(Some(&n.id), &key)
+                    .first()
+                    .map(|b| (*b).clone())
+            }) {
+                let name = b.profile().as_str().split('@').next().unwrap_or_default();
+                note = match b.kind() {
+                    BlockerKind::Login => format!(" - login required for {name}"),
+                    BlockerKind::Install => format!(" - install failed for {name}"),
+                };
+            }
             (
                 format!("target-{}", n.id.as_str()),
                 format!("{}{note}", n.hostname),
@@ -124,6 +138,41 @@ pub fn view(s: &App, k: &Kit) -> El {
         targets = targets.child(target_button(k, s, Some(n)));
     }
     g = g.child(field(k, "Target node", targets));
+    let blocker = sp.profile_key().and_then(|_| s.spawn_blocker());
+    if let Some(b) = blocker {
+        g = g.child(
+            text(format!(
+                "{} on {} ({}): {} Resolve it in the Questions tab first.",
+                kind_title(b.kind()),
+                b.node().as_str(),
+                b.profile().as_str(),
+                b.detail().chars().take(120).collect::<String>()
+            ))
+            .key("spawn-blocked")
+            .wrap()
+            .font(k.ty.ui)
+            .color(k.c.warning.fg),
+        );
+    } else if let (None, Some(key)) = (&sp.node, sp.profile_key()) {
+        let mut ex: Vec<&str> =
+            s.ui.blockers_for(None, &key)
+                .into_iter()
+                .map(|b| b.node().as_str())
+                .collect();
+        ex.dedup();
+        if !ex.is_empty() {
+            g = g.child(
+                text(format!(
+                    "Auto skips {} because of blockers for {key}.",
+                    ex.join(", ")
+                ))
+                .key("spawn-auto-note")
+                .wrap()
+                .font(k.ty.small)
+                .color(k.c.warning.fg),
+            );
+        }
+    }
     if let Some(e) = &s.ui.last_error {
         g = g.child(
             text(e.clone())
@@ -141,6 +190,7 @@ pub fn view(s: &App, k: &Kit) -> El {
                 "Spawn"
             })
             .variant(ButtonVariant::Submit)
+            .disabled(blocker.is_some())
             .on_press(|s: &mut App| s.submit_spawn())
             .build(k)
             .key("spawn-submit"),

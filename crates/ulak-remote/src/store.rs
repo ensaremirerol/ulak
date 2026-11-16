@@ -1,4 +1,4 @@
-use crate::{MailboxError, QuestionError};
+use crate::{BlockerError, MailboxError, QuestionError};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::{path::Path, sync::Mutex};
 use ulak_proto::*;
@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS questions(
   id TEXT PRIMARY KEY, from_agent TEXT NOT NULL, text TEXT NOT NULL, at_ms INTEGER NOT NULL,
   answer TEXT, answered_ms INTEGER, collected_ms INTEGER,
   nudges INTEGER NOT NULL DEFAULT 0, last_nudge_ms INTEGER);
+CREATE TABLE IF NOT EXISTS blockers(
+  id TEXT PRIMARY KEY, node TEXT NOT NULL, profile TEXT NOT NULL, kind INTEGER NOT NULL,
+  agent TEXT, detail TEXT NOT NULL, at_ms INTEGER NOT NULL, resolved_ms INTEGER);
 CREATE TABLE IF NOT EXISTS devices(
   id TEXT PRIMARY KEY, kind INTEGER NOT NULL, hostname TEXT NOT NULL, public_key TEXT NOT NULL,
   created_ms INTEGER NOT NULL, revoked_ms INTEGER, renewed_ms INTEGER);
@@ -87,6 +90,29 @@ pub trait Questions {
     fn record_nudge(&self, id: &QuestionId, now_ms: u64) -> Result<(), QuestionError>;
     /// The agent that asked, so only it can collect the answer.
     fn asker(&self, id: &QuestionId) -> Result<AgentId, QuestionError>;
+}
+
+/// Permanent: never expires, never nudged, survives restarts until the user resolves it.
+pub trait Blockers {
+    /// Dedupes on unresolved node+profile+kind: the existing row gets the new detail.
+    /// Returns the blocker and whether it is new.
+    fn open(
+        &self,
+        node: &NodeId,
+        profile: &ProfileKey,
+        kind: BlockerKind,
+        agent: Option<&AgentId>,
+        detail: String,
+        now_ms: u64,
+    ) -> Result<(Blocker, bool), BlockerError>;
+    /// Returns the resolved blocker; `NotFound` if unknown or already resolved.
+    fn resolve(&self, id: &BlockerId, now_ms: u64) -> Result<Blocker, BlockerError>;
+    fn list_open(&self) -> Result<Vec<Blocker>, BlockerError>;
+    fn is_blocked(
+        &self,
+        node: &NodeId,
+        profile: &ProfileKey,
+    ) -> Result<Option<Blocker>, BlockerError>;
 }
 
 const MSG_COLS: &str = "id, from_agent, to_agent, thread, payload, status, at_ms";
@@ -322,5 +348,150 @@ impl Questions for Store {
             0 => Err(QuestionError::NotFound(id.clone())),
             _ => Ok(()),
         }
+    }
+}
+
+const BLK_COLS: &str = "id, node, profile, kind, agent, detail, at_ms";
+
+fn blocker_row(r: &Row) -> rusqlite::Result<Result<Blocker, ProtoError>> {
+    let (id, node, profile, kind, agent, detail, at): (
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        String,
+        i64,
+    ) = (
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+    );
+    Ok((|| {
+        Ok(Blocker::new(
+            BlockerId::new(&id)?,
+            NodeId::new(&node)?,
+            ProfileKey::new(&profile)?,
+            if kind == 0 {
+                BlockerKind::Login
+            } else {
+                BlockerKind::Install
+            },
+            agent.map(|a| AgentId::new(&a)).transpose()?,
+            detail,
+            at as u64,
+        ))
+    })())
+}
+
+fn blockers(
+    c: &Connection,
+    sql: &str,
+    args: impl rusqlite::Params,
+) -> Result<Vec<Blocker>, BlockerError> {
+    let rows = c
+        .prepare(sql)?
+        .query_map(args, blocker_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().collect::<Result<_, _>>()?)
+}
+
+impl Blockers for Store {
+    fn open(
+        &self,
+        node: &NodeId,
+        profile: &ProfileKey,
+        kind: BlockerKind,
+        agent: Option<&AgentId>,
+        detail: String,
+        now_ms: u64,
+    ) -> Result<(Blocker, bool), BlockerError> {
+        let c = self.conn();
+        let k = kind as i64;
+        let find = format!(
+            "SELECT {BLK_COLS} FROM blockers WHERE node=?1 AND profile=?2 AND kind=?3 AND resolved_ms IS NULL"
+        );
+        let key = params![node.as_str(), profile.as_str(), k];
+        if let Some(old) = blockers(&c, &find, key)?.pop() {
+            let fresh = Blocker::new(
+                old.id().clone(),
+                node.clone(),
+                profile.clone(),
+                kind,
+                old.agent().cloned(),
+                detail,
+                old.at_ms(),
+            );
+            c.execute(
+                "UPDATE blockers SET detail=?2 WHERE id=?1",
+                params![fresh.id().as_str(), fresh.detail()],
+            )?;
+            return Ok((fresh, false));
+        }
+        let b = Blocker::new(
+            BlockerId::new(&uuid::Uuid::now_v7().to_string())?,
+            node.clone(),
+            profile.clone(),
+            kind,
+            agent.cloned(),
+            detail,
+            now_ms,
+        );
+        c.execute(
+            "INSERT INTO blockers(id, node, profile, kind, agent, detail, at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                b.id().as_str(),
+                node.as_str(),
+                profile.as_str(),
+                k,
+                agent.map(|a| a.as_str()),
+                b.detail(),
+                now_ms as i64
+            ],
+        )?;
+        Ok((b, true))
+    }
+
+    fn resolve(&self, id: &BlockerId, now_ms: u64) -> Result<Blocker, BlockerError> {
+        let c = self.conn();
+        let b = blockers(
+            &c,
+            &format!("SELECT {BLK_COLS} FROM blockers WHERE id=?1 AND resolved_ms IS NULL"),
+            [id.as_str()],
+        )?
+        .pop()
+        .ok_or_else(|| BlockerError::NotFound(id.clone()))?;
+        c.execute(
+            "UPDATE blockers SET resolved_ms=?2 WHERE id=?1",
+            params![id.as_str(), now_ms as i64],
+        )?;
+        Ok(b)
+    }
+
+    fn list_open(&self) -> Result<Vec<Blocker>, BlockerError> {
+        blockers(
+            &self.conn(),
+            &format!(
+                "SELECT {BLK_COLS} FROM blockers WHERE resolved_ms IS NULL ORDER BY at_ms, id"
+            ),
+            [],
+        )
+    }
+
+    fn is_blocked(
+        &self,
+        node: &NodeId,
+        profile: &ProfileKey,
+    ) -> Result<Option<Blocker>, BlockerError> {
+        Ok(blockers(
+            &self.conn(),
+            &format!("SELECT {BLK_COLS} FROM blockers WHERE node=?1 AND profile=?2 AND resolved_ms IS NULL ORDER BY at_ms LIMIT 1"),
+            params![node.as_str(), profile.as_str()],
+        )?
+        .pop())
     }
 }

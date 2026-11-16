@@ -38,16 +38,27 @@ pub fn pick_node(
     target: &SpawnTarget,
     limits: &Thresholds,
 ) -> Result<NodeId, ScheduleError> {
+    pick_node_where(nodes, target, limits, |_| false)
+}
+
+/// Like `pick_node`, but `Auto` skips nodes for which `blocked` is true; an explicit node that
+/// is blocked is `NodeNotEligible`.
+pub fn pick_node_where(
+    nodes: &[NodeInfo],
+    target: &SpawnTarget,
+    limits: &Thresholds,
+    blocked: impl Fn(&NodeId) -> bool,
+) -> Result<NodeId, ScheduleError> {
     match target {
         SpawnTarget::Auto => nodes
             .iter()
-            .filter(|n| limits.allows(n))
+            .filter(|n| limits.allows(n) && !blocked(&n.id))
             .min_by(|a, b| a.telemetry.cpu_pct().total_cmp(&b.telemetry.cpu_pct()))
             .map(|n| n.id.clone())
             .ok_or(ScheduleError::NoEligibleNode),
         SpawnTarget::Node(id) => match nodes.iter().find(|n| &n.id == id) {
             None => Err(ScheduleError::UnknownNode(id.clone())),
-            Some(n) if limits.allows(n) => Ok(id.clone()),
+            Some(n) if limits.allows(n) && !blocked(&n.id) => Ok(id.clone()),
             Some(_) => Err(ScheduleError::NodeNotEligible(id.clone())),
         },
     }

@@ -21,9 +21,12 @@ struct Fx {
 
 async fn start(cfg: HubConfig) -> Fx {
     let dir = std::env::temp_dir().join(format!("ulak-hub-{}", uuid::Uuid::now_v7()));
-    let ca = Ca::load_or_create(&dir).unwrap();
+    start_in(&dir, Arc::new(Store::open_in_memory().unwrap()), cfg).await
+}
+
+async fn start_in(dir: &std::path::Path, store: Arc<Store>, cfg: HubConfig) -> Fx {
+    let ca = Ca::load_or_create(dir).unwrap();
     let ca_pem = ca.cert_pem().to_owned();
-    let store = Arc::new(Store::open_in_memory().unwrap());
     let hub = Hub::new(store, ca, &["127.0.0.1".into(), "localhost".into()], cfg).unwrap();
     let run = hub.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     Fx { hub, run, ca_pem }
@@ -206,6 +209,14 @@ async fn ui(fx: &Fx) -> Ws {
     assert!(matches!(
         recv::<HubToUi>(&mut ws).await,
         HubToUi::Snapshot { .. }
+    ));
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Blockers { .. }
+    ));
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::HubVersion(_)
     ));
     ws
 }
@@ -980,4 +991,523 @@ async fn failed_ui_requests_answer_with_an_error() {
         send(&mut u, &m).await;
         assert!(!next_error(&mut u).await.is_empty(), "{m:?}");
     }
+}
+
+// ---- blockers ----
+
+fn spec_of(a: &AgentId, binary: &str, cfg_dir: Option<&str>) -> SpawnSpec {
+    let p = AgentProfile::new(binary, vec![], cfg_dir.map(Into::into)).unwrap();
+    SpawnSpec::new(a.clone(), p, "/tmp".into(), "go".into(), Default::default()).unwrap()
+}
+
+fn claude() -> ProfileKey {
+    AgentProfile::new("claude", vec![], None)
+        .unwrap()
+        .key()
+        .unwrap()
+}
+
+async fn block(d: &mut Ws, a: &AgentId, kind: BlockerKind, detail: &str) {
+    send(
+        d,
+        &DaemonToHub::AgentBlocked {
+            agent: a.clone(),
+            profile: claude(),
+            kind,
+            detail: detail.into(),
+        },
+    )
+    .await;
+}
+
+async fn opened(u: &mut Ws) -> Blocker {
+    until(u, |m| match m {
+        HubToUi::BlockerOpened(b) => Some(b),
+        _ => None,
+    })
+    .await
+}
+
+async fn fresh_ui_blockers(fx: &Fx) -> Vec<Blocker> {
+    let id = enroll_as(fx, DeviceKind::Ui, "phone").await;
+    let mut ws = connect(fx, "/ws/ui", Some(&id)).await.unwrap();
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Snapshot { .. }
+    ));
+    match recv::<HubToUi>(&mut ws).await {
+        HubToUi::Blockers { blockers } => blockers,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn blocker_opens_once_and_is_listed_for_new_uis() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    assert!(fresh_ui_blockers(&fx).await.is_empty());
+    let a = agent("a-1");
+    let (id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![a.clone()]).await;
+    block(&mut d, &a, BlockerKind::Login, "log in\x1b[0m").await;
+    let b = opened(&mut u).await;
+    assert_eq!(
+        (b.node(), b.profile(), b.kind()),
+        (&id.id, &claude(), BlockerKind::Login)
+    );
+    assert_eq!(b.detail(), "log in[0m");
+    // Duplicate: no second BlockerOpened, still one row, detail updated.
+    block(&mut d, &a, BlockerKind::Login, "again").await;
+    block(&mut d, &a, BlockerKind::Install, "other kind").await;
+    let b2 = opened(&mut u).await;
+    assert_eq!(b2.kind(), BlockerKind::Install);
+    let list = fresh_ui_blockers(&fx).await;
+    assert_eq!(list.len(), 2);
+    let login = list
+        .iter()
+        .find(|b| b.kind() == BlockerKind::Login)
+        .unwrap();
+    assert_eq!((login.id(), login.detail()), (b.id(), "again"));
+}
+
+#[tokio::test]
+async fn blocked_profile_cannot_spawn_but_other_profile_and_node_can() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let a = agent("a-1");
+    let (n1, mut d1) = daemon(&fx, "one", NodeState::Idle, vec![a.clone()]).await;
+    let (n2, mut d2) = daemon(&fx, "two", NodeState::Idle, vec![]).await;
+    block(&mut d1, &a, BlockerKind::Login, "log in").await;
+    until(&mut u, |m| {
+        matches!(m, HubToUi::BlockerOpened(_)).then_some(())
+    })
+    .await;
+    let s = |t: SpawnTarget, sp| UiToHub::Spawn {
+        target: t,
+        spec: sp,
+    };
+    send(
+        &mut u,
+        &s(SpawnTarget::Node(n1.id.clone()), spec(&agent("a-2"))),
+    )
+    .await;
+    let msg = next_error(&mut u).await;
+    assert!(msg.contains("claude") && msg.contains("log in"), "{msg}");
+    // Other binary, other config dir, other node: fine.
+    send(
+        &mut u,
+        &s(
+            SpawnTarget::Node(n1.id.clone()),
+            spec_of(&agent("a-3"), "codex", None),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d1).await,
+        HubToDaemon::Spawn(_)
+    ));
+    send(
+        &mut u,
+        &s(
+            SpawnTarget::Node(n1.id.clone()),
+            spec_of(&agent("a-4"), "claude", Some("/h/.b")),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d1).await,
+        HubToDaemon::Spawn(_)
+    ));
+    send(
+        &mut u,
+        &s(SpawnTarget::Node(n2.id.clone()), spec(&agent("a-5"))),
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d2).await,
+        HubToDaemon::Spawn(_)
+    ));
+}
+
+#[tokio::test]
+async fn auto_skips_blocked_nodes_and_errors_when_all_are_blocked() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let a = agent("a-1");
+    let (_n1, mut d1) = daemon(&fx, "one", NodeState::Idle, vec![a.clone()]).await;
+    let (n2, mut d2) = daemon(&fx, "two", NodeState::Idle, vec![]).await;
+    block(&mut d1, &a, BlockerKind::Login, "log in").await;
+    until(&mut u, |m| {
+        matches!(m, HubToUi::BlockerOpened(_)).then_some(())
+    })
+    .await;
+    for i in 0..2 {
+        send(
+            &mut u,
+            &UiToHub::Spawn {
+                target: SpawnTarget::Auto,
+                spec: spec(&agent(&format!("b-{i}"))),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv::<HubToDaemon>(&mut d2).await,
+            HubToDaemon::Spawn(_)
+        ));
+    }
+    // Block the second node too (an agent id the hub knows on that node).
+    let b = agent("b-0");
+    send(
+        &mut d2,
+        &DaemonToHub::Hello {
+            node: node_info(&n2.id, NodeState::Idle, vec![b.clone()]),
+        },
+    )
+    .await;
+    block(&mut d2, &b, BlockerKind::Login, "log in").await;
+    until(&mut u, |m| {
+        matches!(m, HubToUi::BlockerOpened(_)).then_some(())
+    })
+    .await;
+    send(
+        &mut u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Auto,
+            spec: spec(&agent("c-1")),
+        },
+    )
+    .await;
+    let msg = next_error(&mut u).await;
+    assert!(msg.contains("blocked"), "{msg}");
+}
+
+#[tokio::test]
+async fn resolving_unblocks_notifies_daemon_and_agent() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let a = agent("a-1");
+    let (n1, mut d1) = daemon(&fx, "one", NodeState::Idle, vec![a.clone()]).await;
+    block(&mut d1, &a, BlockerKind::Login, "log in").await;
+    let b = opened(&mut u).await;
+    send(
+        &mut u,
+        &UiToHub::ResolveBlocker {
+            id: BlockerId::new("nope").unwrap(),
+        },
+    )
+    .await;
+    assert!(!next_error(&mut u).await.is_empty());
+    send(&mut u, &UiToHub::ResolveBlocker { id: b.id().clone() }).await;
+    until(&mut u, |m| {
+        matches!(m, HubToUi::BlockerClosed { id } if &id == b.id()).then_some(())
+    })
+    .await;
+    let mut got = [
+        recv::<HubToDaemon>(&mut d1).await,
+        recv::<HubToDaemon>(&mut d1).await,
+    ];
+    got.sort_by_key(|m| matches!(m, HubToDaemon::Nudge { .. }));
+    assert_eq!(got[0], HubToDaemon::BlockerResolved { profile: claude() });
+    assert!(
+        matches!(&got[1], HubToDaemon::Nudge { agent, text } if agent == &a && text == "Login finished. Please continue.")
+    );
+    send(
+        &mut u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Node(n1.id),
+            spec: spec(&agent("a-2")),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d1).await,
+        HubToDaemon::Spawn(_)
+    ));
+    assert!(fresh_ui_blockers(&fx).await.is_empty());
+}
+
+#[tokio::test]
+async fn blocker_survives_a_hub_restart() {
+    let dir = std::env::temp_dir().join(format!("ulak-hub-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = agent("a-1");
+    let fx = start_in(
+        &dir,
+        Arc::new(Store::open(&dir.join("hub.db")).unwrap()),
+        fast(),
+    )
+    .await;
+    let mut u = ui(&fx).await;
+    let (_n, mut d) = daemon(&fx, "one", NodeState::Idle, vec![a.clone()]).await;
+    block(&mut d, &a, BlockerKind::Login, "log in").await;
+    let b = opened(&mut u).await;
+    drop(fx);
+    let fx = start_in(
+        &dir,
+        Arc::new(Store::open(&dir.join("hub.db")).unwrap()),
+        fast(),
+    )
+    .await;
+    let list = fresh_ui_blockers(&fx).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id(), b.id());
+}
+
+#[tokio::test]
+async fn daemon_cannot_open_a_blocker_for_another_node() {
+    // The payload has no node field; the blocker is always filed under the daemon's own id.
+    let fx = start(fast()).await;
+    let (n1, mut d1) = daemon(&fx, "one", NodeState::Idle, vec![]).await;
+    let (_n2, _d2) = daemon(&fx, "two", NodeState::Idle, vec![]).await;
+    let mut u = ui(&fx).await;
+    block(&mut d1, &agent("x-1"), BlockerKind::Install, "no claude").await;
+    until(&mut u, |m| {
+        matches!(m, HubToUi::BlockerOpened(_)).then_some(())
+    })
+    .await;
+    let list = fresh_ui_blockers(&fx).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].node(), &n1.id);
+}
+
+// ---- versions and updates ----
+
+fn dinfo(proto: u32) -> VersionInfo {
+    VersionInfo::new("0.0.9", "deadbee", proto, "linux", "x86_64").unwrap()
+}
+
+/// A fresh UI's connect burst: Snapshot, Blockers, HubVersion, then per-node frames until `n` arrive.
+async fn fresh_ui_versions(fx: &Fx, n: usize) -> (VersionInfo, Vec<HubToUi>) {
+    let id = enroll_as(fx, DeviceKind::Ui, "phone").await;
+    let mut ws = connect(fx, "/ws/ui", Some(&id)).await.unwrap();
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Snapshot { .. }
+    ));
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Blockers { .. }
+    ));
+    let HubToUi::HubVersion(v) = recv::<HubToUi>(&mut ws).await else {
+        panic!("HubVersion must follow Blockers");
+    };
+    let mut rest = vec![];
+    for _ in 0..n {
+        rest.push(recv::<HubToUi>(&mut ws).await);
+    }
+    // Nothing more follows in the burst: a ListDevices answer comes next.
+    send(&mut ws, &UiToHub::ListDevices).await;
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Devices { .. }
+    ));
+    (v, rest)
+}
+
+#[tokio::test]
+async fn ui_gets_hub_version_after_blockers() {
+    let fx = start(fast()).await;
+    let (v, rest) = fresh_ui_versions(&fx, 0).await;
+    assert_eq!(v, version_info());
+    assert!(rest.is_empty());
+}
+
+#[tokio::test]
+async fn daemon_version_and_status_are_broadcast_replayed_and_cleared() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let (id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    send(&mut d, &DaemonToHub::Version(dinfo(PROTO_VERSION))).await;
+    send(
+        &mut d,
+        &DaemonToHub::UpdateStatus(UpdateState::Available {
+            version: "0.2.0".into(),
+        }),
+    )
+    .await;
+    let got = until(&mut u, |m| match m {
+        HubToUi::NodeVersion { node, info } => Some((node, info)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got, (id.id.clone(), dinfo(PROTO_VERSION)));
+    let st = until(&mut u, |m| match m {
+        HubToUi::UpdateStatus { node, status } => Some((node, status)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        st,
+        (
+            id.id.clone(),
+            UpdateState::Available {
+                version: "0.2.0".into()
+            }
+        )
+    );
+    // A UI that connects later gets both, version first.
+    let (_, rest) = fresh_ui_versions(&fx, 2).await;
+    assert!(matches!(&rest[0], HubToUi::NodeVersion { node, .. } if node == &id.id));
+    assert!(matches!(&rest[1], HubToUi::UpdateStatus { node, .. } if node == &id.id));
+    // Disconnect clears them.
+    drop(d);
+    until(&mut u, |m| match m {
+        HubToUi::NodeUpdate(n) if n.state == NodeState::Offline => Some(()),
+        _ => None,
+    })
+    .await;
+    let (_, rest) = fresh_ui_versions(&fx, 0).await;
+    assert!(rest.is_empty());
+}
+
+#[tokio::test]
+async fn daemon_below_min_proto_is_refused_with_a_reason() {
+    if MIN_DAEMON_PROTO == 0 {
+        return;
+    }
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let (id, mut d) = daemon(&fx, "old", NodeState::Idle, vec![]).await;
+    send(&mut d, &DaemonToHub::Version(dinfo(MIN_DAEMON_PROTO - 1))).await;
+    let msg = next_error(&mut u).await;
+    assert!(
+        msg.contains("protocol") && msg.contains(id.id.as_str()),
+        "{msg}"
+    );
+    let reason = loop {
+        match tokio::time::timeout(Duration::from_secs(5), d.next()).await {
+            Ok(Some(Ok(Message::Close(Some(f))))) => break f.reason.to_string(),
+            Ok(Some(Ok(_))) => {}
+            other => panic!("expected a close frame with a reason, got {other:?}"),
+        }
+    };
+    assert!(reason.contains("protocol"), "{reason}");
+    let (_, rest) = fresh_ui_versions(&fx, 0).await;
+    assert!(rest.is_empty(), "the refused version must not be stored");
+}
+
+#[tokio::test]
+async fn daemon_that_never_sends_version_is_allowed() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let (_id, mut d) = daemon(&fx, "legacy", NodeState::Idle, vec![]).await;
+    send(
+        &mut u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Auto,
+            spec: spec(&agent("a-1")),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::Spawn(_)
+    ));
+}
+
+#[tokio::test]
+async fn update_requests_route_to_one_node_or_all() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let (a, mut da) = daemon(&fx, "a", NodeState::Idle, vec![]).await;
+    let (_b, mut db) = daemon(&fx, "b", NodeState::Idle, vec![]).await;
+    // Make sure both are registered before routing.
+    send(
+        &mut u,
+        &UiToHub::CheckUpdate {
+            node: Some(a.id.clone()),
+        },
+    )
+    .await;
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::CheckUpdate);
+    send(
+        &mut u,
+        &UiToHub::UpdateNode {
+            node: Some(a.id.clone()),
+        },
+    )
+    .await;
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::UpdateNow);
+    // b saw neither: its next frame is the one sent now.
+    send(&mut u, &UiToHub::CheckUpdate { node: None }).await;
+    assert_eq!(recv::<HubToDaemon>(&mut db).await, HubToDaemon::CheckUpdate);
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::CheckUpdate);
+    send(&mut u, &UiToHub::UpdateNode { node: None }).await;
+    assert_eq!(recv::<HubToDaemon>(&mut db).await, HubToDaemon::UpdateNow);
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::UpdateNow);
+}
+
+#[tokio::test]
+async fn update_for_unknown_or_offline_node_is_an_error() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    for m in [
+        UiToHub::CheckUpdate {
+            node: Some(NodeId::new("ghost").unwrap()),
+        },
+        UiToHub::UpdateNode {
+            node: Some(NodeId::new("ghost").unwrap()),
+        },
+    ] {
+        send(&mut u, &m).await;
+        assert!(!next_error(&mut u).await.is_empty(), "{m:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_daemon_cannot_trigger_updates_on_others() {
+    let fx = start(fast()).await;
+    let mut u = ui(&fx).await;
+    let (a, mut da) = daemon(&fx, "a", NodeState::Idle, vec![]).await;
+    let (_b, mut db) = daemon(&fx, "b", NodeState::Idle, vec![]).await;
+    send(&mut db, &UiToHub::UpdateNode { node: None }).await;
+    send(
+        &mut db,
+        &UiToHub::CheckUpdate {
+            node: Some(a.id.clone()),
+        },
+    )
+    .await;
+    // The first thing `a` receives is the probe, not an update.
+    send(
+        &mut u,
+        &UiToHub::Kill {
+            agent: agent("ghost"),
+        },
+    )
+    .await;
+    next_error(&mut u).await;
+    send(
+        &mut u,
+        &UiToHub::CheckUpdate {
+            node: Some(a.id.clone()),
+        },
+    )
+    .await;
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::CheckUpdate);
+    // ...and exactly one CheckUpdate arrived (the UI's), nothing queued behind it.
+    send(
+        &mut u,
+        &UiToHub::UpdateNode {
+            node: Some(a.id.clone()),
+        },
+    )
+    .await;
+    assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::UpdateNow);
+    // A node cert cannot even open the UI socket.
+    assert!(connect(&fx, "/ws/ui", Some(&_b)).await.is_err());
+    drop(db);
+}
+
+#[tokio::test]
+async fn api_version_requires_a_ui_and_returns_the_hub_version() {
+    let fx = start(fast()).await;
+    let (st, _) = https(&fx, "GET", "/api/version", &[], "").await;
+    assert_eq!(st, 401);
+    let node = enroll_as(&fx, DeviceKind::Node, "n").await;
+    let (st, _) = https_as(&fx, Some(&node), "GET", "/api/version", &[], "").await;
+    assert_eq!(st, 403);
+    let ui = enroll_as(&fx, DeviceKind::Ui, "p").await;
+    let (st, body) = https_as(&fx, Some(&ui), "GET", "/api/version", &[], "").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(decode::<VersionInfo>(&body).unwrap(), version_info());
 }

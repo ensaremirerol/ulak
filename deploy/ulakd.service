@@ -1,0 +1,30 @@
+[Unit]
+Description=ulakd node daemon (ulak)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ulakd
+Group=ulakd
+# The binary lives in the service's own state dir so the self-updater (running as ulakd) can replace
+# it atomically. The updater exits after installing; Restart=always starts the new binary.
+StateDirectory=ulakd
+StateDirectoryMode=0700
+Environment=ULAKD_DIR=/var/lib/ulakd/config
+ExecStart=/var/lib/ulakd/bin/ulakd run
+Restart=always
+# On restart only ulakd is stopped: the agents run in tmux under this user and must survive an update.
+KillMode=process
+RestartSec=3
+# Hardening basics. Agents run in tmux under this user and need its home, so no ProtectHome/ProtectSystem=strict.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

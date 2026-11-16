@@ -30,9 +30,10 @@ fn tab(s: &App, k: &Kit, i: usize) -> El {
         .build(k)
         .key(format!("tab-{}", name.to_lowercase()));
     let mut r = row().gap(4.0).center_y().child(b);
-    if p == Panel::Questions && !s.ui.questions.is_empty() {
+    let open = s.ui.questions.len() + s.ui.blockers.len();
+    if p == Panel::Questions && open > 0 {
         r = r.child(
-            Badge::new(s.ui.questions.len().to_string())
+            Badge::new(open.to_string())
                 .variant(BadgeVariant::Accent)
                 .build(k)
                 .key("questions-badge"),
@@ -91,6 +92,33 @@ fn toast(k: &Kit, msg: &str) -> El {
         )
 }
 
+/// "ulak 0.1.0 (abc) / hub 0.1.0 (def)".
+pub fn version_line(s: &App) -> String {
+    let fmt = |v: &ulak_proto::VersionInfo| format!("{} ({})", v.version(), v.git());
+    let hub = s.ui.hub_version.as_ref().map_or("?".into(), fmt);
+    format!("ulak {} / hub {hub}", fmt(&s.ui.own()))
+}
+
+fn footer(s: &App, k: &Kit) -> El {
+    let mut r = row()
+        .w_full()
+        .gap(8.0)
+        .px(12.0)
+        .h(22.0)
+        .center_y()
+        .fill(k.c.bg_deep)
+        .child(
+            text(version_line(s))
+                .key("version-line")
+                .font(k.ty.small)
+                .color(k.c.text_muted),
+        );
+    if let Some(f) = s.ui.own_flag() {
+        r = r.child(nodebar::pill(k, f.label().into(), &k.c.warning).key("version-flag"));
+    }
+    r
+}
+
 pub fn view(s: &App, _: &mut Cx<App>) -> El {
     let k = Kit::neutral(true);
     if s.login.visible {
@@ -109,7 +137,8 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
         .fill(k.c.bg_base)
         .child(header(s, &k))
         .child(nodebar::view(s, &k))
-        .child(body);
+        .child(body)
+        .child(footer(s, &k));
     // The spawn dialog shows hub errors inline.
     if let (Some(m), false) = (&s.ui.last_error, s.ui.panel == Panel::Spawn) {
         c = c.child(toast(&k, m));

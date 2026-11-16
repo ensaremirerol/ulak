@@ -54,6 +54,7 @@ id_type!(AgentId);
 id_type!(ThreadId);
 id_type!(MessageId);
 id_type!(QuestionId);
+id_type!(BlockerId);
 
 impl AgentId {
     pub fn tmux_session(&self) -> String {
@@ -260,6 +261,112 @@ impl AgentProfile {
     pub fn config_dir(&self) -> Option<&PathBuf> {
         self.config_dir.as_ref()
     }
+    /// `claude` or `claude@/home/u/.claude-b`: binary file name plus config dir.
+    pub fn key(&self) -> Result<ProfileKey, ProtoError> {
+        let name = std::path::Path::new(&self.binary)
+            .file_name()
+            .map_or(self.binary.as_str(), |n| n.to_str().unwrap_or(&self.binary));
+        match &self.config_dir {
+            Some(d) => ProfileKey::new(&format!("{name}@{}", d.display())),
+            None => ProfileKey::new(name),
+        }
+    }
+}
+
+/// Identifies an agent kind on a node (see `AgentProfile::key`). Printable, <= 200 bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProfileKey(String);
+impl ProfileKey {
+    pub fn new(s: &str) -> Result<Self, ProtoError> {
+        if s.is_empty() || s.len() > 200 || s.chars().any(char::is_control) {
+            return Err(ProtoError::InvalidId {
+                kind: "ProfileKey",
+                value: s.chars().filter(|c| !c.is_control()).take(40).collect(),
+            });
+        }
+        Ok(Self(s.to_owned()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for ProfileKey {
+    type Error = ProtoError;
+    fn try_from(s: String) -> Result<Self, ProtoError> {
+        Self::new(&s)
+    }
+}
+impl From<ProfileKey> for String {
+    fn from(v: ProfileKey) -> String {
+        v.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockerKind {
+    Login,
+    Install,
+}
+
+/// A permanent problem on a node that stops agents of one profile from starting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    id: BlockerId,
+    node: NodeId,
+    profile: ProfileKey,
+    kind: BlockerKind,
+    agent: Option<AgentId>,
+    detail: String,
+    at_ms: u64,
+}
+impl Blocker {
+    /// `detail` loses control characters and is cut to 500 chars.
+    pub fn new(
+        id: BlockerId,
+        node: NodeId,
+        profile: ProfileKey,
+        kind: BlockerKind,
+        agent: Option<AgentId>,
+        detail: String,
+        at_ms: u64,
+    ) -> Self {
+        let detail = detail
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(500)
+            .collect();
+        Self {
+            id,
+            node,
+            profile,
+            kind,
+            agent,
+            detail,
+            at_ms,
+        }
+    }
+    pub fn id(&self) -> &BlockerId {
+        &self.id
+    }
+    pub fn node(&self) -> &NodeId {
+        &self.node
+    }
+    pub fn profile(&self) -> &ProfileKey {
+        &self.profile
+    }
+    pub fn kind(&self) -> BlockerKind {
+        self.kind
+    }
+    pub fn agent(&self) -> Option<&AgentId> {
+        self.agent.as_ref()
+    }
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+    pub fn at_ms(&self) -> u64 {
+        self.at_ms
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +423,10 @@ pub enum AgentStatus {
     Running,
     Exited(Option<i32>),
     Failed,
+    /// ulakd is installing the agent binary.
+    Installing,
+    /// The agent asked the user to log in.
+    NeedsLogin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

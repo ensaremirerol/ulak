@@ -2,8 +2,9 @@
 use crate::term::Screen;
 use std::collections::BTreeMap;
 use ulak_proto::{
-    AgentId, AgentProfile, AgentStatus, Answer, DeviceInfo, DeviceKind, HubToUi, Message, NodeId,
-    NodeInfo, Otp, ProtoError, Question, QuestionId, SpawnSpec, SpawnTarget, ThreadId, UiToHub,
+    AgentId, AgentProfile, AgentStatus, Answer, Blocker, BlockerId, BlockerKind, DeviceInfo,
+    DeviceKind, HubToUi, Message, NodeId, NodeInfo, NodeState, Otp, ProtoError, Question,
+    QuestionId, SpawnSpec, SpawnTarget, ThreadId, UiToHub, UpdateState, VersionInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -102,7 +103,10 @@ pub enum Intent {
     SelectAgent(AgentId),
     Detach,
     SendKeys(Vec<u8>),
-    AnswerQuestion { question: QuestionId, text: String },
+    AnswerQuestion {
+        question: QuestionId,
+        text: String,
+    },
     Spawn(SpawnForm),
     Kill(AgentId),
     AddDevice(DeviceKind),
@@ -110,6 +114,16 @@ pub enum Intent {
     RefreshDevices,
     RefreshMailbox(Option<ThreadId>),
     SwitchPanel(Panel),
+    ResolveBlocker {
+        id: BlockerId,
+    },
+    /// `None` = every connected node.
+    CheckUpdate {
+        node: Option<NodeId>,
+    },
+    UpdateNode {
+        node: Option<NodeId>,
+    },
 }
 
 pub const MAILBOX_LIMIT: u32 = 200;
@@ -120,6 +134,8 @@ pub const ERROR_TTL_MS: u64 = 8_000;
 pub struct State {
     pub nodes: Vec<NodeInfo>,
     pub questions: Vec<Question>,
+    /// Open blockers, oldest first.
+    pub blockers: Vec<Blocker>,
     pub statuses: BTreeMap<AgentId, AgentStatus>,
     pub mailbox: Vec<Message>,
     pub devices: Vec<DeviceInfo>,
@@ -132,9 +148,80 @@ pub struct State {
     pub now_ms: u64,
     /// (message, tick time it was first seen) for the toast auto-expiry.
     pub error_seen: Option<(String, u64)>,
+    pub hub_version: Option<VersionInfo>,
+    pub node_versions: BTreeMap<NodeId, VersionInfo>,
+    pub updates: BTreeMap<NodeId, UpdateState>,
+    /// Test/scene override of this binary's version; `own_version()` when `None`.
+    pub own_override: Option<VersionInfo>,
+}
+
+/// This binary's version (`ULAK_GIT_SHA` is set by build.rs).
+pub fn own_version() -> VersionInfo {
+    VersionInfo::current(env!("CARGO_PKG_VERSION"), env!("ULAK_GIT_SHA"))
+        .expect("package version and git sha are short, printable strings")
+}
+
+/// How a version differs from the hub's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flag {
+    DiffersFromHub,
+    ProtocolTooOld,
+}
+
+impl Flag {
+    pub fn label(self) -> &'static str {
+        match self {
+            Flag::DiffersFromHub => "differs from hub",
+            Flag::ProtocolTooOld => "protocol too old",
+        }
+    }
+}
+
+/// Compare `v` with the hub: older protocol wins over any other difference.
+pub fn flag(hub: &VersionInfo, v: &VersionInfo) -> Option<Flag> {
+    if v.proto() < hub.proto() {
+        Some(Flag::ProtocolTooOld)
+    } else if v.proto() != hub.proto() || v.version() != hub.version() || v.git() != hub.git() {
+        Some(Flag::DiffersFromHub)
+    } else {
+        None
+    }
+}
+
+/// The version an update would install, when one is available.
+pub fn available(u: &UpdateState) -> Option<&str> {
+    match u {
+        UpdateState::Available { version } => Some(version),
+        _ => None,
+    }
 }
 
 impl State {
+    pub fn own(&self) -> VersionInfo {
+        self.own_override.clone().unwrap_or_else(own_version)
+    }
+
+    /// Flag of the UI itself against the hub (None while the hub version is unknown).
+    pub fn own_flag(&self) -> Option<Flag> {
+        self.hub_version.as_ref().and_then(|h| flag(h, &self.own()))
+    }
+
+    pub fn node_flag(&self, n: &NodeId) -> Option<Flag> {
+        let h = self.hub_version.as_ref()?;
+        flag(h, self.node_versions.get(n)?)
+    }
+
+    pub fn updates_available(&self) -> bool {
+        self.updates.values().any(|u| available(u).is_some())
+    }
+
+    fn forget_offline(&mut self) {
+        for n in self.nodes.iter().filter(|n| n.state == NodeState::Offline) {
+            self.updates.remove(&n.id);
+            self.node_versions.remove(&n.id);
+        }
+    }
+
     fn age_error(&mut self) {
         match (&self.last_error, &self.error_seen) {
             (None, _) => self.error_seen = None,
@@ -211,6 +298,9 @@ impl State {
                 }]
             }
             Intent::SwitchPanel(_) => vec![],
+            Intent::ResolveBlocker { id } => vec![UiToHub::ResolveBlocker { id }],
+            Intent::CheckUpdate { node } => vec![UiToHub::CheckUpdate { node }],
+            Intent::UpdateNode { node } => vec![UiToHub::UpdateNode { node }],
         })
     }
 
@@ -245,6 +335,30 @@ fn upsert<T>(list: &mut Vec<T>, item: T, same: impl Fn(&T, &T) -> bool) {
     }
 }
 
+/// Insert or replace by id, keeping the list ordered by time.
+fn add_blocker(s: &mut State, b: Blocker) {
+    upsert(&mut s.blockers, b, |a, b| a.id() == b.id());
+    s.blockers.sort_by_key(Blocker::at_ms);
+}
+
+impl State {
+    /// Open blockers of `profile` (a `ProfileKey` string) on `node`, or on any node for `None`.
+    pub fn blockers_for(&self, node: Option<&NodeId>, profile: &str) -> Vec<&Blocker> {
+        self.blockers
+            .iter()
+            .filter(|b| b.profile().as_str() == profile && node.is_none_or(|n| b.node() == n))
+            .collect()
+    }
+}
+
+/// "Login required" / "Install failed".
+pub fn kind_title(k: BlockerKind) -> &'static str {
+    match k {
+        BlockerKind::Login => "Login required",
+        BlockerKind::Install => "Install failed",
+    }
+}
+
 pub fn apply(state: &mut State, event: Event) {
     match event {
         Event::Connecting => state.conn = ConnStatus::Connecting,
@@ -266,8 +380,12 @@ fn apply_hub(s: &mut State, f: HubToUi) {
         HubToUi::Snapshot { nodes, questions } => {
             s.nodes = nodes;
             s.questions = questions;
+            s.forget_offline();
         }
-        HubToUi::NodeUpdate(n) => upsert(&mut s.nodes, n, |a, b| a.id == b.id),
+        HubToUi::NodeUpdate(n) => {
+            upsert(&mut s.nodes, n, |a, b| a.id == b.id);
+            s.forget_offline();
+        }
         HubToUi::QuestionOpened(q) => upsert(&mut s.questions, q, |a, b| a.id() == b.id()),
         HubToUi::QuestionClosed { id } => s.questions.retain(|q| q.id() != &id),
         HubToUi::MessageLogged(m) => upsert(&mut s.mailbox, m, |a, b| a.id() == b.id()),
@@ -299,15 +417,32 @@ fn apply_hub(s: &mut State, f: HubToUi) {
             });
         }
         HubToUi::Devices { devices } => s.devices = devices,
+        HubToUi::Blockers { blockers } => {
+            s.blockers.clear();
+            for b in blockers {
+                add_blocker(s, b);
+            }
+        }
+        HubToUi::BlockerOpened(b) => add_blocker(s, b),
+        HubToUi::BlockerClosed { id } => s.blockers.retain(|b| b.id() != &id),
+        HubToUi::HubVersion(v) => s.hub_version = Some(v),
+        HubToUi::NodeVersion { node, info } => {
+            s.node_versions.insert(node, info);
+        }
+        HubToUi::UpdateStatus { node, status } => {
+            s.updates.insert(node, status);
+        }
         HubToUi::Error { message } => s.last_error = Some(message),
-        // HubToUi is not #[non_exhaustive] today; a new frame must be handled here.
+        // Frames added later by the hub must not break this build.
+        #[allow(unreachable_patterns)]
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ulak_proto::{NodeState, Telemetry};
+    use ulak_proto::Telemetry;
 
     fn aid(s: &str) -> AgentId {
         AgentId::new(s).unwrap()
@@ -754,6 +889,115 @@ mod tests {
         assert_eq!(
             s.resync_frames(),
             vec![UiToHub::Attach { agent: aid("a1") }]
+        );
+    }
+
+    fn blocker(id: &str, n: &str, kind: BlockerKind, at: u64) -> Blocker {
+        Blocker::new(
+            BlockerId::new(id).unwrap(),
+            nid(n),
+            ulak_proto::ProfileKey::new("claude").unwrap(),
+            kind,
+            Some(aid("a1")),
+            "d".into(),
+            at,
+        )
+    }
+
+    #[test]
+    fn blockers_dedupe_sort_close_and_resolve_frame() {
+        let mut s = State::default();
+        let b1 = blocker("b1", "n1", BlockerKind::Login, 20);
+        let b2 = blocker("b2", "n2", BlockerKind::Install, 10);
+        apply(
+            &mut s,
+            Event::Hub(HubToUi::Blockers {
+                blockers: vec![b1.clone(), b2],
+            }),
+        );
+        assert_eq!(
+            s.blockers
+                .iter()
+                .map(|b| b.id().as_str())
+                .collect::<Vec<_>>(),
+            ["b2", "b1"]
+        );
+        apply(&mut s, Event::Hub(HubToUi::BlockerOpened(b1)));
+        assert_eq!(s.blockers.len(), 2);
+        assert_eq!(s.blockers_for(Some(&nid("n1")), "claude").len(), 1);
+        assert_eq!(s.blockers_for(None, "claude").len(), 2);
+        assert_eq!(s.blockers_for(None, "other").len(), 0);
+        let id = BlockerId::new("b2").unwrap();
+        apply(
+            &mut s,
+            Event::Hub(HubToUi::BlockerClosed { id: id.clone() }),
+        );
+        assert_eq!(s.blockers.len(), 1);
+        assert_eq!(
+            s.intent_to_frames(Intent::ResolveBlocker { id: id.clone() }),
+            vec![UiToHub::ResolveBlocker { id }]
+        );
+    }
+
+    fn vi(ver: &str, git: &str, proto: u32) -> VersionInfo {
+        VersionInfo::new(ver, git, proto, "linux", "x86_64").unwrap()
+    }
+
+    #[test]
+    fn flag_rules() {
+        let h = vi("0.2.0", "aaa", 2);
+        assert_eq!(flag(&h, &vi("0.2.0", "aaa", 2)), None);
+        assert_eq!(flag(&h, &vi("0.1.0", "aaa", 2)), Some(Flag::DiffersFromHub));
+        assert_eq!(flag(&h, &vi("0.2.0", "bbb", 2)), Some(Flag::DiffersFromHub));
+        assert_eq!(flag(&h, &vi("0.2.0", "aaa", 3)), Some(Flag::DiffersFromHub));
+        assert_eq!(flag(&h, &vi("0.2.0", "aaa", 1)), Some(Flag::ProtocolTooOld));
+        assert_eq!(Flag::ProtocolTooOld.label(), "protocol too old");
+        assert!(available(&UpdateState::Available {
+            version: "1".into()
+        })
+        .is_some());
+        assert!(available(&UpdateState::Checking).is_none());
+    }
+
+    #[test]
+    fn version_frames_fill_state_and_offline_clears_them() {
+        let mut s = State::default();
+        hub(&mut s, HubToUi::NodeUpdate(node("n1", "a", &[])));
+        hub(&mut s, HubToUi::HubVersion(vi("0.2.0", "h", 1)));
+        hub(
+            &mut s,
+            HubToUi::NodeVersion {
+                node: nid("n1"),
+                info: vi("0.1.0", "x", 1),
+            },
+        );
+        hub(
+            &mut s,
+            HubToUi::UpdateStatus {
+                node: nid("n1"),
+                status: UpdateState::Checking,
+            },
+        );
+        assert_eq!(s.hub_version.as_ref().unwrap().git(), "h");
+        assert_eq!(s.node_flag(&nid("n1")), Some(Flag::DiffersFromHub));
+        assert_eq!(s.updates[&nid("n1")], UpdateState::Checking);
+        let mut off = node("n1", "a", &[]);
+        off.state = NodeState::Offline;
+        hub(&mut s, HubToUi::NodeUpdate(off));
+        assert!(s.updates.is_empty() && s.node_versions.is_empty());
+    }
+
+    #[test]
+    fn update_intents_map_to_frames() {
+        let s = State::default();
+        let n = Some(nid("n1"));
+        assert_eq!(
+            s.intent_to_frames(Intent::CheckUpdate { node: n.clone() }),
+            vec![UiToHub::CheckUpdate { node: n.clone() }]
+        );
+        assert_eq!(
+            s.intent_to_frames(Intent::UpdateNode { node: None }),
+            vec![UiToHub::UpdateNode { node: None }]
         );
     }
 }

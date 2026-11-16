@@ -3,6 +3,9 @@
 FROM rust:1.95-bookworm AS build
 WORKDIR /src
 COPY . .
+# .git is not in the build context; build.rs reads the sha from here.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 RUN cargo build --release -p ulakd
 
 FROM debian:bookworm-slim
@@ -10,8 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --create-home --home-dir /home/ulakd ulakd \
  && mkdir /data && chown ulakd /data
-COPY --from=build /src/target/release/ulakd /usr/local/bin/ulakd
+# The binary sits in a directory the ulakd user can write, so `ulakd update --apply` can replace it.
+RUN mkdir -p /opt/ulakd/bin && chown ulakd /opt/ulakd/bin
+COPY --from=build --chown=ulakd /src/target/release/ulakd /opt/ulakd/bin/ulakd
+ENV PATH=/opt/ulakd/bin:$PATH
 ENV ULAKD_DIR=/data
+# Self-update is off in containers (the image is the unit of upgrade); set 1 to turn on the auto loop.
+ENV ULAKD_AUTO_UPDATE=0
 USER ulakd
 VOLUME /data
 ENTRYPOINT ["ulakd"]

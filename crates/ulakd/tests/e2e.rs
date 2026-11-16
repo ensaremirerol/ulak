@@ -319,3 +319,143 @@ async fn tmux_half(ui: &mut Ws, node: &NodeId) {
     }
     assert!(!has(), "kill left session {session}");
 }
+
+async fn until_ui<T>(ui: &mut Ws, what: &str, mut f: impl FnMut(HubToUi) -> Option<T>) -> T {
+    loop {
+        let m = next_ui(ui, 20)
+            .await
+            .unwrap_or_else(|| panic!("timed out waiting for {what}"));
+        if let Some(t) = f(m) {
+            return t;
+        }
+    }
+}
+
+/// The agent asks for a login: the hub shows a permanent blocker, a second spawn of that
+/// profile is refused, resolving it lets spawns through again.
+#[tokio::test]
+async fn login_blocker_gates_spawns_until_resolved() {
+    if !Std::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("SKIPPED: tmux is not installed");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("ulak-e2e-blk-{}", std::process::id()));
+    let (hub_dir, node_dir, ui_dir) = (root.join("hub"), root.join("node"), root.join("ui"));
+    let mut hub = start_hub(&hub_dir).await;
+    let (otp, fp) = {
+        let l = hub.line("OTP ").await;
+        let (otp, rest) = l.split_once(' ').unwrap();
+        let fp = rest.trim_end_matches(')').rsplit(' ').next().unwrap();
+        (otp.to_owned(), fp.to_owned())
+    };
+    join(&hub.url, &node_dir, &otp, &fp).await;
+    let (uotp, ufp) = hub.otp("ui").await;
+    join(&hub.url, &ui_dir, &uotp, &ufp).await;
+    std::fs::write(
+        node_dir.join("guard.json"),
+        r#"{"gpu_threshold":100,"cpu_threshold":100,"load_per_core":1000}"#,
+    )
+    .unwrap();
+    // `sh` stands in for an agent binary; it is found in PATH (no check argv)
+    std::fs::write(
+        node_dir.join("agents.json"),
+        r#"{"sh":{"login_patterns":["please run /login"]}}"#,
+    )
+    .unwrap();
+    let mut daemon = ulakd(&node_dir)
+        .arg("run")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut ui = ui_connect(&hub.url, &ui_dir).await.unwrap();
+    let node = loop {
+        let m = next_ui(&mut ui, 15).await.expect("no node seen");
+        if let Some(n) = node_in(&m).filter(|n| n.state == NodeState::Idle) {
+            break n.id;
+        }
+    };
+    let tx = |m: UiToHub| Message::Text(encode(&m).unwrap().into());
+    let spawn = |id: &str| {
+        let spec = SpawnSpec::new(
+            AgentId::new(id).unwrap(),
+            AgentProfile::new(
+                "sh",
+                vec!["-c".into(), "echo 'Please run /login'; exec cat".into()],
+                None,
+            )
+            .unwrap(),
+            std::env::temp_dir(),
+            "boot".into(),
+            Default::default(),
+        )
+        .unwrap();
+        UiToHub::Spawn {
+            target: SpawnTarget::Node(node.clone()),
+            spec,
+        }
+    };
+    ui.send(tx(spawn("blk-1"))).await.unwrap();
+    let blocker = until_ui(&mut ui, "login blocker", |m| match m {
+        HubToUi::BlockerOpened(b) => Some(b),
+        _ => None,
+    })
+    .await;
+    assert_eq!(blocker.kind(), BlockerKind::Login);
+    assert_eq!(blocker.profile().as_str(), "sh");
+    assert!(blocker
+        .detail()
+        .to_lowercase()
+        .contains("please run /login"));
+
+    // same profile on that node is refused
+    ui.send(tx(spawn("blk-2"))).await.unwrap();
+    let msg = until_ui(&mut ui, "refusal", |m| match m {
+        HubToUi::Error { message } => Some(message),
+        _ => None,
+    })
+    .await;
+    assert!(msg.contains("blocked"), "{msg}");
+
+    // resolve -> spawn works again
+    ui.send(tx(UiToHub::ResolveBlocker {
+        id: blocker.id().clone(),
+    }))
+    .await
+    .unwrap();
+    until_ui(&mut ui, "blocker closed", |m| {
+        matches!(m, HubToUi::BlockerClosed { .. }).then_some(())
+    })
+    .await;
+    ui.send(tx(spawn("blk-3"))).await.unwrap();
+    let has = |name: &str| {
+        Std::new("tmux")
+            .args(["-L", &socket(), "has-session", "-t", name])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    for _ in 0..80 {
+        if has("ulak-blk-3") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(has("ulak-blk-3"), "spawn after resolve did not start");
+    assert!(
+        has("ulak-blk-1"),
+        "login blocker must keep the session open"
+    );
+    for n in ["ulak-blk-1", "ulak-blk-3"] {
+        // the tmux server is shared with the other test: kill only our sessions
+        let _ = Std::new("tmux")
+            .args(["-L", &socket(), "kill-session", "-t", n])
+            .output();
+    }
+    daemon.kill().await.unwrap();
+    let _ = hub.child.kill().await;
+    let _ = std::fs::remove_dir_all(root);
+}

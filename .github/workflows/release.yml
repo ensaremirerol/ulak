@@ -1,0 +1,113 @@
+# Release pipeline. NEVER RUN YET: it has only been reviewed by eye (no actionlint available when written).
+# Needs the repo secret ULAK_RELEASE_SIGNING_KEY (see scripts/gen-release-key.sh) and a real
+# crates/ulakd/release-key.pub committed. Docker images get the version tag from docker.yml (same tag trigger).
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, package and sign but do not publish a release
+        type: boolean
+        default: true
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-gnu
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2.7.8
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev
+      - name: Tag must equal the workspace version
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          versions=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].version' | sort -u)
+          if [ "$(printf '%s\n' "$versions" | wc -l)" != 1 ]; then
+            echo "workspace crates disagree on the version: $versions" >&2; exit 1
+          fi
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$versions" ]; then
+            echo "tag $REF_NAME does not match workspace version v$versions" >&2; exit 1
+          fi
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+      - name: Build
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p ulakd -p ulak-remote -p ulak --target "$TARGET"
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir dist
+          for bin in ulakd ulak-remote ulak; do
+            tar -C "target/$TARGET/release" -czf "dist/$bin-$TARGET.tar.gz" "$bin"
+          done
+          (cd dist && sha256sum ./*.tar.gz | sed 's# \./# #' > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Sign (ed25519, detached raw signatures)
+        env:
+          SIGNING_KEY: ${{ secrets.ULAK_RELEASE_SIGNING_KEY }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/key.pem"
+          if [ -n "$SIGNING_KEY" ]; then
+            printf '%s\n' "$SIGNING_KEY" > "$key"
+          elif [ "$DRY_RUN" = true ]; then
+            echo "::warning::no ULAK_RELEASE_SIGNING_KEY secret; dry run signs with a throwaway key"
+            openssl genpkey -algorithm ed25519 -out "$key"
+          else
+            echo "ULAK_RELEASE_SIGNING_KEY is not set; run scripts/gen-release-key.sh" >&2; exit 1
+          fi
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/pub.pem"
+          pub_hex=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
+          committed=$(head -n1 crates/ulakd/release-key.pub || true)
+          if [ -n "$SIGNING_KEY" ] && [ "$committed" != "$pub_hex" ]; then
+            echo "crates/ulakd/release-key.pub does not match the signing secret (installed daemons would refuse this release)" >&2
+            [ "$DRY_RUN" = true ] || exit 1
+          fi
+          cd dist
+          for f in ./*.tar.gz SHA256SUMS; do
+            openssl pkeyutl -sign -rawin -inkey "$key" -in "$f" -out "$f.sig"
+            openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/pub.pem" -in "$f" -sigfile "$f.sig"
+          done
+          shred -u "$key"
+          ls -l
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: release-dist
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: release-dist
+          path: dist
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # workflow_dispatch from a branch has no tag to release.
+          [ "${{ github.ref_type }}" = tag ] || { echo "publishing needs a v* tag ref" >&2; exit 1; }
+          gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag

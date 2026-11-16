@@ -1,9 +1,24 @@
 //! tmux agent manager. Every command is an argv vector handed to `tmux`; no shell is involved
 //! (the agent binary is started through `env`, not `sh -c`).
-use crate::{errors::AgentError, hub::AgentHost};
-use std::{process::Stdio, sync::Arc, time::Duration};
+use crate::{
+    agents::{binary_name, is_installed, match_login, Agents, Installer, Recipe},
+    errors::AgentError,
+    hub::{AgentHost, HostEvent},
+};
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
-use ulak_proto::{AgentId, SpawnSpec};
+use ulak_proto::{AgentId, AgentStatus, BlockerKind, ProfileKey, SpawnSpec};
+
+/// Session option that remembers the profile key, so a restarted daemon can re-adopt the agent.
+const PROFILE_OPT: &str = "@ulak_profile";
+
+/// Per profile: (blocked, generation bumped on every resolve).
+type Blocks = Arc<Mutex<HashMap<ProfileKey, (bool, u64)>>>;
 
 fn s(x: &str) -> String {
     x.to_owned()
@@ -79,6 +94,20 @@ pub fn list_argv() -> Vec<String> {
     vec![s("list-sessions"), s("-F"), s("#{session_name}")]
 }
 
+fn set_profile_argv(id: &AgentId, key: &ProfileKey) -> Vec<String> {
+    vec![
+        s("set-option"),
+        s("-t"),
+        id.tmux_session(),
+        s(PROFILE_OPT),
+        key.as_str().to_owned(),
+    ]
+}
+
+fn capture_plain_argv(id: &AgentId) -> Vec<String> {
+    vec![s("capture-pane"), s("-p"), s("-t"), id.tmux_session()]
+}
+
 pub fn capture_argv(id: &AgentId) -> Vec<String> {
     vec![
         s("capture-pane"),
@@ -105,6 +134,13 @@ fn paste_argv(id: &AgentId, bracketed: bool) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct Tmux {
     socket: Option<String>,
+    agents: Arc<Agents>,
+    installer: Arc<Installer>,
+    blocks: Blocks,
+    scan: Duration,
+    slow_scan: Duration,
+    events: mpsc::UnboundedSender<HostEvent>,
+    event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<HostEvent>>>,
     startup_delay: Duration,
     submit_delay: Duration,
     /// Agents whose prompt could not be typed; the hub session drains it.
@@ -115,9 +151,22 @@ pub struct Tmux {
 impl Tmux {
     /// `socket`: tmux `-L` name; `None` uses the user's default server.
     pub fn new(socket: Option<String>) -> Self {
+        Self::with_agents(socket, Agents::default())
+    }
+
+    /// Like [`Tmux::new`] with the install/login recipes of `agents.json`.
+    pub fn with_agents(socket: Option<String>, agents: Agents) -> Self {
         let (prompt_failed, rx) = mpsc::unbounded_channel();
+        let (events, event_rx) = mpsc::unbounded_channel();
         Self {
             socket,
+            agents: Arc::new(agents),
+            installer: Arc::default(),
+            blocks: Arc::default(),
+            scan: Duration::from_secs(1),
+            slow_scan: Duration::from_secs(30),
+            events,
+            event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             startup_delay: Duration::from_millis(1500),
             submit_delay: Duration::from_millis(300),
             prompt_failed,
@@ -130,6 +179,18 @@ impl Tmux {
         self.startup_delay = startup;
         self.submit_delay = submit;
         self
+    }
+
+    /// Pane scan intervals: `fast` inside the profile's `login_scan_secs` window, then `slow`.
+    pub fn with_scan(mut self, fast: Duration, slow: Duration) -> Self {
+        self.scan = fast;
+        self.slow_scan = slow;
+        self
+    }
+
+    fn emit(&self, e: HostEvent) {
+        // the receiver lives as long as any Tmux clone, including this one
+        let _ = self.events.send(e);
     }
 
     async fn run(
@@ -198,8 +259,33 @@ impl Tmux {
         }
     }
 
+    /// Makes sure the agent binary exists, installing it from the local recipe if needed.
+    async fn ensure_installed(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
+        let (binary, id) = (spec.profile().binary(), spec.agent_id());
+        let recipe = self.agents.recipe(binary);
+        if is_installed(&recipe, binary).await {
+            return Ok(());
+        }
+        self.emit(HostEvent::Status {
+            agent: id.clone(),
+            status: AgentStatus::Installing,
+        });
+        let Err(detail) = self.installer.ensure(binary, &recipe).await else {
+            return Ok(());
+        };
+        let profile = spec.profile().key()?;
+        self.emit(HostEvent::Blocked {
+            agent: id.clone(),
+            profile,
+            kind: BlockerKind::Install,
+            detail: detail.clone(),
+        });
+        Err(AgentError::Install(detail))
+    }
+
     pub async fn spawn_agent(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
         let argv = new_session_argv(spec)?;
+        self.ensure_installed(spec).await?;
         match self.run("new-session", argv, None).await {
             Err(AgentError::Tmux { stderr, .. }) if stderr.contains("duplicate session") => {
                 return Err(AgentError::AlreadyExists(
@@ -208,6 +294,14 @@ impl Tmux {
             }
             r => r?,
         };
+        let key = spec.profile().key()?;
+        if let Err(e) = self
+            .run("set-option", set_profile_argv(spec.agent_id(), &key), None)
+            .await
+        {
+            eprintln!("ulakd: cannot tag the session with its profile: {e}");
+        }
+        self.watch_login(spec.agent_id().clone(), key, true);
         // Typing the prompt waits for the TUI to come up; do it off the caller's loop.
         let (me, id, prompt) = (
             self.clone(),
@@ -222,6 +316,110 @@ impl Tmux {
             }
         });
         Ok(())
+    }
+
+    /// Re-adopts the `ulak-*` sessions of a previous daemon run: login watchers restart for
+    /// every session that carries its profile tag. (Listing them is [`Tmux::list_agents`].)
+    pub async fn adopt(&self) -> Result<usize, AgentError> {
+        let argv = vec![
+            s("list-sessions"),
+            s("-F"),
+            format!("#{{session_name}} #{{{PROFILE_OPT}}}"),
+        ];
+        let out = match self.run("list-sessions", argv, None).await {
+            Ok(o) => o,
+            Err(AgentError::Tmux { stderr, .. })
+                if stderr.contains("no server running") || stderr.contains("No such file") =>
+            {
+                return Ok(0)
+            }
+            Err(e) => return Err(e),
+        };
+        let mut n = 0;
+        for l in out.lines() {
+            let Some((name, key)) = l.split_once(' ') else {
+                continue;
+            };
+            let (Some(id), Ok(key)) = (
+                name.strip_prefix("ulak-")
+                    .and_then(|i| AgentId::new(i).ok()),
+                ProfileKey::new(key.trim()),
+            ) else {
+                continue;
+            };
+            self.watch_login(id, key, false);
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Scans the pane for the profile's login patterns until the session is gone: every `scan`
+    /// for the first `login_scan_secs`, then every `slow_scan`. One blocker per profile until
+    /// `blocker_resolved`; a phrase still on screen at resolve time does not re-trigger until
+    /// it has left the screen once.
+    fn watch_login(&self, id: AgentId, key: ProfileKey, fresh: bool) {
+        let name = binary_name(key.as_str().split('@').next().unwrap_or_default()).to_owned();
+        let Recipe {
+            login_patterns,
+            login_scan_secs,
+            ..
+        } = self.agents.recipe(&name);
+        if login_patterns.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            let gen_of = |me: &Tmux| {
+                me.blocks
+                    .lock()
+                    .expect("blocks lock")
+                    .get(&key)
+                    .map_or(0, |b| b.1)
+            };
+            let mut gen_seen = gen_of(&me);
+            let mut stale = false;
+            if fresh {
+                // the TUI needs a moment before there is anything to scan
+                tokio::time::sleep(me.scan).await;
+            }
+            loop {
+                let Ok(text) = me.run("capture-pane", capture_plain_argv(&id), None).await else {
+                    break; // session is gone
+                };
+                let hit = match_login(&login_patterns, &text);
+                let g = gen_of(&me);
+                if g != gen_seen {
+                    gen_seen = g;
+                    stale = hit.is_some();
+                }
+                match hit {
+                    None => stale = false,
+                    Some(_) if stale => {}
+                    Some(line) => {
+                        let first = {
+                            let mut b = me.blocks.lock().expect("blocks lock");
+                            let e = b.entry(key.clone()).or_default();
+                            !std::mem::replace(&mut e.0, true)
+                        };
+                        if first {
+                            me.emit(HostEvent::Status {
+                                agent: id.clone(),
+                                status: AgentStatus::NeedsLogin,
+                            });
+                            me.emit(HostEvent::Blocked {
+                                agent: id.clone(),
+                                profile: key.clone(),
+                                kind: BlockerKind::Login,
+                                detail: line,
+                            });
+                        }
+                    }
+                }
+                let fast = started.elapsed() < Duration::from_secs(login_scan_secs);
+                tokio::time::sleep(if fast { me.scan } else { me.slow_scan }).await;
+            }
+        });
     }
 
     async fn type_prompt(&self, id: &AgentId, prompt: &str) -> Result<(), AgentError> {
@@ -305,6 +503,14 @@ impl AgentHost for Tmux {
     }
     async fn next_prompt_failure(&self) -> Option<AgentId> {
         self.prompt_failures.lock().await.recv().await
+    }
+    async fn next_event(&self) -> Option<HostEvent> {
+        self.event_rx.lock().await.recv().await
+    }
+    fn blocker_resolved(&self, profile: &ProfileKey) {
+        let mut b = self.blocks.lock().expect("blocks lock");
+        let e = b.entry(profile.clone()).or_default();
+        *e = (false, e.1 + 1);
     }
 }
 

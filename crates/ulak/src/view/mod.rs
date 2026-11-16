@@ -5,6 +5,7 @@ pub mod keys;
 pub mod mailbox;
 pub mod mux;
 pub mod nodebar;
+pub mod nodes;
 pub mod questions;
 pub mod shell;
 pub mod spawn;
@@ -25,8 +26,8 @@ mod tests {
     use std::sync::mpsc;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
     use ulak_proto::{
-        AgentId, AgentStatus, DeviceKind, HubToUi, Message, MessageId, NodeId, Otp, QuestionId,
-        ThreadId, UiToHub,
+        AgentId, AgentStatus, BlockerId, BlockerKind, DeviceKind, HubToUi, Message, MessageId,
+        NodeId, Otp, QuestionId, ThreadId, UiToHub,
     };
 
     type Rt = Runtime<App>;
@@ -457,5 +458,285 @@ mod tests {
         rt.update(|s, _| apply(&mut s.ui, Event::Tick(t0 + 1 + crate::model::ERROR_TTL_MS)));
         rt.frame(0.0);
         assert!(!has_text(&rt, "boom"));
+    }
+
+    fn bl(id: &str, node: &str, kind: BlockerKind, agent: &str) -> ulak_proto::Blocker {
+        ulak_proto::Blocker::new(
+            BlockerId::new(id).unwrap(),
+            NodeId::new(node).unwrap(),
+            ulak_proto::ProfileKey::new("claude").unwrap(),
+            kind,
+            Some(aid(agent)),
+            "Run /login".into(),
+            1,
+        )
+    }
+
+    fn open_blocker(rt: &mut Rt, b: ulak_proto::Blocker) {
+        rt.update(|s, _| apply(&mut s.ui, Event::Hub(HubToUi::BlockerOpened(b))));
+        rt.frame(1.0);
+    }
+
+    #[test]
+    fn blocker_cards_badge_open_agent_and_two_click_resolve() {
+        let (mut rt, mut orx) = rt(|a| scenes::base(a, Panel::Questions));
+        open_blocker(&mut rt, bl("b1", "n1", BlockerKind::Login, "claude-2"));
+        open_blocker(&mut rt, bl("b2", "n2", BlockerKind::Install, "codex-1"));
+        assert!(has_text(&rt, "Login required") && has_text(&rt, "Install failed"));
+        assert!(has_text(&rt, "n1 / claude"));
+        assert!(rt.find("blocker-open-b1").is_some());
+        assert!(
+            rt.find("blocker-open-b2").is_none(),
+            "install cards have no Open agent"
+        );
+        let badge = rt
+            .elements()
+            .iter()
+            .find(|e| e.key.as_deref() == Some("questions-badge"))
+            .and_then(|e| e.label.clone());
+        assert_eq!(badge.as_deref(), Some("4"), "2 questions + 2 blockers");
+        // Never auto-dismissed.
+        let t = rt.state.ui.now_ms + 10_000_000;
+        rt.update(|s, _| apply(&mut s.ui, Event::Tick(t)));
+        rt.frame(0.0);
+        assert!(rt.find("blocker-b1").is_some());
+        assert!(rt.find("node-n1-blocker").is_some());
+        click(&mut rt, "blocker-resolve-b1");
+        assert!(drain(&mut orx).is_empty(), "first click only arms");
+        assert!(has_text(&rt, "Click again to confirm"));
+        click(&mut rt, "blocker-resolve-b1");
+        assert_eq!(
+            drain(&mut orx),
+            vec![UiToHub::ResolveBlocker {
+                id: BlockerId::new("b1").unwrap()
+            }]
+        );
+        click(&mut rt, "blocker-open-b1");
+        assert_eq!(rt.state.ui.selected, Some(aid("claude-2")));
+        assert_eq!(rt.state.ui.panel, Panel::Terminal);
+    }
+
+    #[test]
+    fn blocked_node_disables_spawn_until_the_blocker_closes() {
+        let (mut rt, mut orx) = rt(|a| scenes::base(a, Panel::Spawn));
+        rt.frame(1.0);
+        type_into(&mut rt, "spawn-agent-id", "w1");
+        type_into(&mut rt, "spawn-workdir", "/w");
+        type_into(&mut rt, "spawn-prompt", "p");
+        click(&mut rt, "target-n1");
+        open_blocker(&mut rt, bl("b1", "n1", BlockerKind::Login, "claude-2"));
+        assert!(rt.find("spawn-blocked").is_some());
+        assert!(has_text(&rt, "workstation - login required for claude"));
+        click(&mut rt, "spawn-submit");
+        assert!(drain(&mut orx).is_empty(), "disabled button sends nothing");
+        rt.update(|s, _| s.submit_spawn());
+        assert!(drain(&mut orx).is_empty(), "submit_spawn refuses too");
+        rt.update(|s, _| {
+            apply(
+                &mut s.ui,
+                Event::Hub(HubToUi::BlockerClosed {
+                    id: BlockerId::new("b1").unwrap(),
+                }),
+            )
+        });
+        rt.update(|s, _| s.ui.last_error = None);
+        rt.frame(1.0);
+        assert!(rt.find("spawn-blocked").is_none());
+        click(&mut rt, "spawn-submit");
+        assert_eq!(drain(&mut orx).len(), 1);
+    }
+
+    #[test]
+    fn auto_target_notes_excluded_nodes() {
+        let (mut rt, _) = rt(|a| scenes::base(a, Panel::Spawn));
+        open_blocker(&mut rt, bl("b1", "n2", BlockerKind::Login, "codex-1"));
+        assert!(rt.find("spawn-auto-note").is_some());
+        assert!(
+            rt.find("spawn-blocked").is_none(),
+            "n1 is still idle and free"
+        );
+        open_blocker(&mut rt, bl("b2", "n1", BlockerKind::Login, "claude-1"));
+        assert!(
+            rt.find("spawn-blocked").is_some(),
+            "every idle node blocked"
+        );
+    }
+
+    #[test]
+    fn mux_labels_installing_and_needs_login() {
+        let (mut rt, _) = rt(|a| scenes::base(a, Panel::Terminal));
+        rt.update(|s, _| {
+            s.ui.statuses
+                .insert(aid("claude-1"), AgentStatus::NeedsLogin);
+            s.ui.statuses
+                .insert(aid("claude-2"), AgentStatus::Installing);
+        });
+        rt.frame(0.0);
+        let label = |rt: &Rt, k: &str| {
+            rt.elements()
+                .iter()
+                .find(|e| e.key.as_deref() == Some(k))
+                .and_then(|e| e.label.clone())
+        };
+        assert_eq!(
+            label(&rt, "agent-claude-1").as_deref(),
+            Some("claude-1 (needs login)")
+        );
+        assert_eq!(
+            label(&rt, "agent-claude-2").as_deref(),
+            Some("claude-2 (installing)")
+        );
+    }
+
+    fn vi(ver: &str, git: &str, proto: u32) -> ulak_proto::VersionInfo {
+        ulak_proto::VersionInfo::new(ver, git, proto, "linux", "x86_64").unwrap()
+    }
+
+    fn up(rt: &mut Rt, node: &str, f: HubToUi) {
+        let _ = node;
+        rt.update(|s, _| apply(&mut s.ui, Event::Hub(f)));
+        rt.frame(1.0);
+    }
+
+    fn status(node: &str, status: ulak_proto::UpdateState) -> HubToUi {
+        HubToUi::UpdateStatus {
+            node: NodeId::new(node).unwrap(),
+            status,
+        }
+    }
+
+    fn devices_rt() -> (Rt, UnboundedReceiver<UiToHub>) {
+        let (mut rt, rx) = rt(scenes::updates);
+        // Start from a clean slate: no versions or statuses.
+        rt.update(|s, _| {
+            s.ui.node_versions.clear();
+            s.ui.updates.clear();
+        });
+        rt.frame(1.0);
+        (rt, rx)
+    }
+
+    #[test]
+    fn version_line_and_marker() {
+        let (mut rt, _rx) = devices_rt();
+        assert!(has_text(&rt, "ulak 0.2.0 (def456) / hub 0.2.0 (def456)"));
+        assert!(rt.find("version-flag").is_none());
+        up(&mut rt, "", HubToUi::HubVersion(vi("0.3.0", "zzz", 1)));
+        assert!(has_text(&rt, "ulak 0.2.0 (def456) / hub 0.3.0 (zzz)"));
+        assert!(has_text(&rt, "differs from hub"));
+        rt.update(|s, _| s.ui.own_override = Some(vi("0.3.0", "zzz", 0)));
+        rt.frame(1.0);
+        assert!(has_text(&rt, "protocol too old"));
+    }
+
+    #[test]
+    fn per_row_buttons_send_exact_frames_with_two_click_update() {
+        use ulak_proto::UpdateState as U;
+        let (mut rt, mut rx) = devices_rt();
+        let n1 = NodeId::new("n1").unwrap();
+        up(
+            &mut rt,
+            "n1",
+            HubToUi::NodeVersion {
+                node: n1.clone(),
+                info: vi("0.1.0", "abc", 1),
+            },
+        );
+        assert!(has_text(&rt, "differs from hub"));
+        click(&mut rt, "check-n1");
+        assert_eq!(
+            drain(&mut rx),
+            vec![UiToHub::CheckUpdate {
+                node: Some(n1.clone())
+            }]
+        );
+        click(&mut rt, "update-n1");
+        assert!(drain(&mut rx).is_empty(), "not available: disabled");
+        up(
+            &mut rt,
+            "n1",
+            status(
+                "n1",
+                U::Available {
+                    version: "0.2.0".into(),
+                },
+            ),
+        );
+        assert!(has_text(&rt, "Available 0.2.0"));
+        assert!(rt.find("node-n1-update").is_some(), "chip badge");
+        click(&mut rt, "update-n1");
+        assert!(drain(&mut rx).is_empty(), "first click only arms");
+        assert!(has_text(&rt, "Click again to update"));
+        click(&mut rt, "update-n1");
+        assert_eq!(drain(&mut rx), vec![UiToHub::UpdateNode { node: Some(n1) }]);
+        assert_eq!(rt.state.update_armed, None);
+    }
+
+    #[test]
+    fn all_buttons_send_none() {
+        use ulak_proto::UpdateState as U;
+        let (mut rt, mut rx) = devices_rt();
+        click(&mut rt, "check-all");
+        assert_eq!(drain(&mut rx), vec![UiToHub::CheckUpdate { node: None }]);
+        click(&mut rt, "update-all");
+        assert!(drain(&mut rx).is_empty(), "nothing available: disabled");
+        up(
+            &mut rt,
+            "n1",
+            status(
+                "n1",
+                U::Available {
+                    version: "0.2.0".into(),
+                },
+            ),
+        );
+        click(&mut rt, "update-all");
+        assert!(drain(&mut rx).is_empty());
+        click(&mut rt, "update-all");
+        assert_eq!(drain(&mut rx), vec![UiToHub::UpdateNode { node: None }]);
+    }
+
+    #[test]
+    fn every_update_state_has_a_pill_and_failed_keeps_full_text() {
+        use ulak_proto::UpdateState as U;
+        let (mut rt, _rx) = devices_rt();
+        let long = "x".repeat(200);
+        for (st, want) in [
+            (
+                U::UpToDate {
+                    checked_ms: 3_723_000,
+                },
+                "Up to date, checked 01:02:03",
+            ),
+            (
+                U::Available {
+                    version: "0.9.0".into(),
+                },
+                "Available 0.9.0",
+            ),
+            (U::Checking, "Checking"),
+            (U::Downloading, "Downloading"),
+            (U::Verifying, "Verifying"),
+            (U::Installing, "Installing"),
+            (U::Restarting, "Restarting"),
+        ] {
+            up(&mut rt, "n1", status("n1", st));
+            assert!(has_text(&rt, want), "{want}");
+        }
+        up(&mut rt, "n1", status("n1", U::failed(&long)));
+        assert!(has_text(&rt, &format!("Failed: {}...", "x".repeat(30))));
+        assert!(has_text(&rt, &long), "full text on the second line");
+    }
+
+    #[test]
+    fn offline_node_loses_its_update_status() {
+        use ulak_proto::UpdateState as U;
+        let (mut rt, _rx) = devices_rt();
+        up(&mut rt, "n1", status("n1", U::Checking));
+        assert!(has_text(&rt, "Checking"));
+        let mut n = rt.state.ui.nodes[0].clone();
+        n.state = ulak_proto::NodeState::Offline;
+        up(&mut rt, "n1", HubToUi::NodeUpdate(n));
+        assert!(!has_text(&rt, "Checking"));
     }
 }
