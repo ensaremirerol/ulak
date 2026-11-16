@@ -1,0 +1,43 @@
+[package]
+name = "ulak"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ulak"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "ulak"
+path = "src/main.rs"
+
+[dependencies]
+ulak-proto = { path = "../ulak-proto" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+tokio = { version = "1", features = ["macros", "sync"] }
+futures-util = { version = "0.3", features = ["sink"] }
+serde_json = "1"
+base64 = "0.22"
+vte = "0.15"
+thiserror = "2"
+
+# Native only: the hub client with mTLS, the config dir and `ulak join`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ulakd = { path = "../ulakd" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+tokio-tungstenite = "0.26"
+rustls = "0.23"
+
+# Browser only: the wasm entry point, the browser WebSocket and WebAuthn glue.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "WebSocket", "MessageEvent", "CloseEvent", "Event", "Location", "Navigator", "CredentialsContainer", "CredentialCreationOptions", "CredentialRequestOptions", "Response", "Request", "RequestInit", "Headers", "RequestCredentials"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+tokio-rustls = "0.26"
+serde_json = "1"
+webauthn-rs-proto = "0.6.2"

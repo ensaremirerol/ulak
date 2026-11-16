@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/ulak-proto", "crates/ulak-remote", "crates/ulakd", "crates/ulak"]
+
+# Rune's own `[patch.crates-io]` does not apply to workspaces that depend on it, so repeat it (same rev).
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "0796df5fa269b85d4fc04786bbd37f7349eb6606" }

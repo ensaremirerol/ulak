@@ -1,0 +1,435 @@
+//! Hub client: mTLS WebSocket, Hello/Heartbeat, command handling, reconnect with capped backoff.
+use crate::{
+    config::{daemon_ws_url, Identity},
+    errors::{AgentError, HubError},
+    renew,
+    telemetry::{Probe, Probed},
+};
+use futures_util::{SinkExt, StreamExt};
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    ClientConfig, RootCertStore,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::mpsc,
+    task::JoinHandle,
+};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::Message, Connector, WebSocketStream,
+};
+use ulak_proto::{
+    decode, encode, AgentId, AgentStatus, DaemonToHub, HubToDaemon, NodeId, NodeInfo, SpawnSpec,
+};
+
+/// What the hub loop needs from the agent runtime. `Tmux` is the real one.
+pub trait AgentHost: Send + Sync + 'static {
+    fn spawn(&self, spec: &SpawnSpec) -> impl Future<Output = Result<(), AgentError>> + Send;
+    fn kill(&self, id: &AgentId) -> impl Future<Output = Result<(), AgentError>> + Send;
+    fn nudge(
+        &self,
+        id: &AgentId,
+        text: &str,
+    ) -> impl Future<Output = Result<(), AgentError>> + Send;
+    fn input(
+        &self,
+        id: &AgentId,
+        data: &[u8],
+    ) -> impl Future<Output = Result<(), AgentError>> + Send;
+    fn list(&self) -> impl Future<Output = Result<Vec<AgentId>, AgentError>> + Send;
+    /// Resolves when typing the prompt into a spawned agent failed (the spawn itself had
+    /// succeeded). Hosts that never report this keep the default: pending forever.
+    fn next_prompt_failure(&self) -> impl Future<Output = Option<AgentId>> + Send {
+        std::future::pending()
+    }
+    /// Pane bytes until the receiver is dropped.
+    fn attach(
+        &self,
+        id: &AgentId,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Vec<u8>>, AgentError>> + Send;
+}
+
+pub type SharedProbe = Arc<Mutex<Box<dyn Probe>>>;
+
+#[derive(Debug, Clone)]
+pub struct SessionCfg {
+    pub node_id: NodeId,
+    pub hostname: String,
+    pub heartbeat: Duration,
+}
+
+/// Client TLS config: trusts only the pinned hub CA and presents the device certificate.
+pub fn client_tls(
+    ca_pem: &str,
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<Arc<ClientConfig>, HubError> {
+    let tls = |e: &dyn std::fmt::Display| HubError::Tls(e.to_string());
+    let mut roots = RootCertStore::empty();
+    for c in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+        roots.add(c.map_err(|e| tls(&e))?).map_err(|e| tls(&e))?;
+    }
+    let chain = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| tls(&e))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| tls(&e))?;
+    let cfg = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| tls(&e))?
+    .with_root_certificates(roots)
+    .with_client_auth_cert(chain, key)
+    .map_err(|e| tls(&e))?;
+    Ok(Arc::new(cfg))
+}
+
+/// Connects to any `ws://` or `wss://` URL. `tls` is used for `wss`.
+pub async fn connect(
+    url: &str,
+    tls: Option<Arc<ClientConfig>>,
+) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, HubError> {
+    let (ws, _) =
+        connect_async_tls_with_config(url, None, false, tls.map(Connector::Rustls)).await?;
+    Ok(ws)
+}
+
+/// 1 s doubling to a 30 s cap.
+#[derive(Debug, Clone)]
+pub struct Backoff {
+    next: Duration,
+    cap: Duration,
+    base: Duration,
+}
+
+impl Backoff {
+    pub fn new(base: Duration, cap: Duration) -> Self {
+        Self {
+            next: base,
+            cap,
+            base,
+        }
+    }
+    pub fn next_delay(&mut self) -> Duration {
+        let d = self.next;
+        self.next = (self.next * 2).min(self.cap);
+        d
+    }
+    pub fn reset(&mut self) {
+        self.next = self.base;
+    }
+}
+
+async fn sample(probe: &SharedProbe) -> Result<Probed, crate::errors::TelemetryError> {
+    let probe = Arc::clone(probe);
+    tokio::task::spawn_blocking(move || {
+        probe
+            .lock()
+            .expect("probe lock is never held across a panic")
+            .sample()
+    })
+    .await
+    .expect("probe task does not panic")
+}
+
+struct Session<'a, H> {
+    cfg: &'a SessionCfg,
+    host: &'a H,
+    last: Probed,
+    known: HashSet<AgentId>,
+    attached: HashMap<AgentId, JoinHandle<()>>,
+    out: mpsc::UnboundedSender<DaemonToHub>,
+}
+
+impl<H: AgentHost> Session<'_, H> {
+    fn hello(&self) -> DaemonToHub {
+        let mut agents: Vec<AgentId> = self.known.iter().cloned().collect();
+        agents.sort();
+        DaemonToHub::Hello {
+            node: NodeInfo::new(
+                self.cfg.node_id.clone(),
+                self.cfg.hostname.clone(),
+                self.last.state.clone(),
+                self.last.telemetry.clone(),
+                agents,
+            ),
+        }
+    }
+
+    // ponytail: unbounded so a handler never blocks on its own loop; bound it if a slow hub piles up pane output.
+    async fn emit(&self, m: DaemonToHub) {
+        // the receiver lives in the same loop; it only closes when the session ends
+        let _ = self.out.send(m);
+    }
+
+    async fn status(&self, agent: &AgentId, status: AgentStatus) {
+        self.emit(DaemonToHub::AgentStatus {
+            agent: agent.clone(),
+            status,
+        })
+        .await;
+    }
+
+    fn forget(&mut self, id: &AgentId) {
+        self.known.remove(id);
+        if let Some(h) = self.attached.remove(id) {
+            h.abort();
+        }
+    }
+
+    /// The agent runs but never got its prompt: report Failed (the hub revokes its token) and
+    /// stop the session so no orphan keeps running.
+    async fn prompt_failed(&mut self, id: &AgentId) {
+        eprintln!("ulakd: prompt for {id:?} was not typed; reporting Failed");
+        if let Err(e) = self.host.kill(id).await {
+            eprintln!("ulakd: kill {id:?} after prompt failure: {e}");
+        }
+        self.forget(id);
+        self.status(id, AgentStatus::Failed).await;
+        self.emit(self.hello()).await;
+    }
+
+    async fn handle(&mut self, cmd: HubToDaemon) {
+        match cmd {
+            HubToDaemon::Spawn(spec) => {
+                let id = spec.agent_id().clone();
+                self.status(&id, AgentStatus::Starting).await;
+                match self.host.spawn(&spec).await {
+                    Ok(()) => {
+                        self.known.insert(id.clone());
+                        self.status(&id, AgentStatus::Running).await;
+                        self.emit(self.hello()).await;
+                    }
+                    Err(e) => {
+                        eprintln!("ulakd: spawn {id:?} failed: {e}");
+                        self.status(&id, AgentStatus::Failed).await;
+                    }
+                }
+            }
+            HubToDaemon::Kill { agent } => match self.host.kill(&agent).await {
+                Ok(()) => {
+                    self.forget(&agent);
+                    self.status(&agent, AgentStatus::Exited(None)).await;
+                    self.emit(self.hello()).await;
+                }
+                Err(e) => eprintln!("ulakd: kill {agent:?} failed: {e}"),
+            },
+            HubToDaemon::Nudge { agent, text } => {
+                if let Err(e) = self.host.nudge(&agent, &text).await {
+                    eprintln!("ulakd: nudge {agent:?} failed: {e}");
+                }
+            }
+            HubToDaemon::PaneInput { agent, data } => {
+                if let Err(e) = self.host.input(&agent, &data).await {
+                    eprintln!("ulakd: input {agent:?} failed: {e}");
+                }
+            }
+            HubToDaemon::Attach { agent } => match self.host.attach(&agent).await {
+                Ok(mut rx) => {
+                    let (out, id) = (self.out.clone(), agent.clone());
+                    let task = tokio::spawn(async move {
+                        while let Some(data) = rx.recv().await {
+                            if out
+                                .send(DaemonToHub::PaneOutput {
+                                    agent: id.clone(),
+                                    data,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    if let Some(old) = self.attached.insert(agent, task) {
+                        old.abort();
+                    }
+                }
+                Err(e) => eprintln!("ulakd: attach {agent:?} failed: {e}"),
+            },
+            HubToDaemon::Detach { agent } => {
+                if let Some(h) = self.attached.remove(&agent) {
+                    h.abort();
+                }
+            }
+        }
+    }
+
+    /// One heartbeat tick: Hello if the state or agent set changed, else Heartbeat.
+    async fn tick(&mut self, probe: &SharedProbe) {
+        let before = (self.last.state.clone(), self.known.clone());
+        match sample(probe).await {
+            Ok(p) => self.last = p,
+            Err(e) => {
+                eprintln!("ulakd: telemetry failed: {e}");
+                return;
+            }
+        }
+        if let Ok(now) = self.host.list().await {
+            let now: HashSet<AgentId> = now.into_iter().collect();
+            let mut gone: Vec<AgentId> = self.known.difference(&now).cloned().collect();
+            gone.sort();
+            for id in gone {
+                self.forget(&id);
+                self.status(&id, AgentStatus::Exited(None)).await;
+            }
+            self.known.extend(now);
+        }
+        if before == (self.last.state.clone(), self.known.clone()) {
+            self.emit(DaemonToHub::Heartbeat(self.last.telemetry.clone()))
+                .await;
+        } else {
+            self.emit(self.hello()).await;
+        }
+    }
+}
+
+/// Runs one connection until the hub closes it. Sends Hello first.
+pub async fn run_session<S, H>(
+    ws: WebSocketStream<S>,
+    cfg: &SessionCfg,
+    host: &H,
+    probe: &SharedProbe,
+) -> Result<(), HubError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    H: AgentHost,
+{
+    let (mut sink, mut stream) = ws.split();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<DaemonToHub>();
+    let known: HashSet<AgentId> = host.list().await.unwrap_or_default().into_iter().collect();
+    let mut s = Session {
+        cfg,
+        host,
+        last: sample(probe).await?,
+        known,
+        attached: HashMap::new(),
+        out,
+    };
+    sink.send(Message::text(encode(&s.hello())?)).await?;
+    let mut tick = tokio::time::interval(cfg.heartbeat);
+    tick.tick().await; // the first tick fires immediately; Hello already covered it
+    let result = loop {
+        tokio::select! {
+            msg = stream.next() => match msg {
+                None | Some(Ok(Message::Close(_))) => break Ok(()),
+                Some(Err(e)) => break Err(e.into()),
+                Some(Ok(Message::Text(t))) => match decode::<HubToDaemon>(t.as_str()) {
+                    Ok(cmd) => s.handle(cmd).await,
+                    Err(e) => eprintln!("ulakd: bad hub frame: {e}"),
+                },
+                Some(Ok(_)) => {}
+            },
+            _ = tick.tick() => s.tick(probe).await,
+            Some(id) = host.next_prompt_failure() => s.prompt_failed(&id).await,
+            Some(m) = out_rx.recv() => {
+                if let Err(e) = sink.send(Message::text(encode(&m)?)).await {
+                    break Err(e.into());
+                }
+            }
+        }
+    };
+    for h in s.attached.values() {
+        h.abort();
+    }
+    result
+}
+
+/// Connects and reconnects forever (with capped backoff).
+pub async fn run_forever<H: AgentHost>(
+    id: &Identity,
+    hostname: String,
+    heartbeat: Duration,
+    host: &H,
+    probe: SharedProbe,
+) -> Result<std::convert::Infallible, HubError> {
+    run_forever_in(id, None, hostname, heartbeat, host, probe).await
+}
+
+/// Like [`run_forever`]; with `dir` it also renews the certificate (at start and every
+/// [`renew::CHECK_EVERY`]) and reconnects with the new one.
+pub async fn run_forever_in<H: AgentHost>(
+    id: &Identity,
+    dir: Option<&Path>,
+    hostname: String,
+    heartbeat: Duration,
+    host: &H,
+    probe: SharedProbe,
+) -> Result<std::convert::Infallible, HubError> {
+    let url = daemon_ws_url(&id.hub_url)?;
+    let cfg = SessionCfg {
+        node_id: id.node_id.clone(),
+        hostname,
+        heartbeat,
+    };
+    let mut id = id.clone();
+    let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+    let try_renew = |id: Identity| async move {
+        let Some(dir) = dir else { return id };
+        match renew::renew_if_due(dir, &id).await {
+            Ok(Some(new)) => {
+                eprintln!("ulakd: certificate renewed");
+                new
+            }
+            Ok(None) => id,
+            Err(e) => {
+                eprintln!("ulakd: certificate renewal failed: {e}");
+                id
+            }
+        }
+    };
+    id = try_renew(id).await;
+    loop {
+        let tls = url
+            .starts_with("wss://")
+            .then(|| client_tls(&id.ca_pem, &id.cert_pem, &id.key_pem))
+            .transpose()?;
+        match connect(&url, tls).await {
+            Ok(ws) => {
+                let started = Instant::now();
+                let session = run_session(ws, &cfg, host, &probe);
+                tokio::pin!(session);
+                let r = loop {
+                    tokio::select! {
+                        r = &mut session => break Some(r),
+                        _ = tokio::time::sleep(renew::CHECK_EVERY), if dir.is_some() => {
+                            let new = try_renew(id.clone()).await;
+                            if new.cert_pem != id.cert_pem {
+                                id = new;
+                                break None; // reconnect with the new certificate
+                            }
+                        }
+                    }
+                };
+                if let Some(Err(e)) = r {
+                    eprintln!("ulakd: session ended: {e}");
+                }
+                if started.elapsed() >= Duration::from_secs(10) {
+                    backoff.reset();
+                }
+            }
+            Err(e) => eprintln!("ulakd: connect to {url} failed: {e}"),
+        }
+        tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_to_cap_and_resets() {
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        let v: Vec<u64> = (0..7).map(|_| b.next_delay().as_secs()).collect();
+        assert_eq!(v, [1, 2, 4, 8, 16, 30, 30]);
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+    }
+}
