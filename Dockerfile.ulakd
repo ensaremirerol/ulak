@@ -1,0 +1,18 @@
+# ulakd (node daemon). Build: docker build -f Dockerfile.ulakd -t ulakd .
+# Run with --pid=host if it should see the host's processes for gaming detection.
+FROM rust:1.95-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p ulakd
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tmux \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --home-dir /home/ulakd ulakd \
+ && mkdir /data && chown ulakd /data
+COPY --from=build /src/target/release/ulakd /usr/local/bin/ulakd
+ENV ULAKD_DIR=/data
+USER ulakd
+VOLUME /data
+ENTRYPOINT ["ulakd"]
+CMD ["run"]
