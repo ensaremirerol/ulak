@@ -151,6 +151,7 @@ p.err { margin: 0; color: var(--bad); overflow-wrap: anywhere; }
   .hide-phone { display: none; }
   .show-phone { display: inline-flex; }
   .keybar { display: flex; }
+  .agent-col { flex: 1 1 100%; }
   .console.has-sel .node-grid, .console.has-sel .agent-col { display: none; }
   .console.has-sel .console-body { min-height: calc(100vh - var(--tabs-h) - 140px); }
   .term-host { height: calc(100vh - var(--tabs-h) - 300px); }

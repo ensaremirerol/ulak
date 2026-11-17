@@ -17,7 +17,7 @@ http.createServer((req, res) => {
     const p = Number(u.searchParams.get('page') ?? 1);
     return p === 1 ? send(200, page1, { link: `<http://127.0.0.1:${port}/user/repos?page=2>; rel="next"` }) : send(200, page2);
   }
-  if (u.pathname === '/repos/tester/hello') return send(200, repo('tester/hello', 'hello world'));
-  if (u.pathname === '/repos/tester/hello/branches') return send(200, [{ name: 'main' }, { name: 'dev' }]);
+  { const m = u.pathname.match(/^\/repos\/(tester\/[a-z]+)$/); if (m) return send(200, repo(m[1], m[1])); }
+  if (/^\/repos\/tester\/[a-z]+\/branches$/.test(u.pathname)) return send(200, [{ name: 'main' }, { name: 'dev' }]);
   send(404, { message: 'Not Found' });
 }).listen(port, '127.0.0.1');
