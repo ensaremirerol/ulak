@@ -5595,7 +5595,7 @@ dependencies = [
 
 [[package]]
 name = "ulak"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -5619,7 +5619,7 @@ dependencies = [
 
 [[package]]
 name = "ulak-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "proptest",
@@ -5630,7 +5630,7 @@ dependencies = [
 
 [[package]]
 name = "ulak-remote"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -5658,7 +5658,7 @@ dependencies = [
 
 [[package]]
 name = "ulakd"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "ed25519-dalek",
@@ -5744,6 +5744,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6176,6 +6177,15 @@ dependencies = [
  "serde_json",
  "serde_with",
  "url",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

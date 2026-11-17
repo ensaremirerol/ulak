@@ -1,4 +1,6 @@
 //! ulak hub. Part 2a: store and scheduling. Part 2b: CA, enrollment, device and agent auth.
+#[cfg(unix)]
+pub mod admin;
 mod ca;
 mod devices;
 mod enroll;

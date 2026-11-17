@@ -223,16 +223,12 @@ impl Hub {
 
     /// Revokes a device and closes its open sockets.
     pub fn revoke_device(&self, id: &NodeId, now_ms: u64) -> Result<(), DeviceError> {
-        let was_node = Devices::list(&*self.store)?
-            .iter()
-            .any(|d| &d.id == id && d.kind == DeviceKind::Node);
         Devices::revoke(&*self.store, id, now_ms)?;
-        if was_node {
-            // No NodeRemoved variant exists, so UIs are told the node is Offline.
-            if let Some(mut n) = self.registry.remove(id) {
-                n.state = NodeState::Offline;
-                self.ui_send(HubToUi::NodeUpdate(n));
-            }
+        // Any device may have been a node. No NodeRemoved variant exists, so UIs are told
+        // the node is Offline.
+        if let Some(mut n) = self.registry.remove(id) {
+            n.state = NodeState::Offline;
+            self.ui_send(HubToUi::NodeUpdate(n));
         }
         // No open socket is fine.
         let _ = self.kick.send(id.clone());
@@ -333,12 +329,13 @@ impl Hub {
             .ok_or_else(|| ServerError::NodeOffline(node.clone()))
     }
 
-    /// The device behind a client cert, if it is active and of the right kind.
-    pub(crate) fn authorize(&self, peer: &Peer, kind: DeviceKind) -> Result<NodeId, StatusCode> {
+    /// The device behind a client cert, if it is active. Any kind may act as node or UI; the
+    /// recorded kind is for display only.
+    pub(crate) fn authorize(&self, peer: &Peer) -> Result<NodeId, StatusCode> {
         let id = peer.cn.clone().ok_or(StatusCode::UNAUTHORIZED)?;
         let devices = Devices::list(&*self.store).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         match devices.iter().find(|d| d.id == id) {
-            Some(d) if d.revoked_ms.is_none() && d.kind == kind => Ok(id),
+            Some(d) if d.revoked_ms.is_none() => Ok(id),
             _ => Err(StatusCode::FORBIDDEN),
         }
     }
@@ -592,6 +589,7 @@ async fn enroll(
     };
     match h.enroller.redeem(&req, now) {
         Ok(done) => Json(done.response).into_response(),
+        Err(e @ EnrollError::BrowserCode) => (StatusCode::FORBIDDEN, e.to_string()).into_response(),
         Err(EnrollError::BadOtp) => StatusCode::FORBIDDEN.into_response(),
         Err(EnrollError::Locked) => StatusCode::TOO_MANY_REQUESTS.into_response(),
         Err(EnrollError::InvalidKey) => StatusCode::BAD_REQUEST.into_response(),

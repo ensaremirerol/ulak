@@ -266,6 +266,13 @@ async fn bad_wrong_kind_and_expired_otps_are_rejected() {
     let old = fx.hub.enroller().begin(DeviceKind::Browser, 0).otp;
     let r = register_at(&fx, &mut sp, old.expose(), "x", origin(&fx)).await;
     assert_eq!(r.status, 403);
+    // A device code is refused with a hint and is not spent.
+    let r = register_at(&fx, &mut sp, node.expose(), "x", origin(&fx)).await;
+    assert!(r.body.contains("for a device"), "{}", r.body);
+    assert!(matches!(
+        fx.hub.enroller().consume(&node, now()),
+        Err(EnrollError::DeviceCode)
+    ));
     // Nothing was registered.
     assert!(fx.hub.store().list_passkeys().unwrap().is_empty());
     // A fresh code still works (begin() clears the lockout), and only once.
@@ -471,7 +478,7 @@ async fn admin_api_lists_issues_otps_and_revokes() {
 }
 
 #[tokio::test]
-async fn admin_api_accepts_a_ui_cert_but_not_a_node_cert() {
+async fn admin_api_accepts_any_active_device_cert_but_not_a_revoked_one() {
     let fx = start(HubConfig::default()).await;
     let enroll = |kind| {
         let fx = &fx;
@@ -499,7 +506,7 @@ async fn admin_api_accepts_a_ui_cert_but_not_a_node_cert() {
         req(&fx, Some(&node), "GET", "/api/devices", &[], "")
             .await
             .status,
-        403
+        200
     );
 }
 
@@ -529,6 +536,11 @@ async fn static_files_have_types_security_headers_and_fallback() {
     let csp = r.header("content-security-policy").unwrap();
     assert!(csp.contains("default-src 'self'") && csp.contains("frame-ancestors 'none'"));
     assert!(csp.contains("'wasm-unsafe-eval'"));
+    // Strict: Rune's styles are made CSP-safe in the bundle (scripts/patch-bridge.py), not allowed here.
+    assert!(
+        !csp.contains("unsafe-inline") && !csp.contains("style-src-attr"),
+        "{csp}"
+    );
     assert_eq!(r.header("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(r.header("referrer-policy").unwrap(), "no-referrer");
     assert_eq!(

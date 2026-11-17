@@ -30,8 +30,9 @@ fn ask(q: &str) -> std::io::Result<String> {
 
 /// `ulak join <hub-url>`: enroll this machine as a UI device (the OTP comes from "Add device").
 #[cfg(not(target_arch = "wasm32"))]
-fn join(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn join(url: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dir = config_dir();
+    ulakd::join::check_overwrite(&dir, force, "ULAK_FORCE")?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -45,10 +46,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("join") {
         let Some(url) = args.get(1) else {
-            eprintln!("usage: ulak join <https://hub[:port]>");
+            eprintln!("usage: ulak join <https://hub[:port]> [--force]");
             std::process::exit(2);
         };
-        if let Err(e) = join(url) {
+        if let Err(e) = join(url, args.iter().any(|a| a == "--force")) {
             eprintln!("ulak: {e}");
             std::process::exit(1);
         }

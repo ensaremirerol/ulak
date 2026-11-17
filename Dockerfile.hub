@@ -19,13 +19,13 @@ ENV GIT_SHA=$GIT_SHA
 RUN cargo build --release -p ulak-remote --target "$(cat /triple)" \
  && cp "target/$(cat /triple)/release/ulak-remote" /ulak-remote
 
-# The wasm bundle is platform independent: built once, on the build host.
-FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS web-build
-WORKDIR /src
-COPY . .
-RUN rustup target add wasm32-unknown-unknown \
- && cargo install wasm-bindgen-cli --locked --version "$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock","rb"))["package"] if p["name"]=="wasm-bindgen"))')" \
- && scripts/build-web.sh --out /web
+# The web bundle is platform independent: built once, on the build host.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web-build
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build && cp -r dist /web
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \

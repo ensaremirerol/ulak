@@ -7,16 +7,27 @@ Remote control for AI coding agents. A hub relays between node daemons (which ru
 - `crates/ulak-proto`: wire types (JSON frames) shared by all parties.
 - `crates/ulak-remote`: the hub. Private CA, mTLS for nodes and native UIs, SQLite store (devices, passkeys, sessions, mail), registry, scheduler, MCP endpoint for agents, static serving of the web UI, WebAuthn.
 - `crates/ulakd`: node daemon. Enrols with the hub, runs agents in tmux, streams screens, reports load/busy state (gaming/idle), reconnects with backoff.
-- `crates/ulak`: the UI (Rune). Native binary `ulak` and a wasm build for browsers (`scripts/build-web.sh`).
+- `crates/ulak`: the UI (Rune). Native binary `ulak` only; the old wasm browser build is gone.
+- `web/`: the browser UI, a Preact PWA (passkey login, installable). Built by `scripts/build-web.sh`.
 - Native UIs and nodes authenticate with client certificates issued by the hub CA after enrolment; browsers use passkeys (WebAuthn) and a session (HttpOnly cookie or Bearer token).
 - Certificates last 90 days and are renewed over mTLS (`POST /renew`) inside the last 30 days.
 - Agents never see hub credentials: the hub hands each spawned agent a per-agent `ULAK_AGENT_TOKEN` for its MCP calls.
 - API details: `crates/ulak-remote/README.md`; progress and decisions: `PROGRESS.md`.
 
+## First-time setup
+
+Start the hub, then mint the first UI code on the running hub (no restart, no stdin):
+
+```sh
+docker compose exec hub ulak-remote admin otp ui     # or: docker exec <container> ulak-remote admin otp ui
+ulak join https://hub.example.org:8443               # on your machine, with that code and fingerprint
+```
+
+More machines: Devices > Add device, or `admin otp node`. Lost all UI devices: run `admin otp ui` again. Also `admin devices|revoke|passkeys|revoke-passkey|status`. The command talks to `$ULAK_DIR/admin.sock` (0600, local only). Compose example and details: [hub README](crates/ulak-remote/README.md#first-time-setup).
+
 ## Quick start
 
-Needs Rust (stable), tmux on the node machines. Browser build also needs the wasm target and CLI:
-`rustup target add wasm32-unknown-unknown` and `cargo install wasm-bindgen-cli --version <wasm-bindgen in Cargo.lock> --locked`.
+Needs Rust (stable), tmux on the node machines. The browser UI also needs Node.js 22 + npm.
 
 ```sh
 # 1. Hub (prints a one-time code and the CA fingerprint)
@@ -26,12 +37,12 @@ ULAK_BOOTSTRAP_OTP=node ULAK_SANS=hub.example.org,localhost cargo run -p ulak-re
 cargo run -p ulakd -- join https://hub.example.org:8443
 cargo run -p ulakd -- run
 
-# 3. Native UI (hub: stdin `otp ui`, or Devices > Add device)
+# 3. Native UI (hub: `ulak-remote admin otp ui`, or Devices > Add device)
 cargo run -p ulak -- join https://hub.example.org:8443
 cargo run -p ulak
 
 # 4. Web UI
-scripts/build-web.sh                        # -> target/web
+scripts/build-web.sh                        # npm ci + vite build -> target/web (--out DIR to change)
 ULAK_WEB_DIR=$PWD/target/web ULAK_RP_ID=hub.example.org ULAK_ORIGIN=https://hub.example.org:8443 cargo run -p ulak-remote
 ```
 
@@ -39,10 +50,13 @@ Browser on localhost without TLS (development only): add `ULAK_DEV_HTTP=1` to th
 
 ## Enrollment
 
-1. The hub creates a one-time code (OTP: 8 characters, 5 minutes, single use, locks after 3 wrong tries) for a kind: `node`, `ui` or `browser`. Sources: `ULAK_BOOTSTRAP_OTP`, stdin `otp <kind>`, or Devices > Add device in the UI.
+1. The hub creates a one-time code (OTP: 8 characters, 5 minutes, single use, locks after 3 wrong tries) for a kind: `device` (alias of `node`/`ui`: one code for `ulakd join` or `ulak join`) or `browser`. Sources: `ULAK_BOOTSTRAP_OTP`, stdin `otp <kind>`, or Devices > Add device in the UI.
 2. The new device is given the hub CA fingerprint out of band (printed next to the OTP) and checks that the CA the hub presents matches it (trust on first use, pinned by fingerprint).
-3. Node/UI: generates a key, sends OTP + public key, gets a client cert; later connections use mTLS.
+3. Device (node or UI): generates a key, sends OTP + public key, gets a client cert; later connections use mTLS.
 4. Browser: enter the OTP on the login screen to register a passkey; later "Sign in with passkey" gives a 7-day session. Revoking a device or passkey drops its connections.
+
+## Security model
+Any enrolled (non-revoked) device may act as a node (`/ws/daemon`) or as a UI (`/ws/ui`, `/api/*`); the recorded kind (node/ui) is for display only, and one `device` code works for both `ulakd join` and `ulak join`. Browsers are separate: passkey and session only, and a session cannot open `/ws/daemon`. The catch: agents run as your user, so a stolen or compromised node key can control the hub (spawn, kill, answer, add devices) until that device is revoked. Mitigation: revoke it from Devices or `ulak-remote admin revoke <id>`. If you later add less-trusted machines, per-device capability flags (node only, UI only) are the way to restore the separation.
 
 ## Environment variables
 
@@ -83,7 +97,8 @@ If an agent comes back asking the user to log in (or cannot be installed on a no
 cargo test --workspace        # tmux-based tests skip when tmux is missing
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
-scripts/build-web.sh          # wasm build; open the result via the hub (see above)
+scripts/build-web.sh          # PWA build; open the result via the hub (see above)
+(cd web && npm ci && npm run lint && npm run typecheck && npm test)
 ```
 
 ## Known limits
@@ -113,3 +128,11 @@ Every binary reports its version (`ulak-remote --version`; hub `GET /api/version
 
 ## Agent install and login blockers (ulakd)
 `ulakd` reads `agents.json` from its config dir (created with defaults on first run). Per agent binary: a `check`, an optional `install` argv (run without a shell, only from this local file), and `login_patterns`. A missing agent is installed before it is spawned; if that fails, or the agent asks the user to log in, the hub shows a permanent blocker, further spawns of that profile on that node are refused, and the tmux session stays open so you can attach and log in. Resolve the blocker in the UI when done.
+
+
+## How agents get connected to the hub (MCP)
+When the hub spawns an agent it sets `ULAK_MCP_URL` and `ULAK_AGENT_TOKEN`. `ulakd` does the rest, per `agents.json` profile (binary file name):
+
+- `"mcp": "claude"` (default for the binary `claude`): writes `<config dir>/run/mcp-<agent>.json` (mode 0600; it only refers to `${ULAK_AGENT_TOKEN}`, the token is not on disk), passes `--mcp-config <file>` (the user's own MCP servers keep working, no `--strict-mcp-config`) and sets `NODE_EXTRA_CA_CERTS=<config dir>/ca.pem` so the hub's own CA is trusted. The file is deleted when the agent is killed or its session ends, and stale files are removed when `ulakd` starts. The agent then has `send_message`, `read_inbox`, `ask_human`, `check_answer` (tools `mcp__ulak__*`).
+- `"mcp": "none"` (default for every other binary, e.g. `antigravity`): nothing is added.
+- Custom agents: set `"mcp_args": ["--mcp-server", "{mcp_url}", "--token-env", "{token_env}"]`; the argv is appended after the profile args. Placeholders: `{mcp_url}`, `{token_env}` (the name `ULAK_AGENT_TOKEN`; read the token from that env var), `{ca_file}` (hub CA pem). `NODE_EXTRA_CA_CERTS` is set too; a value in the spawn env wins.

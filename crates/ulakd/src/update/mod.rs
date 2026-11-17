@@ -41,6 +41,12 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// A panicking or cancelled blocking task is a failed update, never a dead daemon.
+fn task_failed(what: &str, e: &tokio::task::JoinError) -> UpdateError {
+    eprintln!("ulakd: update {what} task died: {e}");
+    UpdateError::Http(format!("{what} task died: {e}"))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     UpToDate,
@@ -58,7 +64,7 @@ pub struct Updater {
     exe: PathBuf,
     dir: PathBuf,
     key: Option<VerifyingKey>,
-    http: Arc<Http>,
+    pub http: Arc<Http>,
     state: watch::Sender<Option<UpdateState>>,
     busy: Mutex<()>,
     /// Called with `RESTART_EXIT` after a successful install (default: `process::exit`).
@@ -120,7 +126,7 @@ impl Updater {
         let token = token.then(|| self.token.clone()).flatten();
         tokio::task::spawn_blocking(move || http.get(&url, token.as_deref(), accept, max))
             .await
-            .expect("http task does not panic")
+            .unwrap_or_else(|e| Err(task_failed("http", &e)))
     }
 
     async fn latest(&self) -> Result<Option<Release>, UpdateError> {
@@ -177,7 +183,7 @@ impl Updater {
         );
         tokio::task::spawn_blocking(move || install::install(&exe, &bin, &dir, &from, &to))
             .await
-            .expect("install task does not panic")
+            .unwrap_or_else(|e| Err(task_failed("install", &e)))
     }
 
     async fn run_inner(&self, install: bool, honor_skip: bool) -> Result<Outcome, UpdateError> {

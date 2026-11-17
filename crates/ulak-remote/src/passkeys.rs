@@ -9,7 +9,7 @@ pub(crate) fn hash(token: &str) -> String {
 }
 
 /// A registered passkey as listed to the operator (the credential itself stays inside the hub).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PasskeyInfo {
     pub id: NodeId,
     pub name: String,

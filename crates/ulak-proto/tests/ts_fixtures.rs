@@ -1,0 +1,397 @@
+//! Wire fixtures for the web app (web/test/fixtures/wire.json): one value of every UiToHub and
+//! HubToUi variant, serialised with `ulak_proto::encode`. The TypeScript decoder tests parse them.
+//! Regenerate: `ULAK_WRITE_FIXTURES=1 cargo test -p ulak-proto --test ts_fixtures`.
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use ulak_proto::*;
+
+const UI_VARIANTS: usize = 13;
+const HUB_VARIANTS: usize = 17;
+
+fn agent() -> AgentId {
+    AgentId::new("reviewer-2").unwrap()
+}
+fn node() -> NodeId {
+    NodeId::new("vps-fra").unwrap()
+}
+fn spec() -> SpawnSpec {
+    let profile = AgentProfile::new(
+        "claude",
+        vec!["--model".into(), "opus".into()],
+        Some("/home/u/.claude-b".into()),
+    )
+    .unwrap();
+    let env = BTreeMap::from([("RUST_LOG".to_owned(), "info".to_owned())]);
+    SpawnSpec::new(
+        agent(),
+        profile,
+        "/srv/repo".into(),
+        "fix the bug".into(),
+        env,
+    )
+    .unwrap()
+}
+fn tel() -> Telemetry {
+    Telemetry::new(0.25, 12.5, Some(40.0), 33.5, 1_700_000_000_000).unwrap()
+}
+fn info(state: NodeState) -> NodeInfo {
+    NodeInfo::new(node(), "fra.example".into(), state, tel(), vec![agent()])
+}
+fn question() -> Question {
+    Question::new(
+        QuestionId::new("q-1").unwrap(),
+        agent(),
+        "Approve the migration?".into(),
+        1_700_000_001_000,
+    )
+    .unwrap()
+}
+fn message() -> Message {
+    Message::new(
+        MessageId::new("m-1").unwrap(),
+        agent(),
+        AgentId::new("planner").unwrap(),
+        ThreadId::new("t-1").unwrap(),
+        "ready for review".into(),
+        1_700_000_002_000,
+    )
+    .unwrap()
+}
+fn blocker() -> Blocker {
+    Blocker::new(
+        BlockerId::new("b-1").unwrap(),
+        node(),
+        ProfileKey::new("claude@/home/u/.claude-b").unwrap(),
+        BlockerKind::Login,
+        Some(agent()),
+        "please log in".into(),
+        1_700_000_003_000,
+    )
+}
+fn version() -> VersionInfo {
+    VersionInfo::new("0.1.2", "abc1234", 1, "linux", "x86_64").unwrap()
+}
+
+fn ui_name(f: &UiToHub) -> &'static str {
+    match f {
+        UiToHub::Spawn { .. } => "spawn",
+        UiToHub::Answer(_) => "answer",
+        UiToHub::Attach { .. } => "attach",
+        UiToHub::Detach { .. } => "detach",
+        UiToHub::PaneInput { .. } => "pane_input",
+        UiToHub::Kill { .. } => "kill",
+        UiToHub::AddDevice { .. } => "add_device",
+        UiToHub::RevokeDevice { .. } => "revoke_device",
+        UiToHub::ListDevices => "list_devices",
+        UiToHub::ResolveBlocker { .. } => "resolve_blocker",
+        UiToHub::CheckUpdate { .. } => "check_update",
+        UiToHub::UpdateNode { .. } => "update_node",
+        UiToHub::MailboxLog { .. } => "mailbox_log",
+    }
+}
+
+fn hub_name(f: &HubToUi) -> &'static str {
+    match f {
+        HubToUi::Snapshot { .. } => "snapshot",
+        HubToUi::Blockers { .. } => "blockers",
+        HubToUi::BlockerOpened(_) => "blocker_opened",
+        HubToUi::BlockerClosed { .. } => "blocker_closed",
+        HubToUi::NodeUpdate(_) => "node_update",
+        HubToUi::QuestionOpened(_) => "question_opened",
+        HubToUi::QuestionClosed { .. } => "question_closed",
+        HubToUi::MessageLogged(_) => "message_logged",
+        HubToUi::PaneOutput { .. } => "pane_output",
+        HubToUi::AgentStatus { .. } => "agent_status",
+        HubToUi::OtpOffer { .. } => "otp_offer",
+        HubToUi::Devices { .. } => "devices",
+        HubToUi::MailboxLog { .. } => "mailbox_log",
+        HubToUi::HubVersion(_) => "hub_version",
+        HubToUi::NodeVersion { .. } => "node_version",
+        HubToUi::UpdateStatus { .. } => "update_status",
+        HubToUi::Error { .. } => "error",
+    }
+}
+
+fn ui_frames() -> Vec<(&'static str, UiToHub)> {
+    vec![
+        (
+            "spawn_auto",
+            UiToHub::Spawn {
+                target: SpawnTarget::Auto,
+                spec: spec(),
+            },
+        ),
+        (
+            "spawn_node",
+            UiToHub::Spawn {
+                target: SpawnTarget::Node(node()),
+                spec: spec(),
+            },
+        ),
+        (
+            "answer",
+            UiToHub::Answer(Answer::new(QuestionId::new("q-1").unwrap(), "yes".into()).unwrap()),
+        ),
+        ("attach", UiToHub::Attach { agent: agent() }),
+        ("detach", UiToHub::Detach { agent: agent() }),
+        (
+            "pane_input",
+            UiToHub::PaneInput {
+                agent: agent(),
+                data: vec![0, 255, 27, b'[', b'A', b'\r'],
+            },
+        ),
+        ("kill", UiToHub::Kill { agent: agent() }),
+        (
+            "add_device_node",
+            UiToHub::AddDevice {
+                kind: DeviceKind::Node,
+            },
+        ),
+        (
+            "add_device_ui",
+            UiToHub::AddDevice {
+                kind: DeviceKind::Ui,
+            },
+        ),
+        (
+            "add_device_browser",
+            UiToHub::AddDevice {
+                kind: DeviceKind::Browser,
+            },
+        ),
+        (
+            "revoke_device",
+            UiToHub::RevokeDevice {
+                id: NodeId::new("pk-1a2b3c4d").unwrap(),
+            },
+        ),
+        ("list_devices", UiToHub::ListDevices),
+        (
+            "resolve_blocker",
+            UiToHub::ResolveBlocker {
+                id: BlockerId::new("b-1").unwrap(),
+            },
+        ),
+        ("check_update_all", UiToHub::CheckUpdate { node: None }),
+        (
+            "check_update_node",
+            UiToHub::CheckUpdate { node: Some(node()) },
+        ),
+        ("update_node_all", UiToHub::UpdateNode { node: None }),
+        (
+            "update_node_one",
+            UiToHub::UpdateNode { node: Some(node()) },
+        ),
+        (
+            "mailbox_log_all",
+            UiToHub::MailboxLog {
+                thread: None,
+                limit: 200,
+            },
+        ),
+        (
+            "mailbox_log_thread",
+            UiToHub::MailboxLog {
+                thread: Some(ThreadId::new("t-1").unwrap()),
+                limit: 50,
+            },
+        ),
+    ]
+}
+
+fn hub_frames() -> Vec<(&'static str, HubToUi)> {
+    let status = |s| HubToUi::AgentStatus {
+        agent: agent(),
+        node: node(),
+        status: s,
+    };
+    let upd = |s| HubToUi::UpdateStatus {
+        node: node(),
+        status: s,
+    };
+    vec![
+        (
+            "snapshot",
+            HubToUi::Snapshot {
+                nodes: vec![info(NodeState::Idle)],
+                questions: vec![question()],
+            },
+        ),
+        (
+            "blockers",
+            HubToUi::Blockers {
+                blockers: vec![blocker()],
+            },
+        ),
+        ("blocker_opened", HubToUi::BlockerOpened(blocker())),
+        (
+            "blocker_closed",
+            HubToUi::BlockerClosed {
+                id: BlockerId::new("b-1").unwrap(),
+            },
+        ),
+        (
+            "node_update_idle",
+            HubToUi::NodeUpdate(info(NodeState::Idle)),
+        ),
+        (
+            "node_update_busy_gaming",
+            HubToUi::NodeUpdate(info(NodeState::Busy(BusyReason::Gaming {
+                process: "steam".into(),
+            }))),
+        ),
+        (
+            "node_update_busy_load",
+            HubToUi::NodeUpdate(info(NodeState::Busy(BusyReason::Load))),
+        ),
+        (
+            "node_update_offline",
+            HubToUi::NodeUpdate(info(NodeState::Offline)),
+        ),
+        ("question_opened", HubToUi::QuestionOpened(question())),
+        (
+            "question_closed",
+            HubToUi::QuestionClosed {
+                id: QuestionId::new("q-1").unwrap(),
+            },
+        ),
+        ("message_logged", HubToUi::MessageLogged(message())),
+        (
+            "pane_output",
+            HubToUi::PaneOutput {
+                agent: agent(),
+                data: vec![0, 255, 27, b'[', b'H', 0xe2, 0x9c, 0x93],
+            },
+        ),
+        ("agent_status_starting", status(AgentStatus::Starting)),
+        ("agent_status_running", status(AgentStatus::Running)),
+        (
+            "agent_status_exited_code",
+            status(AgentStatus::Exited(Some(1))),
+        ),
+        (
+            "agent_status_exited_unknown",
+            status(AgentStatus::Exited(None)),
+        ),
+        ("agent_status_failed", status(AgentStatus::Failed)),
+        ("agent_status_installing", status(AgentStatus::Installing)),
+        ("agent_status_needs_login", status(AgentStatus::NeedsLogin)),
+        (
+            "otp_offer",
+            HubToUi::OtpOffer {
+                kind: DeviceKind::Browser,
+                otp: Otp::new("ABCD2345").unwrap(),
+                hub_fingerprint: "ab".repeat(32),
+                expires_ms: 1_700_000_300_000,
+            },
+        ),
+        (
+            "devices",
+            HubToUi::Devices {
+                devices: vec![
+                    DeviceInfo {
+                        id: node(),
+                        kind: DeviceKind::Node,
+                        hostname: "fra.example".into(),
+                        created_ms: 1_700_000_000_000,
+                        revoked: false,
+                    },
+                    DeviceInfo {
+                        id: NodeId::new("pk-1a2b3c4d").unwrap(),
+                        kind: DeviceKind::Browser,
+                        hostname: "my phone".into(),
+                        created_ms: 1_700_000_100_000,
+                        revoked: true,
+                    },
+                ],
+            },
+        ),
+        (
+            "mailbox_log",
+            HubToUi::MailboxLog {
+                messages: vec![message()],
+            },
+        ),
+        ("hub_version", HubToUi::HubVersion(version())),
+        (
+            "node_version",
+            HubToUi::NodeVersion {
+                node: node(),
+                info: version(),
+            },
+        ),
+        (
+            "update_status_up_to_date",
+            upd(UpdateState::UpToDate {
+                checked_ms: 1_700_000_000_000,
+            }),
+        ),
+        (
+            "update_status_available",
+            upd(UpdateState::Available {
+                version: "0.2.0".into(),
+            }),
+        ),
+        ("update_status_checking", upd(UpdateState::Checking)),
+        ("update_status_downloading", upd(UpdateState::Downloading)),
+        ("update_status_verifying", upd(UpdateState::Verifying)),
+        ("update_status_installing", upd(UpdateState::Installing)),
+        ("update_status_restarting", upd(UpdateState::Restarting)),
+        (
+            "update_status_failed",
+            upd(UpdateState::failed("no release signing key configured")),
+        ),
+        (
+            "error",
+            HubToUi::Error {
+                message: "node vps-fra is offline".into(),
+            },
+        ),
+    ]
+}
+
+fn section<T: serde::Serialize>(frames: &[(&str, T)]) -> Value {
+    let mut m = Map::new();
+    for (k, f) in frames {
+        let v: Value = serde_json::from_str(&encode(f).unwrap()).unwrap();
+        assert!(
+            m.insert((*k).to_owned(), v).is_none(),
+            "duplicate fixture {k}"
+        );
+    }
+    Value::Object(m)
+}
+
+#[test]
+fn web_fixtures_cover_every_variant_and_are_current() {
+    let ui = ui_frames();
+    let hub = hub_frames();
+    let uniq = |names: Vec<&str>| {
+        names
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
+    assert_eq!(
+        uniq(ui.iter().map(|(_, f)| ui_name(f)).collect()),
+        UI_VARIANTS,
+        "a UiToHub variant has no fixture"
+    );
+    assert_eq!(
+        uniq(hub.iter().map(|(_, f)| hub_name(f)).collect()),
+        HUB_VARIANTS,
+        "a HubToUi variant has no fixture"
+    );
+    let doc = serde_json::json!({ "ui_to_hub": section(&ui), "hub_to_ui": section(&hub) });
+    let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/test/fixtures/wire.json");
+    if std::env::var("ULAK_WRITE_FIXTURES").as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+    } else {
+        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(have, text, "web/test/fixtures/wire.json is stale: run ULAK_WRITE_FIXTURES=1 cargo test -p ulak-proto --test ts_fixtures");
+    }
+}

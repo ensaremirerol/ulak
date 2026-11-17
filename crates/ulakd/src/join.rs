@@ -168,6 +168,29 @@ pub async fn probe_hub(
     Ok((stream, prints))
 }
 
+/// Refuses to replace an existing identity unless `force` (or `$<env>` = `1`), so a forgotten
+/// enrollment is not silently overwritten. Call before prompting.
+pub fn check_overwrite(dir: &Path, force: bool, env: &'static str) -> Result<(), JoinError> {
+    if force
+        || std::env::var(env).is_ok_and(|v| v == "1")
+        || !(dir.join("cert.pem").exists() || dir.join("key.pem").exists())
+    {
+        return Ok(());
+    }
+    let q = |s: Option<String>| s.unwrap_or_else(|| "unknown".into());
+    Err(JoinError::AlreadyEnrolled {
+        dir: dir.display().to_string(),
+        hub: q(std::fs::read_to_string(dir.join("hub_url"))
+            .ok()
+            .map(|s| s.trim().to_owned())),
+        device: q(std::fs::read_to_string(dir.join("cert.pem"))
+            .ok()
+            .and_then(|c| config::node_id_from_cert(&c).ok())
+            .map(|n| n.as_str().to_owned())),
+        env,
+    })
+}
+
 /// Interactive enrollment. `ask` shows a prompt and returns the typed line.
 pub async fn join(
     hub_url: &str,
@@ -223,6 +246,27 @@ mod tests {
 
     fn req() -> EnrollRequest {
         EnrollRequest::new(Otp::new("ABCD2345").unwrap(), "PEM".into(), "box".into()).unwrap()
+    }
+
+    #[test]
+    fn join_refuses_to_overwrite_without_force() {
+        let d = std::env::temp_dir().join(format!(
+            "ulak-ow-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(check_overwrite(&d, false, "ULAK_TEST_NEVER_SET").is_ok());
+        std::fs::write(d.join("cert.pem"), "x").unwrap();
+        std::fs::write(d.join("hub_url"), "https://hub:1\n").unwrap();
+        let e = check_overwrite(&d, false, "ULAK_TEST_NEVER_SET").unwrap_err();
+        assert!(matches!(e, JoinError::AlreadyEnrolled { .. }));
+        let m = e.to_string();
+        assert!(m.contains("https://hub:1") && m.contains("--force"), "{m}");
+        assert!(check_overwrite(&d, true, "ULAK_TEST_NEVER_SET").is_ok());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

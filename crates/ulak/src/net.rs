@@ -233,6 +233,52 @@ pub fn config_dir() -> PathBuf {
     home.join(".config/ulak")
 }
 
+/// Which identity the UI runs with.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentitySource {
+    Own,
+    Ulakd,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IdentitySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Own => "identity: ulak",
+            Self::Ulakd => "identity: ulakd (this machine)",
+        }
+    }
+}
+
+/// All four enrollment files present.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn identity_complete(dir: &std::path::Path) -> bool {
+    ["cert.pem", "key.pem", "ca.pem", "hub_url"]
+        .iter()
+        .all(|f| dir.join(f).is_file())
+}
+
+/// Own dir if complete, else ulakd's dir if complete (read-only fallback), else an error
+/// that points at `ulak join`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn pick_identity(
+    own: &std::path::Path,
+    ulakd: &std::path::Path,
+) -> Result<(PathBuf, IdentitySource), String> {
+    if identity_complete(own) {
+        Ok((own.to_owned(), IdentitySource::Own))
+    } else if identity_complete(ulakd) {
+        Ok((ulakd.to_owned(), IdentitySource::Ulakd))
+    } else {
+        Err(format!(
+            "no identity in {} or {}: run `ulak join <hub-url>`",
+            own.display(),
+            ulakd.display()
+        ))
+    }
+}
+
 /// The UI's end of the connection.
 pub struct NetHandle {
     pub events: mpsc::Receiver<Event>,
@@ -319,4 +365,36 @@ pub fn start_in(
             });
         })?;
     Ok(NetHandle::new(erx, otx))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_tests {
+    use super::*;
+
+    fn dir(files: &[&str]) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ulak-id-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        for f in files {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        d
+    }
+    const ALL: [&str; 4] = ["cert.pem", "key.pem", "ca.pem", "hub_url"];
+
+    #[test]
+    fn identity_fallback() {
+        let (own, ulakd, part) = (dir(&ALL), dir(&ALL), dir(&["cert.pem"]));
+        assert_eq!(pick_identity(&own, &ulakd).unwrap().1, IdentitySource::Own);
+        let (p, s) = pick_identity(&part, &ulakd).unwrap();
+        assert_eq!((p, s), (ulakd.clone(), IdentitySource::Ulakd));
+        assert!(s.label().contains("ulakd (this machine)"));
+        let e = pick_identity(&part, &dir(&[])).unwrap_err();
+        assert!(e.contains("ulak join"), "{e}");
+    }
 }

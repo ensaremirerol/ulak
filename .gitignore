@@ -6,3 +6,6 @@
 ca.key
 key.pem
 .env*
+web/node_modules
+web/dist
+web/.tmp

@@ -42,6 +42,21 @@ pub struct Recipe {
     /// Fast scanning window after spawn; afterwards the pane is scanned at a low rate.
     #[serde(default = "d_scan")]
     pub login_scan_secs: u64,
+    /// How the agent learns about the hub's MCP server: `"claude"` (config file +
+    /// `--mcp-config`) or `"none"`. Absent: `claude` for the binary `claude`, else `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Mcp>,
+    /// Extra argv for non-claude agents; placeholders `{mcp_url}`, `{token_env}` (name of the env
+    /// var holding the agent token) and `{ca_file}` (hub CA pem). Used when `mcp` is not `claude`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mcp {
+    Claude,
+    None,
 }
 
 impl Default for Recipe {
@@ -52,6 +67,8 @@ impl Default for Recipe {
             install_timeout_secs: d_install_timeout(),
             login_patterns: Vec::new(),
             login_scan_secs: d_scan(),
+            mcp: None,
+            mcp_args: Vec::new(),
         }
     }
 }
@@ -300,6 +317,21 @@ mod tests {
     fn script(path: &Path, body: &str) {
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn mcp_fields_parse_and_default_to_absent() {
+        let a = Agents::from_json(
+            r#"{"x":{"mcp":"none","mcp_args":["--m","{mcp_url}"]},"claude":{"mcp":"claude"}}"#,
+        )
+        .unwrap();
+        assert_eq!(a.recipe("x").mcp, Some(Mcp::None));
+        assert_eq!(a.recipe("x").mcp_args, ["--m", "{mcp_url}"]);
+        assert_eq!(a.recipe("claude").mcp, Some(Mcp::Claude));
+        assert_eq!(Agents::default().recipe("claude").mcp, None);
+        assert!(!serde_json::to_string(&Agents::default())
+            .unwrap()
+            .contains("mcp"));
     }
 
     #[test]

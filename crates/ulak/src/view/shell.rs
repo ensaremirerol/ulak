@@ -113,6 +113,14 @@ fn footer(s: &App, k: &Kit) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_muted),
         );
+    if !s.identity.is_empty() {
+        r = r.child(
+            text(s.identity.clone())
+                .key("identity-line")
+                .font(k.ty.small)
+                .color(k.c.text_muted),
+        );
+    }
     if let Some(f) = s.ui.own_flag() {
         r = r.child(nodebar::pill(k, f.label().into(), &k.c.warning).key("version-flag"));
     }

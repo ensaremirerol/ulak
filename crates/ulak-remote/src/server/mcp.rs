@@ -1,4 +1,5 @@
-//! MCP over plain HTTP POST: a hand-written JSON-RPC subset (no SSE, no batches).
+//! MCP streamable HTTP, POST only: a hand-written JSON-RPC subset answered as `application/json`
+//! (no SSE, no batches, no sessions; GET and DELETE on `/mcp` are 405).
 use super::hub::{now_ms, Hub};
 use crate::*;
 use axum::{
@@ -24,16 +25,19 @@ pub(crate) async fn handle(State(h): State<Arc<Hub>>, headers: HeaderMap, body: 
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
-        return rpc_err(Value::Null, -32700, "parse error");
+        let mut r = rpc_err(Value::Null, -32700, "parse error");
+        *r.status_mut() = StatusCode::BAD_REQUEST;
+        return r;
     };
-    let Some(id) = req.get("id").cloned() else {
-        return StatusCode::ACCEPTED.into_response(); // notification
+    // Notifications and client responses get 202 without a body.
+    let (Some(id), true) = (req.get("id").cloned(), req.get("method").is_some()) else {
+        return StatusCode::ACCEPTED.into_response();
     };
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     match req.get("method").and_then(Value::as_str) {
         Some("initialize") => rpc_ok(
             id,
-            json!({"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
+            json!({"protocolVersion": negotiate(&params), "capabilities": {"tools": {}},
                    "serverInfo": {"name": "ulak-hub", "version": env!("CARGO_PKG_VERSION")}}),
         ),
         Some("ping") => rpc_ok(id, json!({})),
@@ -47,6 +51,8 @@ pub(crate) async fn handle(State(h): State<Arc<Hub>>, headers: HeaderMap, body: 
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // Operator trace: who called which tool (never arguments or results).
+            eprintln!("mcp: {} tools/call {name}", from.as_str());
             let result = match call(&h, &from, name, args).await {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),
                 Err(e) => {
@@ -57,6 +63,18 @@ pub(crate) async fn handle(State(h): State<Arc<Hub>>, headers: HeaderMap, body: 
         }
         _ => rpc_err(id, -32601, "method not found"),
     }
+}
+
+/// Versions we speak; the first is the latest.
+const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The client's requested version if supported, else our latest.
+fn negotiate(params: &Value) -> &'static str {
+    let ask = params.get("protocolVersion").and_then(Value::as_str);
+    VERSIONS
+        .into_iter()
+        .find(|v| Some(*v) == ask)
+        .unwrap_or(VERSIONS[0])
 }
 
 fn rpc_ok(id: Value, result: Value) -> Response {

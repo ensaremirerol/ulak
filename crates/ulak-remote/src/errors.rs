@@ -63,6 +63,12 @@ pub enum EnrollError {
     /// Wrong, unknown, used, expired or wrong-kind code. One error so nothing leaks.
     #[error("invalid one-time code")]
     BadOtp,
+    /// A valid browser code offered at the device `/enroll` endpoint. Not spent.
+    #[error("this code is for a browser passkey, not a device")]
+    BrowserCode,
+    /// A valid device code offered at browser registration. Not spent.
+    #[error("this code is for a device (ulak join / ulakd join), not a browser passkey")]
+    DeviceCode,
     #[error("too many wrong codes; create a new one in the UI")]
     Locked,
     #[error("public key is not a valid PEM public key")]

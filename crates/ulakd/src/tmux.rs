@@ -4,9 +4,11 @@ use crate::{
     agents::{binary_name, is_installed, match_login, Agents, Installer, Recipe},
     errors::AgentError,
     hub::{AgentHost, HostEvent},
+    mcp::{self, Prepared},
 };
 use std::{
     collections::HashMap,
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -34,7 +36,19 @@ fn valid_env_name(n: &str) -> bool {
 /// Argv (after `tmux [-L sock]`) that starts the detached session for `spec`.
 /// `CLAUDE_CONFIG_DIR` comes from the profile unless the spec env sets it explicitly.
 pub fn new_session_argv(spec: &SpawnSpec) -> Result<Vec<String>, AgentError> {
+    new_session_argv_with(spec, &Prepared::default())
+}
+
+/// [`new_session_argv`] plus the MCP additions: `extra.env` never overrides the spec's env,
+/// `extra.args` follow the profile args.
+pub fn new_session_argv_with(
+    spec: &SpawnSpec,
+    extra: &Prepared,
+) -> Result<Vec<String>, AgentError> {
     let mut env = spec.env().clone();
+    for (k, v) in &extra.env {
+        env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
     if let Some(dir) = spec.profile().config_dir() {
         env.entry("CLAUDE_CONFIG_DIR".into())
             .or_insert_with(|| dir.to_string_lossy().into_owned());
@@ -59,6 +73,7 @@ pub fn new_session_argv(spec: &SpawnSpec) -> Result<Vec<String>, AgentError> {
     a.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
     a.push(spec.profile().binary().to_owned());
     a.extend(spec.profile().args().iter().cloned());
+    a.extend(extra.args.iter().cloned());
     Ok(a)
 }
 
@@ -137,6 +152,8 @@ pub struct Tmux {
     agents: Arc<Agents>,
     installer: Arc<Installer>,
     blocks: Blocks,
+    /// (runtime dir for per-agent MCP configs, hub CA file); `None`: agents get no MCP wiring.
+    mcp: Option<(PathBuf, PathBuf)>,
     scan: Duration,
     slow_scan: Duration,
     events: mpsc::UnboundedSender<HostEvent>,
@@ -163,6 +180,7 @@ impl Tmux {
             agents: Arc::new(agents),
             installer: Arc::default(),
             blocks: Arc::default(),
+            mcp: None,
             scan: Duration::from_secs(1),
             slow_scan: Duration::from_secs(30),
             events,
@@ -171,6 +189,19 @@ impl Tmux {
             submit_delay: Duration::from_millis(300),
             prompt_failed,
             prompt_failures: Arc::new(tokio::sync::Mutex::new(rx)),
+        }
+    }
+
+    /// Wires spawned agents to the hub's MCP server (see [`mcp`]): configs live in `runtime_dir`,
+    /// `ca_file` is the hub CA.
+    pub fn with_mcp(mut self, runtime_dir: PathBuf, ca_file: PathBuf) -> Self {
+        self.mcp = Some((runtime_dir, ca_file));
+        self
+    }
+
+    fn drop_mcp_file(&self, id: &AgentId) {
+        if let Some((dir, _)) = &self.mcp {
+            let _ = std::fs::remove_file(mcp::file_for(dir, id));
         }
     }
 
@@ -284,15 +315,29 @@ impl Tmux {
     }
 
     pub async fn spawn_agent(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
-        let argv = new_session_argv(spec)?;
-        self.ensure_installed(spec).await?;
+        let extra = match &self.mcp {
+            Some((dir, ca)) => {
+                mcp::prepare(&self.agents.recipe(spec.profile().binary()), spec, ca, dir)?
+            }
+            None => Prepared::default(),
+        };
+        let argv = new_session_argv_with(spec, &extra)?;
+        if let Err(e) = self.ensure_installed(spec).await {
+            self.drop_mcp_file(spec.agent_id());
+            return Err(e);
+        }
         match self.run("new-session", argv, None).await {
             Err(AgentError::Tmux { stderr, .. }) if stderr.contains("duplicate session") => {
+                // the file belongs to the running agent of that name
                 return Err(AgentError::AlreadyExists(
                     spec.agent_id().as_str().to_owned(),
-                ))
+                ));
             }
-            r => r?,
+            Err(e) => {
+                self.drop_mcp_file(spec.agent_id());
+                return Err(e);
+            }
+            Ok(_) => {}
         };
         let key = spec.profile().key()?;
         if let Err(e) = self
@@ -331,11 +376,22 @@ impl Tmux {
             Err(AgentError::Tmux { stderr, .. })
                 if stderr.contains("no server running") || stderr.contains("No such file") =>
             {
-                return Ok(0)
+                if let Some((dir, _)) = &self.mcp {
+                    mcp::cleanup(dir, &[]);
+                }
+                return Ok(0);
             }
             Err(e) => return Err(e),
         };
         let mut n = 0;
+        if let Some((dir, _)) = &self.mcp {
+            let alive: Vec<AgentId> = out
+                .lines()
+                .filter_map(|l| l.split(' ').next()?.strip_prefix("ulak-"))
+                .filter_map(|i| AgentId::new(i).ok())
+                .collect();
+            mcp::cleanup(dir, &alive);
+        }
         for l in out.lines() {
             let Some((name, key)) = l.split_once(' ') else {
                 continue;
@@ -385,6 +441,7 @@ impl Tmux {
             }
             loop {
                 let Ok(text) = me.run("capture-pane", capture_plain_argv(&id), None).await else {
+                    me.drop_mcp_file(&id);
                     break; // session is gone
                 };
                 let hit = match_login(&login_patterns, &text);
@@ -432,9 +489,9 @@ impl Tmux {
     }
 
     pub async fn kill_agent(&self, id: &AgentId) -> Result<(), AgentError> {
-        self.run("kill-session", kill_argv(id), None)
-            .await
-            .map(drop)
+        let r = self.run("kill-session", kill_argv(id), None).await;
+        self.drop_mcp_file(id);
+        r.map(drop)
     }
 
     /// Types `text` then Enter. Text with control characters is rejected.
@@ -563,6 +620,31 @@ mod tests {
                 "x y"
             ]
         );
+    }
+
+    #[test]
+    fn mcp_additions_follow_profile_args_and_never_override_env() {
+        let extra = Prepared {
+            args: vec!["--mcp-config".into(), "/run/m.json".into()],
+            env: [("NODE_EXTRA_CA_CERTS".to_string(), "/ca.pem".to_string())].into(),
+            file: None,
+        };
+        let a = new_session_argv_with(&spec(None, &[]), &extra).unwrap();
+        assert_eq!(
+            a[12..],
+            [
+                "NODE_EXTRA_CA_CERTS=/ca.pem",
+                "claude",
+                "--flag",
+                "x y",
+                "--mcp-config",
+                "/run/m.json"
+            ]
+        );
+        let a = new_session_argv_with(&spec(None, &[("NODE_EXTRA_CA_CERTS", "/mine")]), &extra)
+            .unwrap();
+        assert!(a.contains(&"NODE_EXTRA_CA_CERTS=/mine".to_string()));
+        assert!(!a.contains(&"NODE_EXTRA_CA_CERTS=/ca.pem".to_string()));
     }
 
     #[test]

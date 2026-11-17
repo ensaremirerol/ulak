@@ -282,14 +282,45 @@ async fn enrolled_daemon_connects_and_ui_sees_it() {
 }
 
 #[tokio::test]
-async fn no_cert_or_wrong_kind_is_rejected() {
+async fn no_cert_is_rejected_and_any_kind_opens_both_sockets() {
     let fx = start(fast()).await;
     assert!(connect(&fx, "/ws/daemon", None).await.is_err());
     assert!(connect(&fx, "/ws/ui", None).await.is_err());
-    let ui_id = enroll_as(&fx, DeviceKind::Ui, "phone").await;
-    assert!(connect(&fx, "/ws/daemon", Some(&ui_id)).await.is_err());
-    let node_id = enroll_as(&fx, DeviceKind::Node, "box").await;
-    assert!(connect(&fx, "/ws/ui", Some(&node_id)).await.is_err());
+    for kind in [DeviceKind::Ui, DeviceKind::Node] {
+        let id = enroll_as(&fx, kind, "phone").await;
+        assert!(connect(&fx, "/ws/daemon", Some(&id)).await.is_ok());
+        assert!(connect(&fx, "/ws/ui", Some(&id)).await.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn one_device_code_enrolls_a_device_for_both_sockets() {
+    let fx = start(fast()).await;
+    // Same path as `admin otp device`: begin(Node), then a client enrolls with the code.
+    let id = enroll_as(&fx, DeviceKind::Node, "laptop").await;
+    assert!(connect(&fx, "/ws/daemon", Some(&id)).await.is_ok());
+    assert!(connect(&fx, "/ws/ui", Some(&id)).await.is_ok());
+    let (st, _) = https_as(&fx, Some(&id), "GET", "/api/version", &[], "").await;
+    assert_eq!(st, 200);
+}
+
+#[tokio::test]
+async fn browser_code_at_enroll_is_refused_unspent_with_a_hint() {
+    let fx = start(fast()).await;
+    let code = fx.hub.enroller().begin(DeviceKind::Browser, now()).otp;
+    let key = rcgen::KeyPair::generate().unwrap().public_key_pem();
+    let req = EnrollRequest::new(code.clone(), key, "x".into()).unwrap();
+    let body = encode(&req).unwrap();
+    for _ in 0..2 {
+        let (st, text) = https(&fx, "POST", "/enroll", &[], &body).await;
+        assert_eq!(st, 403);
+        assert!(text.contains("browser passkey, not a device"), "{text}");
+    }
+    // Still spendable as a browser code.
+    assert_eq!(
+        fx.hub.enroller().consume(&code, now()).unwrap(),
+        DeviceKind::Browser
+    );
 }
 
 #[tokio::test]
@@ -1493,21 +1524,157 @@ async fn a_daemon_cannot_trigger_updates_on_others() {
     )
     .await;
     assert_eq!(recv::<HubToDaemon>(&mut da).await, HubToDaemon::UpdateNow);
-    // A node cert cannot even open the UI socket.
-    assert!(connect(&fx, "/ws/ui", Some(&_b)).await.is_err());
+    // Any device cert may open the UI socket too.
+    assert!(connect(&fx, "/ws/ui", Some(&_b)).await.is_ok());
     drop(db);
 }
 
 #[tokio::test]
-async fn api_version_requires_a_ui_and_returns_the_hub_version() {
+async fn api_version_requires_a_device_and_returns_the_hub_version() {
     let fx = start(fast()).await;
     let (st, _) = https(&fx, "GET", "/api/version", &[], "").await;
     assert_eq!(st, 401);
     let node = enroll_as(&fx, DeviceKind::Node, "n").await;
+    let (st, _) = https_as(&fx, Some(&node), "GET", "/api/version", &[], "").await;
+    assert_eq!(st, 200);
+    fx.hub.revoke_device(&node.id, now()).unwrap();
     let (st, _) = https_as(&fx, Some(&node), "GET", "/api/version", &[], "").await;
     assert_eq!(st, 403);
     let ui = enroll_as(&fx, DeviceKind::Ui, "p").await;
     let (st, body) = https_as(&fx, Some(&ui), "GET", "/api/version", &[], "").await;
     assert_eq!(st, 200, "{body}");
     assert_eq!(decode::<VersionInfo>(&body).unwrap(), version_info());
+}
+
+fn auth(t: &AgentToken) -> Vec<(&'static str, String)> {
+    vec![("Authorization", format!("Bearer {}", t.expose()))]
+}
+
+#[tokio::test]
+async fn mcp_streamable_http_handshake() {
+    let fx = start(fast()).await;
+    let t = token(&fx, &agent("a-1"));
+    // protocol version: echo a supported one, else the latest we support
+    for (ask, want) in [
+        ("2025-06-18", "2025-06-18"),
+        ("2024-11-05", "2024-11-05"),
+        ("1999-01-01", "2025-06-18"),
+    ] {
+        let r = mcp(&fx, &t, "initialize", json!({"protocolVersion": ask, "capabilities": {}, "clientInfo": {"name": "c", "version": "1"}})).await;
+        assert_eq!(r["result"]["protocolVersion"], want);
+        assert!(r["result"]["capabilities"]["tools"].is_object());
+    }
+    // notification and client responses: 202, empty body
+    let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string();
+    let (s, body) = https(&fx, "POST", "/mcp", &auth(&t), &note).await;
+    assert_eq!((s, body.as_str()), (202, ""));
+    // no server-initiated stream, no sessions
+    for m in ["GET", "DELETE"] {
+        let (s, _) = https(&fx, m, "/mcp", &auth(&t), "").await;
+        assert_eq!(s, 405, "{m}");
+    }
+    // parse error is a JSON-RPC error with HTTP 400
+    let (s, body) = https(&fx, "POST", "/mcp", &auth(&t), "{nope").await;
+    assert_eq!(s, 400);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["error"]["code"],
+        -32700
+    );
+}
+
+#[tokio::test]
+async fn mcp_tools_have_valid_schemas_and_error_results() {
+    let fx = start(fast()).await;
+    let t = token(&fx, &agent("a-1"));
+    let r = mcp(&fx, &t, "tools/list", json!({})).await;
+    for tool in r["result"]["tools"].as_array().unwrap() {
+        assert!(tool["name"].is_string() && tool["description"].is_string());
+        let s = &tool["inputSchema"];
+        assert_eq!(s["type"], "object");
+        assert!(s["properties"].is_object() && s["required"].is_array());
+        for r in s["required"].as_array().unwrap() {
+            assert!(s["properties"][r.as_str().unwrap()].is_object());
+        }
+    }
+    let r = mcp(
+        &fx,
+        &t,
+        "tools/call",
+        json!({"name": "send_message", "arguments": {}}),
+    )
+    .await;
+    assert_eq!(r["result"]["isError"], true);
+    assert_eq!(r["result"]["content"][0]["type"], "text");
+    assert!(r["result"]["content"][0]["text"].is_string());
+    let r = mcp(&fx, &t, "ping", json!({})).await;
+    assert_eq!(r["result"], json!({}));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_otp_enrolls_a_ui_once_and_admin_revoke_closes_its_socket() {
+    use ulak_remote::admin::{call, AdminRequest, AdminResponse};
+    let fx = start(fast()).await;
+    let dir = std::env::temp_dir().join(format!("ulak-adm-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let path = dir.join("admin.sock");
+    let sock = fx.hub.serve_admin(&path, vec![]).await.unwrap();
+    let ask = |r| {
+        let p = path.clone();
+        tokio::task::spawn_blocking(move || call(&p, r).unwrap())
+    };
+    let AdminResponse::Otp {
+        code, fingerprint, ..
+    } = ask(AdminRequest::Otp {
+        kind: DeviceKind::Ui,
+    })
+    .await
+    .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(fingerprint.len(), 64);
+    // Failed admin attempts are not enrollment attempts: they never lock the code.
+    for _ in 0..10 {
+        let mut c = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        std::io::Write::write_all(&mut c, b"garbage\n").unwrap();
+        std::io::Read::read_to_string(&mut c, &mut String::new()).unwrap();
+    }
+    let key = rcgen::KeyPair::generate().unwrap();
+    let req = EnrollRequest::new(
+        Otp::new(&code).unwrap(),
+        key.public_key_pem(),
+        "phone".into(),
+    )
+    .unwrap();
+    let body = encode(&req).unwrap();
+    let (status, resp) = https(&fx, "POST", "/enroll", &[], &body).await;
+    assert_eq!(status, 200, "{resp}");
+    assert_eq!(https(&fx, "POST", "/enroll", &[], &body).await.0, 403);
+    let resp: EnrollResponse = decode(&resp).unwrap();
+    let (_, der) = x509_parser::pem::parse_x509_pem(resp.cert.as_bytes()).unwrap();
+    let cn = der
+        .parse_x509()
+        .unwrap()
+        .subject()
+        .iter_common_name()
+        .next()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let id = Identity {
+        id: NodeId::new(&cn).unwrap(),
+        cert: resp.cert,
+        key: key.serialize_pem(),
+    };
+    let mut ws = connect(&fx, "/ws/ui", Some(&id)).await.unwrap();
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::Snapshot { .. }
+    ));
+    ask(AdminRequest::Revoke { id: cn }).await.unwrap();
+    assert!(closed(&mut ws).await);
+    sock.close();
 }

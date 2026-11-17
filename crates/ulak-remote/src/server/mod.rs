@@ -4,4 +4,5 @@ mod mcp;
 mod web;
 mod ws;
 
+pub(crate) use hub::now_ms;
 pub use hub::{Hub, HubConfig, Running};

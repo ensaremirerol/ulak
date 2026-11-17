@@ -18,7 +18,7 @@ use ulakd::{
 };
 
 const USAGE: &str =
-    "usage: ulakd join <https://hub[:port]> | ulakd run | ulakd update --check|--apply | ulakd --version";
+    "usage: ulakd join <https://hub[:port]> [--force] | ulakd run | ulakd update --check|--apply | ulakd --version";
 
 fn prompt(q: &str) -> std::io::Result<String> {
     print!("{q}");
@@ -83,7 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = default_dir();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["join", url] => {
+        ["join", url, ..] => {
+            let force = args.iter().any(|a| a == "--force");
+            ulakd::join::check_overwrite(&dir, force, "ULAKD_FORCE")?;
             let id = join(url, &dir, &mut answer).await?;
             println!("enrolled as {} (files in {})", id.as_str(), dir.display());
             Ok(())
@@ -143,7 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let probe: SharedProbe =
                 Arc::new(Mutex::new(Box::new(SystemProbe::new(id.guard.clone()))));
             let agents = Agents::load_or_init(&dir)?;
-            let host = Tmux::with_agents(std::env::var("ULAKD_TMUX_SOCKET").ok(), agents);
+            let host = Tmux::with_agents(std::env::var("ULAKD_TMUX_SOCKET").ok(), agents)
+                .with_mcp(dir.join("run"), dir.join("ca.pem"));
             host.adopt().await?; // agents of a previous run keep being watched for login prompts
             tokio::select! {
                 r = run_forever_in(&id, Some(&dir), hostname(), Duration::from_secs(5), &host, probe, updates) => { r?; }

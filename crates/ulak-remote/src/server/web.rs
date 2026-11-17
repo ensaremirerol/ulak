@@ -110,7 +110,7 @@ impl Hub {
                 Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
-        self.authorize(peer, DeviceKind::Ui)
+        self.authorize(peer)
     }
 
     fn wa(&self) -> Result<&webauthn_rs::Webauthn, StatusCode> {
@@ -153,6 +153,9 @@ pub(crate) async fn register_start(
     match h.enroller().consume(&otp, now) {
         Ok(DeviceKind::Browser) => {}
         Ok(_) | Err(EnrollError::BadOtp) => return Err(StatusCode::FORBIDDEN),
+        Err(e @ EnrollError::DeviceCode) => {
+            return Ok((StatusCode::FORBIDDEN, e.to_string()).into_response())
+        }
         Err(EnrollError::Locked) => return Err(StatusCode::TOO_MANY_REQUESTS),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -400,6 +403,9 @@ fn content_type(name: &str) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("webp") => "image/webp",
+        Some("map") => "application/json",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
@@ -509,5 +515,18 @@ mod tests {
         assert!(c.put(0, 10).is_none(), "bounded");
         // Expired entries make room.
         assert!(c.put(0, 10 + CHALLENGE_TTL_MS + 1).is_some());
+    }
+}
+
+#[cfg(test)]
+mod content_type_tests {
+    use super::content_type;
+
+    #[test]
+    fn fonts_and_wasm_have_their_own_types() {
+        assert_eq!(content_type("Inter.woff2"), "font/woff2");
+        assert_eq!(content_type("ulak_bg.wasm"), "application/wasm");
+        assert_eq!(content_type("manifest.json"), "application/json");
+        assert_eq!(content_type("blob.bin"), "application/octet-stream");
     }
 }

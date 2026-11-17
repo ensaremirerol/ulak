@@ -157,8 +157,15 @@ pub struct State {
 
 /// This binary's version (`ULAK_GIT_SHA` is set by build.rs).
 pub fn own_version() -> VersionInfo {
-    VersionInfo::current(env!("CARGO_PKG_VERSION"), env!("ULAK_GIT_SHA"))
-        .expect("package version and git sha are short, printable strings")
+    version_or_unknown(VersionInfo::current(
+        env!("CARGO_PKG_VERSION"),
+        env!("ULAK_GIT_SHA"),
+    ))
+}
+
+/// The UI must never panic over its own version line: a failure shows as "unknown".
+fn version_or_unknown(r: Result<VersionInfo, ulak_proto::ProtoError>) -> VersionInfo {
+    r.unwrap_or_else(|_| VersionInfo::unknown())
 }
 
 /// How a version differs from the hub's.
@@ -475,6 +482,14 @@ mod tests {
     }
     fn hub(s: &mut State, f: HubToUi) {
         apply(s, Event::Hub(f));
+    }
+
+    #[test]
+    fn own_version_never_panics_and_falls_back() {
+        let v = own_version();
+        assert!(!v.os().is_empty() && !v.arch().is_empty());
+        let bad = VersionInfo::new("", "x", 1, "web", "wasm32");
+        assert_eq!(version_or_unknown(bad).os(), "unknown");
     }
 
     #[test]

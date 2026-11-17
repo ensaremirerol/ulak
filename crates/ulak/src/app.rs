@@ -1,7 +1,7 @@
 //! The Rune app state: pure `State` plus the (optional) hub connection. Views take `&App`
 //! and call `App::dispatch`; `poll` drains net events each frame.
 #[cfg(not(target_arch = "wasm32"))]
-use crate::net::{config_dir, start_in};
+use crate::net::{config_dir, pick_identity, start_in, IdentitySource};
 use crate::{
     model::{apply, ConnStatus, Event, Intent, Panel, SpawnForm, State},
     net::NetHandle,
@@ -39,7 +39,9 @@ pub const PROFILES: [(&str, &str); 3] = [
     ("antigravity", "antigravity"),
     ("custom", ""),
 ];
-pub const DEVICE_KINDS: [(&str, DeviceKind); 3] = [
+pub const DEVICE_KINDS: [(&str, DeviceKind); 4] = [
+    // Same code works for `ulakd join` and `ulak join`; recorded as a node (display only).
+    ("device", DeviceKind::Node),
     ("node", DeviceKind::Node),
     ("ui", DeviceKind::Ui),
     ("browser", DeviceKind::Browser),
@@ -119,6 +121,8 @@ impl SpawnUi {
 pub struct App {
     pub ui: State,
     pub net: Option<NetHandle>,
+    /// Footer label for the identity in use (empty when not connected).
+    pub identity: String,
     /// Draft answer per pending question (view state, not hub state).
     pub answers: BTreeMap<QuestionId, TextEdit>,
     pub last_tick: f64,
@@ -315,12 +319,23 @@ pub fn setup(app: &mut App, wake: Waker) {
     if rune::tooling::headless_run().is_some() {
         return;
     }
-    let dir = config_dir();
+    let (dir, src) = match pick_identity(&config_dir(), &ulakd::config::default_dir()) {
+        Ok(p) => p,
+        Err(e) => {
+            app.ui.last_error = Some(format!("not connected: {e}"));
+            return;
+        }
+    };
+    // The fallback dir is ulakd's: never renew into it (ulakd renews its own).
+    let renew_dir = (src == IdentitySource::Own).then(|| dir.clone());
     match Identity::load(&dir)
         .map_err(|e| e.to_string())
-        .and_then(|id| start_in(&id, Some(dir), wake).map_err(|e| e.to_string()))
+        .and_then(|id| start_in(&id, renew_dir, wake).map_err(|e| e.to_string()))
     {
-        Ok(h) => app.net = Some(h),
+        Ok(h) => {
+            app.net = Some(h);
+            app.identity = src.label().into();
+        }
         Err(e) => {
             app.ui.last_error = Some(format!("not connected: {e} (run `ulak join <hub-url>`)"))
         }

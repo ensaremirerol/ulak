@@ -7,7 +7,7 @@ use ulak_remote::{Ca, DeviceKind, Hub, HubConfig, Store, TrustedProxies};
 
 fn parse_kind(s: &str) -> Option<DeviceKind> {
     match s.trim() {
-        "node" => Some(DeviceKind::Node),
+        "node" | "device" => Some(DeviceKind::Node),
         "ui" => Some(DeviceKind::Ui),
         "browser" => Some(DeviceKind::Browser),
         _ => None,
@@ -19,6 +19,12 @@ fn print_otp(hub: &Hub, kind: DeviceKind) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     let offer = hub.enroller().begin(kind, now);
+    #[cfg(unix)]
+    println!(
+        "{}",
+        ulak_remote::admin::otp_line(offer.otp.expose(), &offer.hub_fingerprint)
+    );
+    #[cfg(not(unix))]
     println!(
         "OTP {} (hub CA sha256 {})",
         offer.otp.expose(),
@@ -39,6 +45,22 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let env = |k: &str| std::env::var(k).ok();
+    #[cfg(unix)]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("admin") {
+            return match ulak_remote::admin::cli(&args[1..], env("ULAK_DIR"), env("ULAK_SANS")) {
+                Ok(out) => {
+                    println!("{out}");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("ulak-remote admin: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+    }
     let dir = PathBuf::from(env("ULAK_DIR").unwrap_or_else(|| "ulak-data".into()));
     let addr: SocketAddr = env("ULAK_ADDR")
         .unwrap_or_else(|| "0.0.0.0:8443".into())
@@ -120,6 +142,25 @@ async fn main() -> anyhow::Result<()> {
     if let Some(kind) = env("ULAK_BOOTSTRAP_OTP").as_deref().and_then(parse_kind) {
         print_otp(&hub, kind);
     }
+    #[cfg(unix)]
+    let admin_sock = {
+        let mut listen = vec![format!("https://{}", running.local_addr())];
+        listen.extend(http.iter().map(|r| format!("http://{}", r.local_addr())));
+        listen.extend(dev.iter().map(|r| format!("http://{}", r.local_addr())));
+        match hub
+            .serve_admin(&dir.join(ulak_remote::admin::SOCKET_NAME), listen)
+            .await
+        {
+            Ok(s) => {
+                println!("admin socket {}", s.path().display());
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("WARNING: admin socket disabled: {e}");
+                None
+            }
+        }
+    };
     // Admin console on stdin: `revoke <device-id>` (closes its sockets), `otp node|ui|browser` (prints a new code).
     let admin = hub.clone();
     tokio::spawn(async move {
@@ -144,6 +185,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    // ctrl-c, and SIGTERM (what `docker stop` sends) so the admin socket is removed.
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! { r = tokio::signal::ctrl_c() => r?, _ = term.recv() => {} }
+        if let Some(s) = admin_sock {
+            s.close();
+        }
+    }
+    #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     running.abort();
     if let Some(h) = http {

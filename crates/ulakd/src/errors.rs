@@ -88,6 +88,13 @@ pub enum JoinError {
     CaMismatch,
     #[error("hub rejected enrollment (HTTP {status}): {body}")]
     Rejected { status: u16, body: String },
+    #[error("an identity already exists in {dir}: hub {hub}, device {device}; pass --force or set {env}=1 to replace it")]
+    AlreadyEnrolled {
+        dir: String,
+        hub: String,
+        device: String,
+        env: &'static str,
+    },
     #[error("malformed HTTP response: {0}")]
     BadResponse(&'static str),
     #[error("tls: {0}")]

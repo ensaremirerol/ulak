@@ -192,7 +192,7 @@ pub fn mailbox(s: &mut App) {
 
 pub fn devices(s: &mut App) {
     base(s, Panel::Devices);
-    s.device_kind = 1;
+    s.device_kind = 2;
     s.ui.otp = Some(OtpOffer {
         kind: DeviceKind::Ui,
         otp: Otp::new("K7QX92ML").unwrap(),

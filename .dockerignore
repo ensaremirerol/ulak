@@ -6,3 +6,6 @@ target
 *.db-shm
 ca.key
 key.pem
+web/node_modules
+web/dist
+web/.tmp

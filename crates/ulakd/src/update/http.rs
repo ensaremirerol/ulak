@@ -7,6 +7,9 @@ const MAX_REDIRECTS: usize = 5;
 
 pub struct Http {
     agent: ureq::Agent,
+    /// Test builds only: make `get` panic (proves the updater survives a dying http task).
+    #[cfg(feature = "test-key")]
+    panics: bool,
 }
 
 impl Default for Http {
@@ -26,6 +29,31 @@ pub fn origin(url: &str) -> Option<&str> {
 
 impl Http {
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// Test builds only: trust exactly this DER root (a local test CA) instead of the Mozilla roots.
+    #[cfg(feature = "test-key")]
+    pub fn with_test_root(der: &[u8]) -> Self {
+        Self::build(Some(ureq::tls::Certificate::from_der(der).to_owned()))
+    }
+
+    /// Test builds only: an http backend whose task panics.
+    #[cfg(feature = "test-key")]
+    pub fn panicking() -> Self {
+        Self {
+            panics: true,
+            ..Self::new()
+        }
+    }
+
+    fn build(test_root: Option<ureq::tls::Certificate<'static>>) -> Self {
+        // Roots are explicit: ureq's `rustls-no-provider` has no implicit store, and the bundled
+        // Mozilla set (`rustls-webpki-roots`) needs no system library or ca-certificates package.
+        let roots = match test_root {
+            Some(c) => ureq::tls::RootCerts::new_with_certs(&[c]),
+            None => ureq::tls::RootCerts::WebPki,
+        };
         let agent = ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(15)))
             .timeout_global(Some(Duration::from_secs(600)))
@@ -33,6 +61,7 @@ impl Http {
             // aws-lc-rs like the rest of ulakd: ring is not enabled, so rustls has no implicit default.
             .tls_config(
                 ureq::tls::TlsConfig::builder()
+                    .root_certs(roots)
                     .unversioned_rustls_crypto_provider(std::sync::Arc::new(
                         rustls::crypto::aws_lc_rs::default_provider(),
                     ))
@@ -41,7 +70,11 @@ impl Http {
             .http_status_as_error(false)
             .build()
             .into();
-        Self { agent }
+        Self {
+            agent,
+            #[cfg(feature = "test-key")]
+            panics: false,
+        }
     }
 
     /// GET with at most `max` body bytes. `token` goes into the first request only: redirects are
@@ -53,6 +86,8 @@ impl Http {
         accept: &str,
         max: u64,
     ) -> Result<Vec<u8>, UpdateError> {
+        #[cfg(feature = "test-key")]
+        assert!(!self.panics, "injected http panic");
         let mut url = url.to_owned();
         let mut token = token;
         for _ in 0..=MAX_REDIRECTS {
@@ -92,8 +127,12 @@ impl Http {
                 continue;
             }
             if status != 200 {
+                let hint = match status {
+                    401 | 403 | 404 => " (repository not found, or a GitHub token is required)",
+                    _ => "",
+                };
                 return Err(UpdateError::Http(format!(
-                    "HTTP {status} from {}",
+                    "HTTP {status} from {}{hint}",
                     origin(&url).unwrap_or("?")
                 )));
             }

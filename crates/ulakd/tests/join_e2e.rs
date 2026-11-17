@@ -150,7 +150,9 @@ async fn wrong_fingerprint_aborts_before_the_code_is_sent() {
     assert!(matches!(r, Err(JoinError::FingerprintMismatch(_))));
     assert!(!dir.join("key.pem").exists());
     // the code was not spent
-    assert!(enroller.consume(&otp, now()).is_ok());
+    let key = rcgen::KeyPair::generate().unwrap().public_key_pem();
+    let req = ulak_proto::EnrollRequest::new(otp, key, "x".into()).unwrap();
+    assert!(enroller.redeem(&req, now()).is_ok());
 }
 
 #[tokio::test]

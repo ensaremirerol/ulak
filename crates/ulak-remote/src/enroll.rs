@@ -49,6 +49,10 @@ impl Enroller {
         }
     }
 
+    pub fn ca(&self) -> &Ca {
+        &self.ca
+    }
+
     /// Lifetime of issued client certificates (default 90 days).
     pub fn with_cert_days(mut self, days: i64) -> Self {
         self.cert_days = days;
@@ -87,6 +91,7 @@ impl Enroller {
         otp: &Otp,
         now_ms: u64,
         allow: fn(DeviceKind) -> bool,
+        mismatch: EnrollError,
     ) -> Result<DeviceKind, EnrollError> {
         let mut st = self.state();
         if st.locked {
@@ -98,6 +103,8 @@ impl Enroller {
                 st.failures = 0;
                 Ok(kind)
             }
+            // A live code of the other family: say so, keep it, and do not count a failure.
+            Some((_, exp)) if now_ms <= exp => Err(mismatch),
             _ => {
                 st.failures += 1;
                 if st.failures >= MAX_FAILURES {
@@ -109,16 +116,26 @@ impl Enroller {
         }
     }
 
-    /// Spends a code of any kind (used for browser passkey registration).
+    /// Spends a browser code (passkey registration). A device code is refused unspent.
     pub fn consume(&self, otp: &Otp, now_ms: u64) -> Result<DeviceKind, EnrollError> {
-        self.take(otp, now_ms, |_| true)
+        self.take(
+            otp,
+            now_ms,
+            |k| k == DeviceKind::Browser,
+            EnrollError::DeviceCode,
+        )
     }
 
-    /// Node or UI device: spends the code and signs the device's public key.
+    /// Device (node and ui codes are interchangeable): spends the code and signs the device's public key.
     pub fn redeem(&self, req: &EnrollRequest, now_ms: u64) -> Result<Enrolled, EnrollError> {
         let key = SubjectPublicKeyInfo::from_pem(req.public_key())
             .map_err(|_| EnrollError::InvalidKey)?;
-        let kind = self.take(req.otp(), now_ms, |k| k != DeviceKind::Browser)?;
+        let kind = self.take(
+            req.otp(),
+            now_ms,
+            |k| k != DeviceKind::Browser,
+            EnrollError::BrowserCode,
+        )?;
         let device = self
             .store
             .add(req.hostname(), kind, req.public_key(), now_ms)?;

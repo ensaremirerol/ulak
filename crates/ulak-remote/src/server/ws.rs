@@ -18,7 +18,7 @@ pub(crate) async fn daemon(
     Extension(p): Extension<Peer>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    match h.authorize(&p, DeviceKind::Node) {
+    match h.authorize(&p) {
         Ok(id) => ws.on_upgrade(move |s| daemon_loop(h, id, s)),
         Err(code) => code.into_response(),
     }

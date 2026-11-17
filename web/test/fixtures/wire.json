@@ -1,0 +1,441 @@
+{
+  "hub_to_ui": {
+    "agent_status_exited_code": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": {
+        "Exited": 1
+      },
+      "type": "agent_status"
+    },
+    "agent_status_exited_unknown": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": {
+        "Exited": null
+      },
+      "type": "agent_status"
+    },
+    "agent_status_failed": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": "Failed",
+      "type": "agent_status"
+    },
+    "agent_status_installing": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": "Installing",
+      "type": "agent_status"
+    },
+    "agent_status_needs_login": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": "NeedsLogin",
+      "type": "agent_status"
+    },
+    "agent_status_running": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": "Running",
+      "type": "agent_status"
+    },
+    "agent_status_starting": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "status": "Starting",
+      "type": "agent_status"
+    },
+    "blocker_closed": {
+      "id": "b-1",
+      "type": "blocker_closed"
+    },
+    "blocker_opened": {
+      "agent": "reviewer-2",
+      "at_ms": 1700000003000,
+      "detail": "please log in",
+      "id": "b-1",
+      "kind": "Login",
+      "node": "vps-fra",
+      "profile": "claude@/home/u/.claude-b",
+      "type": "blocker_opened"
+    },
+    "blockers": {
+      "blockers": [
+        {
+          "agent": "reviewer-2",
+          "at_ms": 1700000003000,
+          "detail": "please log in",
+          "id": "b-1",
+          "kind": "Login",
+          "node": "vps-fra",
+          "profile": "claude@/home/u/.claude-b"
+        }
+      ],
+      "type": "blockers"
+    },
+    "devices": {
+      "devices": [
+        {
+          "created_ms": 1700000000000,
+          "hostname": "fra.example",
+          "id": "vps-fra",
+          "kind": "node",
+          "revoked": false
+        },
+        {
+          "created_ms": 1700000100000,
+          "hostname": "my phone",
+          "id": "pk-1a2b3c4d",
+          "kind": "browser",
+          "revoked": true
+        }
+      ],
+      "type": "devices"
+    },
+    "error": {
+      "message": "node vps-fra is offline",
+      "type": "error"
+    },
+    "hub_version": {
+      "arch": "x86_64",
+      "git": "abc1234",
+      "os": "linux",
+      "proto": 1,
+      "type": "hub_version",
+      "version": "0.1.2"
+    },
+    "mailbox_log": {
+      "messages": [
+        {
+          "at_ms": 1700000002000,
+          "from": "reviewer-2",
+          "id": "m-1",
+          "payload": "ready for review",
+          "status": "Pending",
+          "thread": "t-1",
+          "to": "planner"
+        }
+      ],
+      "type": "mailbox_log"
+    },
+    "message_logged": {
+      "at_ms": 1700000002000,
+      "from": "reviewer-2",
+      "id": "m-1",
+      "payload": "ready for review",
+      "status": "Pending",
+      "thread": "t-1",
+      "to": "planner",
+      "type": "message_logged"
+    },
+    "node_update_busy_gaming": {
+      "agents": [
+        "reviewer-2"
+      ],
+      "hostname": "fra.example",
+      "id": "vps-fra",
+      "state": {
+        "Busy": {
+          "Gaming": {
+            "process": "steam"
+          }
+        }
+      },
+      "telemetry": {
+        "at_ms": 1700000000000,
+        "cpu_pct": 12.5,
+        "gpu_pct": 40.0,
+        "load1": 0.25,
+        "mem_used_pct": 33.5
+      },
+      "type": "node_update"
+    },
+    "node_update_busy_load": {
+      "agents": [
+        "reviewer-2"
+      ],
+      "hostname": "fra.example",
+      "id": "vps-fra",
+      "state": {
+        "Busy": "Load"
+      },
+      "telemetry": {
+        "at_ms": 1700000000000,
+        "cpu_pct": 12.5,
+        "gpu_pct": 40.0,
+        "load1": 0.25,
+        "mem_used_pct": 33.5
+      },
+      "type": "node_update"
+    },
+    "node_update_idle": {
+      "agents": [
+        "reviewer-2"
+      ],
+      "hostname": "fra.example",
+      "id": "vps-fra",
+      "state": "Idle",
+      "telemetry": {
+        "at_ms": 1700000000000,
+        "cpu_pct": 12.5,
+        "gpu_pct": 40.0,
+        "load1": 0.25,
+        "mem_used_pct": 33.5
+      },
+      "type": "node_update"
+    },
+    "node_update_offline": {
+      "agents": [
+        "reviewer-2"
+      ],
+      "hostname": "fra.example",
+      "id": "vps-fra",
+      "state": "Offline",
+      "telemetry": {
+        "at_ms": 1700000000000,
+        "cpu_pct": 12.5,
+        "gpu_pct": 40.0,
+        "load1": 0.25,
+        "mem_used_pct": 33.5
+      },
+      "type": "node_update"
+    },
+    "node_version": {
+      "info": {
+        "arch": "x86_64",
+        "git": "abc1234",
+        "os": "linux",
+        "proto": 1,
+        "version": "0.1.2"
+      },
+      "node": "vps-fra",
+      "type": "node_version"
+    },
+    "otp_offer": {
+      "expires_ms": 1700000300000,
+      "hub_fingerprint": "abababababababababababababababababababababababababababababababab",
+      "kind": "browser",
+      "otp": "ABCD2345",
+      "type": "otp_offer"
+    },
+    "pane_output": {
+      "agent": "reviewer-2",
+      "data": "AP8bW0jinJM=",
+      "type": "pane_output"
+    },
+    "question_closed": {
+      "id": "q-1",
+      "type": "question_closed"
+    },
+    "question_opened": {
+      "at_ms": 1700000001000,
+      "from": "reviewer-2",
+      "id": "q-1",
+      "text": "Approve the migration?",
+      "type": "question_opened"
+    },
+    "snapshot": {
+      "nodes": [
+        {
+          "agents": [
+            "reviewer-2"
+          ],
+          "hostname": "fra.example",
+          "id": "vps-fra",
+          "state": "Idle",
+          "telemetry": {
+            "at_ms": 1700000000000,
+            "cpu_pct": 12.5,
+            "gpu_pct": 40.0,
+            "load1": 0.25,
+            "mem_used_pct": 33.5
+          }
+        }
+      ],
+      "questions": [
+        {
+          "at_ms": 1700000001000,
+          "from": "reviewer-2",
+          "id": "q-1",
+          "text": "Approve the migration?"
+        }
+      ],
+      "type": "snapshot"
+    },
+    "update_status_available": {
+      "node": "vps-fra",
+      "status": {
+        "state": "available",
+        "version": "0.2.0"
+      },
+      "type": "update_status"
+    },
+    "update_status_checking": {
+      "node": "vps-fra",
+      "status": {
+        "state": "checking"
+      },
+      "type": "update_status"
+    },
+    "update_status_downloading": {
+      "node": "vps-fra",
+      "status": {
+        "state": "downloading"
+      },
+      "type": "update_status"
+    },
+    "update_status_failed": {
+      "node": "vps-fra",
+      "status": {
+        "message": "no release signing key configured",
+        "state": "failed"
+      },
+      "type": "update_status"
+    },
+    "update_status_installing": {
+      "node": "vps-fra",
+      "status": {
+        "state": "installing"
+      },
+      "type": "update_status"
+    },
+    "update_status_restarting": {
+      "node": "vps-fra",
+      "status": {
+        "state": "restarting"
+      },
+      "type": "update_status"
+    },
+    "update_status_up_to_date": {
+      "node": "vps-fra",
+      "status": {
+        "checked_ms": 1700000000000,
+        "state": "up_to_date"
+      },
+      "type": "update_status"
+    },
+    "update_status_verifying": {
+      "node": "vps-fra",
+      "status": {
+        "state": "verifying"
+      },
+      "type": "update_status"
+    }
+  },
+  "ui_to_hub": {
+    "add_device_browser": {
+      "kind": "browser",
+      "type": "add_device"
+    },
+    "add_device_node": {
+      "kind": "node",
+      "type": "add_device"
+    },
+    "add_device_ui": {
+      "kind": "ui",
+      "type": "add_device"
+    },
+    "answer": {
+      "question": "q-1",
+      "text": "yes",
+      "type": "answer"
+    },
+    "attach": {
+      "agent": "reviewer-2",
+      "type": "attach"
+    },
+    "check_update_all": {
+      "node": null,
+      "type": "check_update"
+    },
+    "check_update_node": {
+      "node": "vps-fra",
+      "type": "check_update"
+    },
+    "detach": {
+      "agent": "reviewer-2",
+      "type": "detach"
+    },
+    "kill": {
+      "agent": "reviewer-2",
+      "type": "kill"
+    },
+    "list_devices": {
+      "type": "list_devices"
+    },
+    "mailbox_log_all": {
+      "limit": 200,
+      "thread": null,
+      "type": "mailbox_log"
+    },
+    "mailbox_log_thread": {
+      "limit": 50,
+      "thread": "t-1",
+      "type": "mailbox_log"
+    },
+    "pane_input": {
+      "agent": "reviewer-2",
+      "data": "AP8bW0EN",
+      "type": "pane_input"
+    },
+    "resolve_blocker": {
+      "id": "b-1",
+      "type": "resolve_blocker"
+    },
+    "revoke_device": {
+      "id": "pk-1a2b3c4d",
+      "type": "revoke_device"
+    },
+    "spawn_auto": {
+      "spec": {
+        "agent_id": "reviewer-2",
+        "env": {
+          "RUST_LOG": "info"
+        },
+        "profile": {
+          "args": [
+            "--model",
+            "opus"
+          ],
+          "binary": "claude",
+          "config_dir": "/home/u/.claude-b"
+        },
+        "prompt": "fix the bug",
+        "workdir": "/srv/repo"
+      },
+      "target": "Auto",
+      "type": "spawn"
+    },
+    "spawn_node": {
+      "spec": {
+        "agent_id": "reviewer-2",
+        "env": {
+          "RUST_LOG": "info"
+        },
+        "profile": {
+          "args": [
+            "--model",
+            "opus"
+          ],
+          "binary": "claude",
+          "config_dir": "/home/u/.claude-b"
+        },
+        "prompt": "fix the bug",
+        "workdir": "/srv/repo"
+      },
+      "target": {
+        "Node": "vps-fra"
+      },
+      "type": "spawn"
+    },
+    "update_node_all": {
+      "node": null,
+      "type": "update_node"
+    },
+    "update_node_one": {
+      "node": "vps-fra",
+      "type": "update_node"
+    }
+  }
+}

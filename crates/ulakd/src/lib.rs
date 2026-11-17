@@ -6,6 +6,7 @@ pub mod errors;
 pub mod guard;
 pub mod hub;
 pub mod join;
+pub mod mcp;
 pub mod renew;
 pub mod telemetry;
 pub mod tmux;

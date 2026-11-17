@@ -156,9 +156,9 @@ fn browser_codes_are_consumed_separately() {
     let offer = f.hub.begin(DeviceKind::Browser, 0);
     assert!(matches!(
         f.hub.redeem(&req(&offer.otp, "phone"), 1),
-        Err(EnrollError::BadOtp)
+        Err(EnrollError::BrowserCode)
     ));
-    let offer = f.hub.begin(DeviceKind::Browser, 0);
+    // Refused unspent, and a mixup is not a failed guess.
     assert_eq!(f.hub.consume(&offer.otp, 1).unwrap(), DeviceKind::Browser);
     assert!(matches!(
         f.hub.consume(&offer.otp, 2),
@@ -206,4 +206,18 @@ fn agent_tokens_verify_expire_and_revoke() {
     ));
     s.revoke_agent(&a).unwrap();
     assert!(matches!(s.verify(&t2, 1), Err(AuthError::Invalid)));
+}
+
+#[test]
+fn device_code_at_browser_registration_is_refused_unspent() {
+    let f = fx();
+    let offer = f.hub.begin(DeviceKind::Ui, 0);
+    for t in 1..6 {
+        assert!(matches!(
+            f.hub.consume(&offer.otp, t),
+            Err(EnrollError::DeviceCode)
+        ));
+    }
+    // Ui and node codes are interchangeable for devices.
+    assert!(f.hub.redeem(&req(&offer.otp, "phone"), 7).is_ok());
 }
