@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 13;
-const HUB_VARIANTS: usize = 17;
+const UI_VARIANTS: usize = 20;
+const HUB_VARIANTS: usize = 25;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -68,6 +68,37 @@ fn blocker() -> Blocker {
         1_700_000_003_000,
     )
 }
+fn repo_spec() -> SpawnSpec {
+    let profile = AgentProfile::new("claude", vec![], None).unwrap();
+    SpawnSpec::new_repo(
+        agent(),
+        profile,
+        Source::Repo {
+            repo: RepoRef::new("octocat/hello-world").unwrap(),
+            branch: Some(BranchName::new("main").unwrap()),
+            credential: CredentialId::new("cred-1").unwrap(),
+            allow_push: false,
+        },
+        "fix the bug".into(),
+        BTreeMap::new(),
+    )
+    .unwrap()
+}
+fn queued(state: QueueState) -> QueuedSpawn {
+    QueuedSpawn {
+        id: QueueId::new("q-1").unwrap(),
+        agent: agent(),
+        source: repo_spec().source(),
+        target: SpawnTarget::Auto,
+        profile: ProfileKey::new("claude").unwrap(),
+        prompt_preview: "fix the bug".into(),
+        created_ms: 1_700_000_004_000,
+        state,
+    }
+}
+fn cred_id() -> CredentialId {
+    CredentialId::new("cred-1").unwrap()
+}
 fn version() -> VersionInfo {
     VersionInfo::new("0.1.2", "abc1234", 1, "linux", "x86_64").unwrap()
 }
@@ -87,6 +118,13 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::CheckUpdate { .. } => "check_update",
         UiToHub::UpdateNode { .. } => "update_node",
         UiToHub::MailboxLog { .. } => "mailbox_log",
+        UiToHub::AddCredential { .. } => "add_credential",
+        UiToHub::DeleteCredential { .. } => "delete_credential",
+        UiToHub::ListCredentials => "list_credentials",
+        UiToHub::ListRepos { .. } => "list_repos",
+        UiToHub::ListBranches { .. } => "list_branches",
+        UiToHub::CancelQueued { .. } => "cancel_queued",
+        UiToHub::ListQueue => "list_queue",
     }
 }
 
@@ -108,6 +146,14 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::HubVersion(_) => "hub_version",
         HubToUi::NodeVersion { .. } => "node_version",
         HubToUi::UpdateStatus { .. } => "update_status",
+        HubToUi::AgentStatuses { .. } => "agent_statuses",
+        HubToUi::AgentFailed { .. } => "agent_failed",
+        HubToUi::Credentials { .. } => "credentials",
+        HubToUi::Repos { .. } => "repos",
+        HubToUi::Branches { .. } => "branches",
+        HubToUi::Queue { .. } => "queue",
+        HubToUi::QueueChanged { .. } => "queue_changed",
+        HubToUi::QueueRemoved { .. } => "queue_removed",
         HubToUi::Error { .. } => "error",
     }
 }
@@ -173,6 +219,55 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
                 id: BlockerId::new("b-1").unwrap(),
             },
         ),
+        (
+            "spawn_repo",
+            UiToHub::Spawn {
+                target: SpawnTarget::Auto,
+                spec: repo_spec(),
+            },
+        ),
+        (
+            "add_credential",
+            UiToHub::AddCredential {
+                name: "work".into(),
+                token: GitToken::new("ghp_exampleExampleExample0123").unwrap(),
+            },
+        ),
+        (
+            "delete_credential",
+            UiToHub::DeleteCredential { id: cred_id() },
+        ),
+        ("list_credentials", UiToHub::ListCredentials),
+        (
+            "list_repos",
+            UiToHub::ListRepos {
+                credential: cred_id(),
+                query: None,
+                page: 1,
+            },
+        ),
+        (
+            "list_repos_query",
+            UiToHub::ListRepos {
+                credential: cred_id(),
+                query: Some("hello".into()),
+                page: 2,
+            },
+        ),
+        (
+            "list_branches",
+            UiToHub::ListBranches {
+                credential: cred_id(),
+                repo: RepoRef::new("octocat/hello-world").unwrap(),
+            },
+        ),
+        (
+            "cancel_queued",
+            UiToHub::CancelQueued {
+                id: QueueId::new("q-1").unwrap(),
+            },
+        ),
+        ("list_queue", UiToHub::ListQueue),
         ("check_update_all", UiToHub::CheckUpdate { node: None }),
         (
             "check_update_node",
@@ -341,6 +436,90 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
         (
             "update_status_failed",
             upd(UpdateState::failed("no release signing key configured")),
+        ),
+        (
+            "agent_statuses",
+            HubToUi::AgentStatuses {
+                statuses: vec![
+                    (agent(), node(), AgentStatus::Running),
+                    (
+                        AgentId::new("planner").unwrap(),
+                        node(),
+                        AgentStatus::Exited(Some(0)),
+                    ),
+                ],
+            },
+        ),
+        (
+            "agent_failed",
+            HubToUi::AgentFailed {
+                agent: agent(),
+                node: node(),
+                reason: "clone failed: repository not found".into(),
+            },
+        ),
+        (
+            "credentials",
+            HubToUi::Credentials {
+                credentials: vec![CredentialInfo {
+                    id: cred_id(),
+                    name: "work".into(),
+                    kind: CredentialKind::Github,
+                    login: "octocat".into(),
+                    created_ms: 1_700_000_005_000,
+                }],
+            },
+        ),
+        (
+            "repos",
+            HubToUi::Repos {
+                credential: cred_id(),
+                query: Some("hello".into()),
+                repos: vec![
+                    RepoInfo {
+                        full_name: RepoRef::new("octocat/hello-world").unwrap(),
+                        private: false,
+                        default_branch: "main".into(),
+                        pushed_at_ms: 1_700_000_006_000,
+                        description: Some("My first repository".into()),
+                    },
+                    RepoInfo {
+                        full_name: RepoRef::new("octocat/secret").unwrap(),
+                        private: true,
+                        default_branch: "trunk".into(),
+                        pushed_at_ms: 0,
+                        description: None,
+                    },
+                ],
+                has_more: true,
+            },
+        ),
+        (
+            "branches",
+            HubToUi::Branches {
+                credential: cred_id(),
+                repo: RepoRef::new("octocat/hello-world").unwrap(),
+                branches: vec!["main".into(), "feature/x".into()],
+                default_branch: "main".into(),
+            },
+        ),
+        (
+            "queue",
+            HubToUi::Queue {
+                items: vec![queued(QueueState::Queued)],
+            },
+        ),
+        (
+            "queue_changed_failed",
+            HubToUi::QueueChanged {
+                item: queued(QueueState::Failed("credential cred-1 is gone".into())),
+            },
+        ),
+        (
+            "queue_removed",
+            HubToUi::QueueRemoved {
+                id: QueueId::new("q-1").unwrap(),
+            },
         ),
         (
             "error",

@@ -7,7 +7,7 @@ export function Button({ variant = 'default', size, class: c, ...rest }: ButtonH
   return <button type="button" {...rest} class={['btn', variant !== 'default' && variant, size, c].filter(Boolean).join(' ')} />;
 }
 
-export const Pill = ({ tone = 'muted', children }: { tone?: Tone; children: ComponentChildren }) => <span class={`pill ${tone}`}>{children}</span>;
+export const Pill = ({ tone = 'muted', title, children }: { tone?: Tone; title?: string; children: ComponentChildren }) => <span class={`pill ${tone}`} title={title}>{children}</span>;
 
 /** Count badge (nav); renders nothing for 0. */
 export const Badge = ({ count }: { count: number }) => (count > 0 ? <span class="badge" aria-label={`${count} waiting`}>{count}</span> : null);

@@ -8,6 +8,10 @@ export type MessageId = string;
 export type QuestionId = string;
 export type BlockerId = string;
 export type ProfileKey = string;
+export type CredentialId = string;
+export type QueueId = string;
+/** `owner/name` on github.com. */
+export type RepoRef = string;
 
 export interface Telemetry {
   load1: number;
@@ -43,12 +47,20 @@ export interface AgentProfile {
   config_dir: string | null;
 }
 
+/** Where an agent's files come from. */
+export type Source =
+  | { kind: 'folder'; path: string }
+  | { kind: 'repo'; repo: RepoRef; branch: string | null; credential: CredentialId; allow_push: boolean };
+
 export interface SpawnSpec {
   agent_id: AgentId;
   profile: AgentProfile;
+  /** Folder spawns: the path. Repo spawns: '' (the daemon chooses). */
   workdir: string;
   prompt: string;
   env: Record<string, string>;
+  /** Absent means a folder spawn at `workdir`. */
+  source?: Source;
 }
 
 export type SpawnTarget = 'Auto' | { Node: NodeId };
@@ -113,6 +125,37 @@ export type UpdateState =
   | { state: 'checking' | 'downloading' | 'verifying' | 'installing' | 'restarting' }
   | { state: 'failed'; message: string };
 
+/** A stored GitHub credential. The token is never sent back to the UI. */
+export interface CredentialInfo {
+  id: CredentialId;
+  name: string;
+  kind: 'github';
+  login: string;
+  created_ms: number;
+}
+
+export interface RepoInfo {
+  full_name: RepoRef;
+  private: boolean;
+  default_branch: string;
+  /** 0 when unknown. */
+  pushed_at_ms: number;
+  description?: string;
+}
+
+export type QueueState = 'Queued' | { Failed: string };
+
+export interface QueuedSpawn {
+  id: QueueId;
+  agent: AgentId;
+  source: Source;
+  target: SpawnTarget;
+  profile: ProfileKey;
+  prompt_preview: string;
+  created_ms: number;
+  state: QueueState;
+}
+
 /** What the hub tells a one-time-code holder (device enrolment). */
 export interface OtpOffer {
   kind: DeviceKind;
@@ -136,7 +179,14 @@ export type UiToHub =
   | { type: 'resolve_blocker'; id: BlockerId }
   | { type: 'check_update'; node: NodeId | null }
   | { type: 'update_node'; node: NodeId | null }
-  | { type: 'mailbox_log'; thread: ThreadId | null; limit: number };
+  | { type: 'mailbox_log'; thread: ThreadId | null; limit: number }
+  | { type: 'add_credential'; name: string; token: string }
+  | { type: 'delete_credential'; id: CredentialId }
+  | { type: 'list_credentials' }
+  | { type: 'list_repos'; credential: CredentialId; query: string | null; page: number }
+  | { type: 'list_branches'; credential: CredentialId; repo: RepoRef }
+  | { type: 'cancel_queued'; id: QueueId }
+  | { type: 'list_queue' };
 
 export type HubToUi =
   | { type: 'snapshot'; nodes: NodeInfo[]; questions: Question[] }
@@ -155,6 +205,14 @@ export type HubToUi =
   | ({ type: 'hub_version' } & VersionInfo)
   | { type: 'node_version'; node: NodeId; info: VersionInfo }
   | { type: 'update_status'; node: NodeId; status: UpdateState }
+  | { type: 'agent_statuses'; statuses: [AgentId, NodeId, AgentStatus][] }
+  | { type: 'agent_failed'; agent: AgentId; node: NodeId; reason: string }
+  | { type: 'credentials'; credentials: CredentialInfo[] }
+  | { type: 'repos'; credential: CredentialId; query: string | null; repos: RepoInfo[]; has_more: boolean }
+  | { type: 'branches'; credential: CredentialId; repo: RepoRef; branches: string[]; default_branch: string }
+  | { type: 'queue'; items: QueuedSpawn[] }
+  | { type: 'queue_changed'; item: QueuedSpawn }
+  | { type: 'queue_removed'; id: QueueId }
   | { type: 'error'; message: string };
 
 /** A frame this build does not know (newer hub) or could not parse. Never fatal. */

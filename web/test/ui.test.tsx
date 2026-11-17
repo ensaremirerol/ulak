@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { Dialog } from '../src/ui/Dialog';
 import { Segmented } from '../src/ui/Segmented';
 import { ToastHost } from '../src/ui/Toast';
-import { ProgressBar } from '../src/ui/components';
+import { Pill, ProgressBar } from '../src/ui/components';
+import { cursorScrollTop } from '../src/ui/scroll';
 import { parseRoute } from '../src/ui/router';
 
 describe('Dialog', () => {
@@ -90,5 +91,22 @@ describe('misc', () => {
     expect(parseRoute('#/devices/x')).toBe('devices');
     expect(parseRoute('#/nope')).toBe('agents');
     expect(parseRoute('')).toBe('agents');
+  });
+});
+
+describe('cursorScrollTop', () => {
+  it('keeps the scroll while the cursor row is visible, else brings it to the bottom edge', () => {
+    expect(cursorScrollTop(5, 20, 0, 400)).toBe(0); // short content: stay at the top
+    expect(cursorScrollTop(10, 20, 100, 400)).toBe(100);
+    expect(cursorScrollTop(49, 20, 0, 400)).toBe(600);
+    expect(cursorScrollTop(0, 20, 600, 400)).toBe(0);
+    expect(cursorScrollTop(3, 20, 0, 1000)).toBe(0);
+  });
+});
+
+describe('node state pill', () => {
+  it('never wraps and carries the full text as title', () => {
+    render(<Pill tone="info" title="Gaming: ulak-busy">Gaming: ulak-busy</Pill>);
+    expect(screen.getByText('Gaming: ulak-busy').getAttribute('title')).toBe('Gaming: ulak-busy');
   });
 });

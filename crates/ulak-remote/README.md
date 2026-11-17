@@ -114,6 +114,12 @@ Prefer the admin socket (`ulak-remote admin ...`, see First-time setup); stdin i
 
 `HubConfig` also has `cert_days` (90) and `renew_window_days` (30) for tests/tuning.
 
+## GitHub credentials and the spawn queue
+- Credentials: the UI stores a GitHub token under a name (`add_credential`). The hub checks it against the GitHub API and keeps the login. Tokens are encrypted at rest (ChaCha20-Poly1305) with a random 32-byte key in `$ULAK_DIR/secrets.key` (mode 0600; the hub refuses a symlink or any group/other mode bit). **Back up `secrets.key` together with `hub.db`**: if it is lost, the stored tokens are unusable and must be re-added. The token is never sent to a UI, never logged and never printed by `admin credentials` (name, login, id only); `admin credential-delete <id>` removes one.
+- The hub sends a token to a node only as `GitAccess` for the chosen node, immediately before the `Spawn` of a repo spawn.
+- `ULAK_GITHUB_API` (default `https://api.github.com`) is the GitHub Enterprise hook: an `https` URL, or `http` only for a loopback host (tests, a local proxy).
+- Queue: a spawn that cannot be placed now (no idle node, or the pinned node is busy or offline) is queued, FIFO, max 100 queued or failed items, one item per agent id. Items are placed in order when a node becomes idle (an `Auto` item takes the first idle node; a pinned item waits for its node). The queue is stored in `hub.db`, so it survives a hub restart. `cancel_queued` removes an item. An item whose placement fails (for example the credential was deleted) stays listed as failed with the reason until it is cancelled; it is never retried.
+
 ## Blockers
 
 A blocker is a permanent problem for one agent profile on one node (`Login`: the agent asked the user to log in; `Install`: the agent binary is missing and ulakd could not install it). Stored in the `blockers` table; never expires, is never nudged, survives restarts, and is only closed by the user (`UiToHub::ResolveBlocker`).

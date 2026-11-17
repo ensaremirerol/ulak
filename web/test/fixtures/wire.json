@@ -1,5 +1,11 @@
 {
   "hub_to_ui": {
+    "agent_failed": {
+      "agent": "reviewer-2",
+      "node": "vps-fra",
+      "reason": "clone failed: repository not found",
+      "type": "agent_failed"
+    },
     "agent_status_exited_code": {
       "agent": "reviewer-2",
       "node": "vps-fra",
@@ -46,6 +52,23 @@
       "status": "Starting",
       "type": "agent_status"
     },
+    "agent_statuses": {
+      "statuses": [
+        [
+          "reviewer-2",
+          "vps-fra",
+          "Running"
+        ],
+        [
+          "planner",
+          "vps-fra",
+          {
+            "Exited": 0
+          }
+        ]
+      ],
+      "type": "agent_statuses"
+    },
     "blocker_closed": {
       "id": "b-1",
       "type": "blocker_closed"
@@ -73,6 +96,28 @@
         }
       ],
       "type": "blockers"
+    },
+    "branches": {
+      "branches": [
+        "main",
+        "feature/x"
+      ],
+      "credential": "cred-1",
+      "default_branch": "main",
+      "repo": "octocat/hello-world",
+      "type": "branches"
+    },
+    "credentials": {
+      "credentials": [
+        {
+          "created_ms": 1700000005000,
+          "id": "cred-1",
+          "kind": "github",
+          "login": "octocat",
+          "name": "work"
+        }
+      ],
+      "type": "credentials"
     },
     "devices": {
       "devices": [
@@ -235,6 +280,73 @@
       "text": "Approve the migration?",
       "type": "question_opened"
     },
+    "queue": {
+      "items": [
+        {
+          "agent": "reviewer-2",
+          "created_ms": 1700000004000,
+          "id": "q-1",
+          "profile": "claude",
+          "prompt_preview": "fix the bug",
+          "source": {
+            "allow_push": false,
+            "branch": "main",
+            "credential": "cred-1",
+            "kind": "repo",
+            "repo": "octocat/hello-world"
+          },
+          "state": "Queued",
+          "target": "Auto"
+        }
+      ],
+      "type": "queue"
+    },
+    "queue_changed_failed": {
+      "item": {
+        "agent": "reviewer-2",
+        "created_ms": 1700000004000,
+        "id": "q-1",
+        "profile": "claude",
+        "prompt_preview": "fix the bug",
+        "source": {
+          "allow_push": false,
+          "branch": "main",
+          "credential": "cred-1",
+          "kind": "repo",
+          "repo": "octocat/hello-world"
+        },
+        "state": {
+          "Failed": "credential cred-1 is gone"
+        },
+        "target": "Auto"
+      },
+      "type": "queue_changed"
+    },
+    "queue_removed": {
+      "id": "q-1",
+      "type": "queue_removed"
+    },
+    "repos": {
+      "credential": "cred-1",
+      "has_more": true,
+      "query": "hello",
+      "repos": [
+        {
+          "default_branch": "main",
+          "description": "My first repository",
+          "full_name": "octocat/hello-world",
+          "private": false,
+          "pushed_at_ms": 1700000006000
+        },
+        {
+          "default_branch": "trunk",
+          "full_name": "octocat/secret",
+          "private": true,
+          "pushed_at_ms": 0
+        }
+      ],
+      "type": "repos"
+    },
     "snapshot": {
       "nodes": [
         {
@@ -324,6 +436,11 @@
     }
   },
   "ui_to_hub": {
+    "add_credential": {
+      "name": "work",
+      "token": "ghp_exampleExampleExample0123",
+      "type": "add_credential"
+    },
     "add_device_browser": {
       "kind": "browser",
       "type": "add_device"
@@ -345,6 +462,10 @@
       "agent": "reviewer-2",
       "type": "attach"
     },
+    "cancel_queued": {
+      "id": "q-1",
+      "type": "cancel_queued"
+    },
     "check_update_all": {
       "node": null,
       "type": "check_update"
@@ -352,6 +473,10 @@
     "check_update_node": {
       "node": "vps-fra",
       "type": "check_update"
+    },
+    "delete_credential": {
+      "id": "cred-1",
+      "type": "delete_credential"
     },
     "detach": {
       "agent": "reviewer-2",
@@ -361,8 +486,31 @@
       "agent": "reviewer-2",
       "type": "kill"
     },
+    "list_branches": {
+      "credential": "cred-1",
+      "repo": "octocat/hello-world",
+      "type": "list_branches"
+    },
+    "list_credentials": {
+      "type": "list_credentials"
+    },
     "list_devices": {
       "type": "list_devices"
+    },
+    "list_queue": {
+      "type": "list_queue"
+    },
+    "list_repos": {
+      "credential": "cred-1",
+      "page": 1,
+      "query": null,
+      "type": "list_repos"
+    },
+    "list_repos_query": {
+      "credential": "cred-1",
+      "page": 2,
+      "query": "hello",
+      "type": "list_repos"
     },
     "mailbox_log_all": {
       "limit": 200,
@@ -427,6 +575,28 @@
       "target": {
         "Node": "vps-fra"
       },
+      "type": "spawn"
+    },
+    "spawn_repo": {
+      "spec": {
+        "agent_id": "reviewer-2",
+        "env": {},
+        "profile": {
+          "args": [],
+          "binary": "claude",
+          "config_dir": null
+        },
+        "prompt": "fix the bug",
+        "source": {
+          "allow_push": false,
+          "branch": "main",
+          "credential": "cred-1",
+          "kind": "repo",
+          "repo": "octocat/hello-world"
+        },
+        "workdir": ""
+      },
+      "target": "Auto",
       "type": "spawn"
     },
     "update_node_all": {

@@ -36,6 +36,7 @@ pub struct OtpOffer {
 
 /// A connection-level event from the net layer, or the clock.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // transient UI events; boxing buys nothing
 pub enum Event {
     Hub(HubToUi),
     Connecting,

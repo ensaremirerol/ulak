@@ -230,6 +230,9 @@ describe('session helpers', () => {
     const loc2 = { hash: '', search: '?token=zz', pathname: '/app' } as Location;
     expect(takeTokenFromLocation(loc2, { replaceState: replace } as unknown as History)).toBe(true);
     expect(replace).toHaveBeenLastCalledWith(null, '', '/app');
+    const loc3 = { hash: '#/agents', search: '?token=q', pathname: '/' } as Location;
+    expect(takeTokenFromLocation(loc3, { replaceState: replace } as unknown as History)).toBe(true);
+    expect(replace).toHaveBeenLastCalledWith(null, '', '/#/agents');
     expect(takeTokenFromLocation({ hash: '#/agents', search: '', pathname: '/' } as Location)).toBe(false);
     setToken(null);
   });

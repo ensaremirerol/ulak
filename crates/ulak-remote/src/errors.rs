@@ -1,4 +1,6 @@
-use ulak_proto::{AgentId, BlockerId, MessageId, NodeId, ProtoError, QuestionId};
+use ulak_proto::{
+    AgentId, BlockerId, CredentialId, MessageId, NodeId, ProtoError, QuestionId, QueueId,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -94,7 +96,48 @@ pub enum AuthError {
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+pub enum CredentialError {
+    #[error("credential {0:?} not found")]
+    NotFound(CredentialId),
+    /// Missing, unreadable or unsafe `secrets.key`.
+    #[error("secrets key: {0}")]
+    Key(String),
+    /// Wrong key (e.g. a replaced secrets.key) or a damaged row.
+    #[error("cannot decrypt the stored token; the secrets key changed? Re-add the credential")]
+    Decrypt,
+    #[error(transparent)]
+    Invalid(#[from] ProtoError),
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum QueueError {
+    #[error("the spawn queue is full ({0} items); cancel some first")]
+    Full(usize),
+    #[error("agent {0:?} is already queued or running")]
+    DuplicateAgent(AgentId),
+    #[error("queue item {0:?} not found")]
+    NotFound(QueueId),
+    #[error(transparent)]
+    Invalid(#[from] ProtoError),
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+    #[error("stored queue item is unreadable: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServerError {
+    #[error(transparent)]
+    Credential(#[from] CredentialError),
+    #[error(transparent)]
+    Queue(#[from] QueueError),
+    /// Already redacted: never contains a token.
+    #[error("GitHub: {0}")]
+    GitHub(String),
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
     #[error(transparent)]

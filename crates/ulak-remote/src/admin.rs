@@ -2,7 +2,7 @@
 //! One JSON request line in, one JSON reply line out. Only local processes that may open the
 //! socket can use it (in Docker: `docker exec`). Admin calls are not enrollment attempts, so
 //! they never touch the enrollment lockout or rate limit.
-use crate::{DeviceKind, Devices, Hub, PasskeyInfo, Passkeys};
+use crate::{Credentials, DeviceKind, Devices, Hub, PasskeyInfo, Passkeys};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, Read, Write},
@@ -19,7 +19,7 @@ use tokio::{
     net::UnixListener,
     task::JoinHandle,
 };
-use ulak_proto::{DeviceInfo, NodeId};
+use ulak_proto::{CredentialId, CredentialInfo, DeviceInfo, NodeId};
 
 pub const VERSION: u32 = 1;
 /// Longest accepted request line (and reply line read by the client is not capped).
@@ -37,6 +37,8 @@ pub enum AdminRequest {
     RevokePasskey { id: String },
     Status,
     Fingerprint,
+    Credentials,
+    CredentialDelete { id: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -52,6 +54,9 @@ pub enum AdminResponse {
     },
     Passkeys {
         passkeys: Vec<PasskeyInfo>,
+    },
+    Credentials {
+        credentials: Vec<CredentialInfo>,
     },
     Done,
     Fingerprint {
@@ -133,6 +138,15 @@ fn handle(hub: &Hub, listen: &[String], line: &[u8]) -> AdminResponse {
                 .revoke_passkey(&i, now_ms())
                 .map_or_else(err, |()| AdminResponse::Done),
             Err(e) => e,
+        },
+        AdminRequest::Credentials => match Credentials::list_credentials(&**hub.store()) {
+            Ok(credentials) => AdminResponse::Credentials { credentials },
+            Err(e) => err(e),
+        },
+        AdminRequest::CredentialDelete { id: i } => match CredentialId::new(i.trim()) {
+            Ok(i) => Credentials::delete_credential(&**hub.store(), &i)
+                .map_or_else(err, |()| AdminResponse::Done),
+            Err(e) => err(format!("bad id: {e}")),
         },
         AdminRequest::Fingerprint => AdminResponse::Fingerprint {
             fingerprint: hub.enroller().ca().fingerprint().to_owned(),
@@ -342,6 +356,11 @@ pub fn render(r: &AdminResponse, join_host: Option<&str>) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        AdminResponse::Credentials { credentials } => credentials
+            .iter()
+            .map(|c| format!("{}\t{}\t{}", c.id.as_str(), c.name, c.login))
+            .collect::<Vec<_>>()
+            .join("\n"),
         AdminResponse::Done => "done".into(),
         AdminResponse::Fingerprint { fingerprint, .. } => fingerprint.clone(),
         AdminResponse::Status {
@@ -375,7 +394,7 @@ pub fn cli(
             rest.push(a.as_str());
         }
     }
-    let usage = "usage: ulak-remote admin [--dir D] otp device|browser (ui, node: same as device) | devices | revoke <id> | passkeys | revoke-passkey <id> | status | fingerprint | ca [--pem]";
+    let usage = "usage: ulak-remote admin [--dir D] otp device|browser (ui, node: same as device) | devices | revoke <id> | passkeys | revoke-passkey <id> | credentials | credential-delete <id> | status | fingerprint | ca [--pem]";
     let req = match rest.as_slice() {
         ["otp", k] => AdminRequest::Otp {
             kind: match *k {
@@ -389,6 +408,8 @@ pub fn cli(
         ["revoke", id] => AdminRequest::Revoke { id: (*id).into() },
         ["passkeys"] => AdminRequest::Passkeys,
         ["revoke-passkey", id] => AdminRequest::RevokePasskey { id: (*id).into() },
+        ["credentials"] => AdminRequest::Credentials,
+        ["credential-delete", id] => AdminRequest::CredentialDelete { id: (*id).into() },
         ["status"] => AdminRequest::Status,
         ["fingerprint"] => AdminRequest::Fingerprint,
         ["ca"] | ["ca", "--pem"] => {

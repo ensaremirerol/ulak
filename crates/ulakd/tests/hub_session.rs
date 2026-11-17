@@ -2,7 +2,7 @@
 use futures_util::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::mpsc};
@@ -22,9 +22,17 @@ struct FakeHost {
     pane: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     prompt_failed: Mutex<Option<AgentId>>,
     prompt_notify: tokio::sync::Notify,
+    /// Spawns wait for `release` while set (a clone in progress).
+    hold_spawn: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+    /// Attach is refused while set (no tmux session yet).
+    no_session: std::sync::atomic::AtomicBool,
 }
 impl AgentHost for FakeHost {
     async fn spawn(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
+        if self.hold_spawn.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
         if *self.fail_spawn.lock().unwrap() {
             return Err(AgentError::NotRunning("x".into()));
         }
@@ -68,7 +76,10 @@ impl AgentHost for FakeHost {
             }
         }
     }
-    async fn attach(&self, _: &AgentId) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+    async fn attach(&self, id: &AgentId) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+        if self.no_session.load(Ordering::SeqCst) {
+            return Err(AgentError::NotRunning(id.as_str().into()));
+        }
         let (tx, rx) = mpsc::channel(4);
         *self.pane.lock().unwrap() = Some(tx);
         Ok(rx)
@@ -350,4 +361,145 @@ async fn prompt_failure_reports_failed_and_drops_the_agent() {
         }
     }
     assert!(host.log.lock().unwrap().contains(&"kill pf".to_owned()));
+}
+
+/// Daemon on a fake hub with a spawn of `id` held (clone in progress) and no session yet.
+async fn starting_agent(
+    id: &str,
+) -> (
+    Arc<FakeHost>,
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws/daemon", listener.local_addr().unwrap());
+    let host = Arc::new(FakeHost::default());
+    host.hold_spawn.store(true, Ordering::SeqCst);
+    host.no_session.store(true, Ordering::SeqCst);
+    let probe: SharedProbe = Arc::new(Mutex::new(Box::new(FakeProbe(Arc::new(Mutex::new(
+        NodeState::Idle,
+    ))))));
+    let cfg = SessionCfg {
+        node_id: NodeId::new("node-1").unwrap(),
+        hostname: "box".into(),
+        heartbeat: Duration::from_millis(40),
+    };
+    let h = Arc::clone(&host);
+    tokio::spawn(async move {
+        let ws = connect(&url, None).await.unwrap();
+        run_session(ws, &cfg, &*h, &probe).await
+    });
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut hub = accept_async(tcp).await.unwrap();
+    hub.send(send(HubToDaemon::Spawn(spec(id)))).await.unwrap();
+    loop {
+        if let DaemonToHub::AgentStatus { status, .. } = next_frame(&mut hub).await {
+            assert_eq!(status, AgentStatus::Starting);
+            break;
+        }
+    }
+    (host, hub)
+}
+
+fn send(m: HubToDaemon) -> Message {
+    Message::text(encode(&m).unwrap())
+}
+
+async fn pane_stays_unset(host: &FakeHost) {
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(host.pane.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn attach_during_start_streams_once_the_session_appears() {
+    let (host, mut hub) = starting_agent("rb").await;
+    let id = AgentId::new("rb").unwrap();
+    hub.send(send(HubToDaemon::Attach { agent: id.clone() }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(host.pane.lock().unwrap().is_none());
+    host.no_session.store(false, Ordering::SeqCst); // tmux session appears, spawn still running
+    let tx = loop {
+        if let Some(tx) = host.pane.lock().unwrap().clone() {
+            break tx;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    tx.send(b"hi".to_vec()).await.unwrap();
+    loop {
+        if let DaemonToHub::PaneOutput { agent, data } = next_frame(&mut hub).await {
+            assert_eq!((agent, data), (id, b"hi".to_vec()));
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn attach_during_start_streams_when_the_spawn_finishes() {
+    let (host, mut hub) = starting_agent("rc").await;
+    hub.send(send(HubToDaemon::Attach {
+        agent: AgentId::new("rc").unwrap(),
+    }))
+    .await
+    .unwrap();
+    host.no_session.store(false, Ordering::SeqCst);
+    host.release.notify_one();
+    loop {
+        if host.pane.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn detach_cancels_a_pending_attach() {
+    let (host, mut hub) = starting_agent("rd").await;
+    let id = AgentId::new("rd").unwrap();
+    hub.send(send(HubToDaemon::Attach { agent: id.clone() }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    hub.send(send(HubToDaemon::Detach { agent: id }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    host.no_session.store(false, Ordering::SeqCst);
+    host.release.notify_one();
+    pane_stays_unset(&host).await;
+}
+
+#[tokio::test]
+async fn spawn_failure_drops_a_pending_attach() {
+    let (host, mut hub) = starting_agent("re").await;
+    hub.send(send(HubToDaemon::Attach {
+        agent: AgentId::new("re").unwrap(),
+    }))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    *host.fail_spawn.lock().unwrap() = true;
+    host.release.notify_one();
+    loop {
+        if let DaemonToHub::AgentStatus { status, .. } = next_frame(&mut hub).await {
+            if status == AgentStatus::Failed {
+                break;
+            }
+        }
+    }
+    host.no_session.store(false, Ordering::SeqCst);
+    pane_stays_unset(&host).await;
+}
+
+#[tokio::test]
+async fn attach_for_an_unknown_agent_is_not_retried() {
+    let (host, mut hub) = starting_agent("rf").await;
+    hub.send(send(HubToDaemon::Attach {
+        agent: AgentId::new("nobody").unwrap(),
+    }))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    host.no_session.store(false, Ordering::SeqCst);
+    pane_stays_unset(&host).await;
 }

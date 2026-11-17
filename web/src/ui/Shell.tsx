@@ -35,6 +35,7 @@ export function Shell({ children }: { children: ComponentChildren }) {
                 {TITLES[r]}
               </span>
               {r === 'inbox' && <Badge count={waiting} />}
+              {r === 'agents' && <Badge count={s.queue.length} />}
             </a>
           ))}
         </div>

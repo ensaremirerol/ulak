@@ -1,4 +1,5 @@
 use super::{mcp, web, ws};
+use crate::github::GitHub;
 use crate::*;
 use axum::{
     body::Bytes,
@@ -75,6 +76,13 @@ pub struct HubConfig {
     pub renew_window_days: i64,
     /// Reverse proxies whose `X-Forwarded-For` is believed (default none).
     pub trusted_proxies: TrustedProxies,
+    /// File holding the 32-byte key that encrypts stored GitHub tokens; `None` = a random key
+    /// that dies with the process (tests).
+    pub secrets_key_path: Option<PathBuf>,
+    /// GitHub REST base URL. https only, or http for a loopback host (tests, local proxy).
+    pub github_api: String,
+    /// How often the spawn queue is retried when nothing kicks it.
+    pub queue_tick: Duration,
 }
 
 impl Default for HubConfig {
@@ -97,6 +105,9 @@ impl Default for HubConfig {
             renew_window_days: 30,
             trusted_proxies: TrustedProxies::default(),
             thresholds: Thresholds::default(),
+            secrets_key_path: None,
+            github_api: "https://api.github.com".into(),
+            queue_tick: Duration::from_secs(10),
         }
     }
 }
@@ -124,6 +135,14 @@ pub struct Hub {
     pub(crate) origin: OnceLock<String>,
     /// Pending passkey ceremonies by challenge id (5 min, single use).
     pub(crate) challenges: web::Challenges<web::Challenge>,
+    pub(crate) secrets: Secrets,
+    pub(crate) github: Arc<GitHub>,
+    /// Last known status of each agent (capped), replayed to a UI on connect.
+    pub(crate) statuses: Mutex<HashMap<AgentId, (NodeId, AgentStatus)>>,
+    /// Last failure reason per agent (capped like `statuses`), replayed for `Failed` agents.
+    pub(crate) failures: Mutex<HashMap<AgentId, String>>,
+    /// Wakes the queue scheduler: a node may now be able to take a queued spawn.
+    pub(crate) queue_kick: tokio::sync::Notify,
     // ponytail: in-memory per-IP window; resets on restart.
     enroll_hits: Mutex<HashMap<IpAddr, Vec<u64>>>,
 }
@@ -156,6 +175,11 @@ impl Hub {
         sans: &[String],
         cfg: HubConfig,
     ) -> Result<Arc<Self>, ServerError> {
+        let github = Arc::new(GitHub::new(&cfg.github_api)?);
+        let secrets = match &cfg.secrets_key_path {
+            Some(p) => Secrets::load_or_create(p)?,
+            None => Secrets::ephemeral(),
+        };
         let (cert_pem, key_pem) = ca.issue_server_cert(sans, now_ms())?;
         let der = |pem: &str| {
             rustls_pemfile::certs(&mut pem.as_bytes())
@@ -203,6 +227,11 @@ impl Hub {
             webauthn: OnceLock::new(),
             origin: OnceLock::new(),
             challenges: web::Challenges::default(),
+            secrets,
+            github,
+            statuses: Mutex::default(),
+            failures: Mutex::default(),
+            queue_kick: tokio::sync::Notify::new(),
             enroll_hits: Mutex::default(),
             cfg,
         }))
@@ -315,6 +344,17 @@ impl Hub {
             .into_iter()
             .find(|n| n.agents.contains(a))
             .map(|n| n.id)
+            // A live status event reaches the UI before the node's agent list does.
+            .or_else(|| {
+                let m = self
+                    .statuses
+                    .lock()
+                    .expect("status map lock is never held across a panic");
+                match m.get(a) {
+                    Some((n, AgentStatus::Starting | AgentStatus::Running)) => Some(n.clone()),
+                    _ => None,
+                }
+            })
             .ok_or_else(|| ServerError::AgentUnplaced(a.clone()))
     }
 
@@ -498,9 +538,20 @@ impl Hub {
                 h.challenges.sweep(now_ms());
             }
         });
+        let h = self.clone();
+        let scheduler = tokio::spawn(async move {
+            let mut t = tokio::time::interval(h.cfg.queue_tick);
+            loop {
+                tokio::select! {
+                    () = h.queue_kick.notified() => {}
+                    _ = t.tick() => {}
+                }
+                h.queue_once(now_ms());
+            }
+        });
         Ok(Running {
             addr,
-            tasks: vec![accept, nudges, expiry],
+            tasks: vec![accept, nudges, expiry, scheduler],
         })
     }
 

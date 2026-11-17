@@ -1,6 +1,6 @@
 import type { UiToHub } from '../proto';
 import { utf8 } from '../proto';
-import { MAILBOX_LIMIT } from './reducer';
+import { awaitsSession, MAILBOX_LIMIT } from './reducer';
 import type { Intent, SpawnForm, State } from './types';
 
 /** A form or input the hub would reject; the message says what to fix. */
@@ -28,9 +28,10 @@ export function spawnFormToFrame(f: SpawnForm): UiToHub {
     spec: {
       agent_id: slug(f.agentId.trim(), 'Agent name'),
       profile: { binary, args: f.args.split(/\s+/).filter(Boolean), config_dir: configDir || null },
-      workdir: f.workdir.trim(),
+      workdir: f.repo ? '' : f.workdir.trim(),
       prompt: f.prompt,
       env: {},
+      ...(f.repo ? { source: { kind: 'repo' as const, repo: f.repo.repo, branch: f.repo.branch || null, credential: f.repo.credential, allow_push: f.repo.allowPush } } : {}),
     },
   };
 }
@@ -40,7 +41,8 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
   switch (i.kind) {
     case 'select':
       if (s.selected === i.agent) return [];
-      return [...(s.selected ? [{ type: 'detach', agent: s.selected } as const] : []), { type: 'attach', agent: i.agent }];
+      // A starting agent has no session yet: the store attaches once it is Running.
+      return [...(s.selected ? [{ type: 'detach', agent: s.selected } as const] : []), ...(awaitsSession(s.statuses[i.agent]) ? [] : [{ type: 'attach', agent: i.agent } as const])];
     case 'detach':
       return s.selected ? [{ type: 'detach', agent: s.selected }] : [];
     case 'send_keys':
@@ -50,6 +52,22 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'answer', question: i.question, text: i.text }];
     case 'spawn':
       return [spawnFormToFrame(i.form)];
+    case 'add_credential':
+      if (!i.name.trim()) throw new IntentError('Name is empty: give the token a name, e.g. work');
+      if (!i.token.trim()) throw new IntentError('Token is empty: paste a GitHub token');
+      return [{ type: 'add_credential', name: i.name.trim(), token: i.token.trim() }];
+    case 'delete_credential':
+      return [{ type: 'delete_credential', id: i.id }];
+    case 'list_credentials':
+      return [{ type: 'list_credentials' }];
+    case 'list_repos':
+      return [{ type: 'list_repos', credential: i.credential, query: i.query, page: i.page }];
+    case 'list_branches':
+      return [{ type: 'list_branches', credential: i.credential, repo: i.repo }];
+    case 'cancel_queued':
+      return [{ type: 'cancel_queued', id: i.id }];
+    case 'list_queue':
+      return [{ type: 'list_queue' }];
     case 'kill':
       return [{ type: 'kill', agent: i.agent }];
     case 'add_device':

@@ -31,6 +31,8 @@ pub enum AgentError {
     NotRunning(String),
     #[error("agent {0} already exists")]
     AlreadyExists(String),
+    #[error("repository setup failed: {0}")]
+    Git(String),
     #[error("agent is not installed: {0}")]
     Install(String),
     #[error(transparent)]

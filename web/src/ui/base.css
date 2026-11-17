@@ -52,7 +52,7 @@ h1, h2, h3, p { margin: 0; }
 .btn.danger { background: transparent; border-color: var(--bad-border); color: var(--bad); font-weight: 500; }
 .btn.sm { min-height: 36px; padding: 0 14px; border-radius: var(--radius-sm); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--surface-3); color: var(--muted); }
+.pill { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; min-width: 0; display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--surface-3); color: var(--muted); }
 .pill.ok { background: var(--ok-bg); color: var(--ok); } .pill.warn { background: var(--warn-bg); color: var(--warn); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); } .pill.info { background: var(--info-bg); color: var(--info); }
 .badge { min-width: 20px; padding: 0 6px; text-align: center; border-radius: 10px; background: var(--warn); color: var(--on-warn); font-size: 12px; font-weight: 600; }
@@ -98,6 +98,8 @@ h1, h2, h3, p { margin: 0; }
 .plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .show-phone { display: none; }
 .node-grid { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.card-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-wait { display: flex; align-items: center; justify-content: center; text-align: center; }
 .node-card .card-title strong { font-size: 15px; }
 .console { display: flex; flex-direction: column; gap: 24px; flex: 1 1 auto; }
 .console-body { display: flex; flex-wrap: wrap; gap: var(--gap); flex: 1 1 auto; min-height: 420px; }
@@ -155,3 +157,5 @@ p.err { margin: 0; color: var(--bad); overflow-wrap: anywhere; }
   .term-card { flex-basis: 100%; }
   .dialog { max-height: 100%; }
 }
+.repo-list { max-height: 240px; overflow-y: auto; }
+.repo-list .agent-row { width: 100%; }

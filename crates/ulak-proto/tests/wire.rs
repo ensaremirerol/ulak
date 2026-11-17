@@ -65,6 +65,15 @@ fn every_direction_roundtrips() {
         agent: agent(),
         data: vec![0, 255, 27, b'[', b'H'],
     });
+    roundtrip(DaemonToHub::AgentFailed {
+        agent: agent(),
+        reason: "clone failed".into(),
+    });
+    roundtrip(HubToUi::AgentFailed {
+        agent: agent(),
+        node: NodeId::new("n1").unwrap(),
+        reason: "clone failed".into(),
+    });
     roundtrip(HubToDaemon::Spawn(spec()));
     roundtrip(HubToDaemon::Nudge {
         agent: agent(),

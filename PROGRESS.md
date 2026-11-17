@@ -325,3 +325,71 @@ Other fixes: after Spawn, the dialog now waits until a node lists the agent befo
 ## PWA build wiring
 `scripts/build-web.sh [--out DIR]` (default `target/web`) now runs `npm ci` (only if node_modules is missing or older than the lockfile) + `npm run build` in web/ and copies dist to DIR; clear error without node/npm. Rune wasm path removed (scripts/patch-bridge.py deleted, wasm-bindgen steps gone). Dockerfile.hub web-build stage = `node:22-bookworm-slim` on `$BUILDPLATFORM` (package files first, `npm ci`, then `npm run build`, dist -> /web -> /app/web); hub-build untouched. ci.yml: new `web` job (setup-node@v4.4.0, node 22, npm cache on web/package-lock.json, lint/typecheck/test/build). release.yml/docker.yml needed no change (no web assets in releases; web-dist.tar.gz asset skipped). .gitignore/.dockerignore: web/node_modules, web/dist, web/.tmp; lockfile and web/public/icons/*.png stay tracked. Vite dev proxy (/api, /auth, /ws ws:true) targets localhost:8080 (the documented ULAK_HTTP_ADDR), unchanged. Docker amd64 check passed: `/`, hashed js, `/sw.js`, `/manifest.json`, woff2 all 200 with Cache-Control no-cache + ETag, types text/html, text/javascript, application/json, font/woff2; test image/container/volume removed.
 Dead wasm code left for the Rust side: crates/ulak/src/web.rs, `[target.'cfg(target_arch = "wasm32")'.dependencies]` + `crate-type = ["cdylib", "rlib"]` in crates/ulak/Cargo.toml, wasm32 cfgs in src/{lib,main,net,web_login}.rs, crates/ulak/web/{index.html,boot.js,style.css}, and crates/ulak/build.rs if it only serves web.
+
+## ulakd repo spawn (DONE; crates/ulakd only)
+- `src/git.rs`: `GitStore` (GitAccess tokens, in memory, 120 s, single use), `GitCfg`, `clone_argv/clone_env/Helper/clone_repo/map_failure`; `Tmux::with_git(GitCfg)` + `AgentHost::git_access` (default no-op; hub.rs routes `GitAccess` to it); `AgentError::Git`. Docs: root README "Repo spawns (ulakd)".
+- Decisions: no new `AgentStatus` phase (it would break exhaustive matches in the hub/UI owned elsewhere), so a repo spawn reports Starting then Running/Failed; the failure reason goes to the daemon log only (no reason field on the wire). Token taken from the store before the install check (installs can outlast the TTL); install check runs before the clone. Allowed hosts: the RepoRef has no host, so github.com is fixed; the base URL and the `git` program are overridable only with the `test-key` feature (`with_test_host`, `with_test_program`). Knobs are env vars (`ULAKD_WORK_DIR`, `ULAKD_CLONE_TIMEOUT_SECS`), not agents.json. Global git config is ignored for the clone (`GIT_CONFIG_GLOBAL=/dev/null`, `credential.helper=` cleared). Real key is `remote.origin.pushurl`.
+- Tests: git.rs units (argv, injection, env, askpass prompts + modes + cleanup, store expiry/single use/redaction, failure mapping); tests/repo_spawn.rs (stub git: argv/env scan + helper gone + failure/timeout/non-empty; real clone from a local bare repo via file://; real tmux (private socket) agents with and without allow_push, helper removed after kill; fake hub: GitAccess before Spawn, Starting then Failed).
+- Limits: clones are never deleted; a restarted daemon forgets pending GitAccess tokens; allow_push exposes the token to the agent's own environment.
+
+## Repo spawn and queue (contract)
+All frames are `{"type": ...}` tagged JSON (examples from `web/test/fixtures/wire.json`).
+UiToHub:
+- `{"type":"add_credential","name":"work","token":"ghp_exampleExampleExample0123"}`
+- `{"type":"delete_credential","id":"cred-1"}`
+- `{"type":"list_credentials"}`
+- `{"type":"list_repos","credential":"cred-1","page":1,"query":null}` (query max 100 chars; `"query":"hello","page":2` filters)
+- `{"type":"list_branches","credential":"cred-1","repo":"octocat/hello-world"}`
+- `{"type":"list_queue"}`
+- `{"type":"cancel_queued","id":"q-1"}`
+- `{"type":"spawn","target":"Auto","spec":{"agent_id":"reviewer-2","env":{},"profile":{"args":[],"binary":"claude","config_dir":null},"prompt":"fix the bug","source":{"allow_push":false,"branch":"main","credential":"cred-1","kind":"repo","repo":"octocat/hello-world"},"workdir":""}}` (`target` is `"Auto"` or `{"Node":"<id>"}`; a spawn that cannot be placed now is queued)
+
+HubToUi:
+- `{"type":"credentials","credentials":[{"created_ms":1700000005000,"id":"cred-1","kind":"github","login":"octocat","name":"work"}]}` (reply to add/delete/list; never a token)
+- `{"type":"repos","credential":"cred-1","has_more":true,"query":"hello","repos":[{"default_branch":"main","description":"My first repository","full_name":"octocat/hello-world","private":false,"pushed_at_ms":1700000006000}]}`
+- `{"type":"branches","branches":["main","feature/x"],"credential":"cred-1","default_branch":"main","repo":"octocat/hello-world"}`
+- `{"type":"queue","items":[{"agent":"reviewer-2","created_ms":1700000004000,"id":"q-1","profile":"claude","prompt_preview":"fix the bug","source":{...as above...},"state":"Queued","target":"Auto"}]}` (full list; sent for `list_queue` and on connect when non-empty)
+- `{"type":"queue_changed","item":{...same item...,"state":{"Failed":"credential cred-1 is gone"}}}` (item added or turned failed; `"state":"Queued"` when added)
+- `{"type":"queue_removed","id":"q-1"}` (cancelled; placed items are not listed, they are simply removed)
+- `{"type":"agent_statuses","statuses":[["reviewer-2","vps-fra","Running"],["planner","vps-fra",{"Exited":0}]]}` (sent on connect when non-empty)
+- `{"type":"error",...}` for every refused request (unknown credential, queue full, duplicate agent, GitHub failure; text is already redacted).
+
+HubToDaemon: `{"type":"git_access","agent":"reviewer-2","token":"<github token>"}`, sent only to the chosen node, immediately before `{"type":"spawn",...}` of a repo spawn. Never to a UI.
+
+Decisions:
+- `RepoRef` has no host field; github.com is fixed (GitHub Enterprise only changes the hub's API base via `ULAK_GITHUB_API`).
+- Placed items are not listed (a placed item is removed and the agent shows up through node snapshots and statuses).
+- Repo spawns have `workdir ""`; the daemon must reject an empty workdir when there is no source.
+- `allow_push` is enforced by the daemon (push URL guard, token handed to the agent only when true), not by the token's scope.
+- A daemon rejection after the Spawn was sent arrives as `AgentStatus` Failed, not as a queue failure. Queue failures are only hub-side placement failures (credential gone, decrypt error, send error).
+- `agent_statuses` and `queue` are sent on connect only when non-empty, so a UI must reset its status and queue state when it (re)connects.
+- Security: the token is only in `GitAccess` and in the Authorization header of hub-to-GitHub requests; the hub never logs it (checked: every `eprintln!` in ulak-remote prints ids, paths or redacted errors; `GitToken` Debug is `GitToken(***)`). Tests assert it is absent from every UI frame, from `hub.db` and `hub.db-wal`, and from error strings.
+
+## PWA part 4 (repo spawn + queue UI, web/)
+- Flags removed (`screens/flags.ts` deleted). New agent dialog defaults to Repository; no credential -> inline `AddCredential` (name + password token, external link rel=noopener noreferrer; token only in component state until sent, field cleared, never in store/localStorage). `RepoPicker` (screens/RepoPicker.tsx): search debounced 300 ms (empty query is immediate), list_repos pages accumulate locally ("Load more"; the reducer keeps only the latest frame per key), list_branches on select with default preselected, hub errors inline. "Allow this agent to push" switch off by default with warning. Folder source stays (segmented control); folder spawns still omit `source` (absent = folder, wire-compatible); repo spawns send `workdir ""` + `source`.
+- Queue: no Idle, unblocked node for the profile (honouring a chosen node) -> notice + "Add to queue" (same spawn frame; the hub queues). Dialog closes when the agent shows in `queue` or in node statuses. Agents page has a dashed Queue card (source summary, target, age, Queued/Failed + message, two-click Cancel); nav badge on Agents = queue length.
+- Settings: Credentials card (name, GitHub login, added date, Add, two-click Delete). Resync now sends list_credentials + list_queue (+ attach); reducer resets `statuses` and `queue` on every conn `open` (hub replays them only when non-empty).
+- Intents added: add_credential, delete_credential, list_credentials, list_repos, list_branches, cancel_queued, list_queue. Tests: test/screens-repo.test.tsx (15 new), existing spawn/state tests adapted. lint/typecheck/test (194)/build green. Real-browser verification NOT done.
+
+## Agent failure reasons and token file
+- Wire (additive): `DaemonToHub::AgentFailed{agent,reason}` and `HubToUi::AgentFailed{agent,node,reason}`; `ulak_proto::sanitize_reason` strips control chars and caps at 300. ulakd sends it before the `Failed` status for every spawn failure (clone, install, tmux) and prompt failure, using the existing `AgentError` text (git failures go through `map_failure`, which never echoes the token). The hub stores the last reason per agent (`Hub.failures`, capped with the statuses cap, cleared when the agent's status is no longer Failed), relays with the node id of the daemon connection, and replays `AgentFailed` right after `AgentStatuses` for agents whose status is Failed. It is not a `UiToHub` variant, so a UI cannot forge it.
+- Web: types/codec/fixture, `State.lastFailure[agent] = {node, reason, at}` and an error toast `agent <id> failed: <reason>`.
+- allow_push: token written to `<config>/run/git-<agent>/token` (0600, dir 0700, create_new) by `Helper::create_with_token`; the agent's askpass reads it (`${0%/*}/token`). The agent env now only has `GIT_ASKPASS` and `GIT_TERMINAL_PROMPT`; tmux argv carries no token (tests/token_file.rs uses a stub tmux in PATH to prove it, plus kill, failed new-session and startup sweep cleanup). The clone child still gets the token in its own env (not tmux).
+- Windows: all new unix-only code is under cfg(unix) (`Helper::make` already returns an error on non-unix).
+
+## E2E verification (repo spawn, queue, failures) -- PARTIAL (agent hit its context limit)
+Verified in real Chrome against real hub + test-key ulakd + fake GitHub (web/scripts/fake-github.mjs, loopback; ULAKD_TEST_GIT_BASE under feature test-key only, test in ulakd main.rs):
+- New agent dialog opens on Repository; add token -> "GitHub · tester", token not in DOM; repo list + Load more; search "hel" -> tester/hello; branches main/dev; dev chosen; custom `bash` + prompt + Auto -> Spawn: agent Running, clone at work/<agent>/hello on branch dev, .git/config has no token (pushurl no-push-here); typed prompt reached the pane.
+- Failed clone shows toast "agent repo-a failed: ..."; reload (token via ?token=) replays Failed status (not Unknown), credential list, failure toast.
+Bugs found/fixed: (1) ulakd map_failure fallback gave "git clone failed: and the repository exists." for a missing repo: now maps "does not appear to be a git repository" to "repository not found" and prefers the first `fatal:` line (unit tests added). (2) SpawnDialog attached to a Failed agent ("no connected node runs agent"): no attach when status Failed (test added). (3) session.ts rewrote a route hash (`?token=..#/agents` -> `#%2Fagents=`): fixed + test. (4) UNTESTED/UNCOMPILED-TESTED: hub `node_of_agent` (server/hub.rs) now falls back to the statuses map (Starting/Running) because the UI got AgentStatus before the registry listed the agent, so the first attach after Spawn failed with "no connected node runs agent" and the terminal stayed blank (cargo check passes; no test yet, see tests/repo.rs agent_statuses_are_replayed_after_reconnect for a pattern: daemon Hello without the agent, AgentStatus Running, UI Attach -> no Error).
+Not verified: terminal output after the attach fix, queue (busy node via guard blocklist, Add to queue, cancel, FIFO placement), tester/missing failure toast end to end, phone layout screenshots (google-chrome exists at /usr/bin/google-chrome), desktop design comparison. Notes: dev-login.mjs works as is; the token is memory-only (cookie never set by the script), so each page load needs ?token=; blocklisting `sleep` is useless on a busy machine (use a copied binary name); never `pkill -f` from the tool shell.
+Not run: cargo test --workspace, clippy, fmt, npm run build after last edits.
+
+## Attach race and terminal trim
+- ulakd hub.rs: `Session.starting` (in-flight spawns) + `pending` attaches. An Attach refused while its agent is starting is kept pending, retried every 500 ms and when the spawn finishes; dropped on Detach, spawn failure, `forget`, and after 10 min; an Attach for an unknown agent still logs an error. Tests (tests/hub_session.rs): stream starts when the session appears / when the spawn ends, detach cancels, failure drops, unknown not retried.
+- ulakd tmux.rs: `redraw_frame` trims trailing blank (whitespace-only) rows, never inner/leading ones; cursor placed with CUP from `display-message '#{cursor_x} #{cursor_y}'` (`cursor_argv`/`parse_cursor`), else it stays after the last text; all-blank pane = clear only. Unit tests added.
+- web: `awaitsSession` (Starting/Installing). `select` of such an agent sends no attach; the store sends it when the status becomes Running; Agents shows a "Starting…/Installing…" placeholder instead of the terminal (no clone-phase text: the wire has no phase). Terminal.tsx scrolls the host via `cursorScrollTop` (ui/scroll.ts) after each write. Node pill: nowrap + ellipsis + title.
+- Limits: the retry is a 500 ms poll; real-browser check not repeated.
+
+## Text file busy fix
+- ETXTBSY (flaky git/agents tests, and a real risk for the askpass helper): git 2.53 does NOT run GIT_ASKPASS through a shell (`/bin/sh 'path'` fails with cannot exec), so the helper stays exec'd directly. `Helper::make` now closes the script (sync_all + drop) and probe-execs it until no inherited write fd remains (`git::settle_exec`). Agents install test runs its script via `sh`. Stress test `written_scripts_never_hit_text_file_busy` (old path: 6-16 of 200 busy; fixed: 0). Updater swap only renames; it exits 75 and the supervisor re-execs later, no ETXTBSY risk.

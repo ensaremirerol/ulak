@@ -3,6 +3,7 @@
 use crate::{
     agents::{binary_name, is_installed, match_login, Agents, Installer, Recipe},
     errors::AgentError,
+    git::{self, GitCfg, GitStore},
     hub::{AgentHost, HostEvent},
     mcp::{self, Prepared},
 };
@@ -14,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
-use ulak_proto::{AgentId, AgentStatus, BlockerKind, ProfileKey, SpawnSpec};
+use ulak_proto::{AgentId, AgentStatus, BlockerKind, GitToken, ProfileKey, Source, SpawnSpec};
 
 /// Session option that remembers the profile key, so a restarted daemon can re-adopt the agent.
 const PROFILE_OPT: &str = "@ulak_profile";
@@ -123,6 +124,37 @@ fn capture_plain_argv(id: &AgentId) -> Vec<String> {
     vec![s("capture-pane"), s("-p"), s("-t"), id.tmux_session()]
 }
 
+pub fn cursor_argv(id: &AgentId) -> Vec<String> {
+    vec![
+        s("display-message"),
+        s("-p"),
+        s("-t"),
+        id.tmux_session(),
+        s("#{cursor_x} #{cursor_y}"),
+    ]
+}
+
+/// Parses `display-message` output `"<x> <y>"` (0-based).
+fn parse_cursor(out: &str) -> Option<(usize, usize)> {
+    let mut it = out.split_whitespace();
+    let (x, y) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    it.next().is_none().then_some((x, y))
+}
+
+/// One full redraw: clear, the captured screen without trailing blank rows, then the cursor.
+/// The cursor goes where tmux says it is (1-based CUP), else it stays after the last text.
+fn redraw_frame(screen: &str, cursor: Option<(usize, usize)>) -> String {
+    let mut lines: Vec<&str> = screen.split('\n').collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let mut frame = format!("\x1b[H\x1b[2J{}", lines.join("\r\n"));
+    if let Some((x, y)) = cursor {
+        frame.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+    }
+    frame
+}
+
 pub fn capture_argv(id: &AgentId) -> Vec<String> {
     vec![
         s("capture-pane"),
@@ -154,6 +186,9 @@ pub struct Tmux {
     blocks: Blocks,
     /// (runtime dir for per-agent MCP configs, hub CA file); `None`: agents get no MCP wiring.
     mcp: Option<(PathBuf, PathBuf)>,
+    /// Repo spawns: clone settings; `None` refuses them.
+    git: Option<GitCfg>,
+    tokens: Arc<GitStore>,
     scan: Duration,
     slow_scan: Duration,
     events: mpsc::UnboundedSender<HostEvent>,
@@ -181,6 +216,8 @@ impl Tmux {
             installer: Arc::default(),
             blocks: Arc::default(),
             mcp: None,
+            git: None,
+            tokens: Arc::default(),
             scan: Duration::from_secs(1),
             slow_scan: Duration::from_secs(30),
             events,
@@ -199,10 +236,62 @@ impl Tmux {
         self
     }
 
+    /// Enables repo spawns (clone into `cfg.work_root`).
+    pub fn with_git(mut self, cfg: GitCfg) -> Self {
+        self.git = Some(cfg);
+        self
+    }
+
+    /// Per-agent run files: the MCP config and the agent's git helper.
     fn drop_mcp_file(&self, id: &AgentId) {
         if let Some((dir, _)) = &self.mcp {
             let _ = std::fs::remove_file(mcp::file_for(dir, id));
         }
+        if let Some(g) = &self.git {
+            let _ = std::fs::remove_dir_all(git::helper_dir(&g.run_dir, id));
+        }
+    }
+
+    /// Clones the repo of a `Source::Repo` spec and returns the spec that starts in the clone.
+    /// The token is taken out of the store first (an install may outlast its expiry).
+    async fn prepare_repo(&self, spec: &SpawnSpec) -> Result<SpawnSpec, AgentError> {
+        let Source::Repo {
+            repo,
+            branch,
+            allow_push,
+            ..
+        } = spec.source()
+        else {
+            return Ok(spec.clone());
+        };
+        let id = spec.agent_id();
+        let token: GitToken = self.tokens.take(id).ok_or_else(|| {
+            AgentError::Git("no git access arrived for this agent (or it expired)".into())
+        })?;
+        let cfg = self
+            .git
+            .as_ref()
+            .ok_or_else(|| AgentError::Git("repo spawns are not enabled on this node".into()))?;
+        self.ensure_installed(spec).await?;
+        let dir = git::clone_repo(cfg, id, &repo, branch.as_ref(), &token, allow_push).await?;
+        let mut env = spec.env().clone();
+        env.remove(git::TOKEN_ENV);
+        if allow_push {
+            let h = git::Helper::create_with_token(git::helper_dir(&cfg.run_dir, id), &token)?;
+            env.insert(
+                "GIT_ASKPASS".into(),
+                h.script.to_string_lossy().into_owned(),
+            );
+            env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+            std::mem::forget(h); // lives until the agent ends (drop_mcp_file / adopt sweep)
+        }
+        Ok(SpawnSpec::new(
+            id.clone(),
+            spec.profile().clone(),
+            dir,
+            spec.prompt().to_owned(),
+            env,
+        )?)
     }
 
     /// Waits before typing the prompt (the agent TUI must be up) and before pressing Enter.
@@ -315,6 +404,26 @@ impl Tmux {
     }
 
     pub async fn spawn_agent(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
+        let owned;
+        let spec = if matches!(spec.source(), Source::Repo { .. }) {
+            owned = self.prepare_repo(spec).await?;
+            &owned
+        } else {
+            spec
+        };
+        let r = self.spawn_prepared(spec).await;
+        if r.is_err() {
+            if let Some(g) = &self.git {
+                // a failed spawn leaves no helper behind (an existing agent keeps its own)
+                if !matches!(r, Err(AgentError::AlreadyExists(_))) {
+                    let _ = std::fs::remove_dir_all(git::helper_dir(&g.run_dir, spec.agent_id()));
+                }
+            }
+        }
+        r
+    }
+
+    async fn spawn_prepared(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
         let extra = match &self.mcp {
             Some((dir, ca)) => {
                 mcp::prepare(&self.agents.recipe(spec.profile().binary()), spec, ca, dir)?
@@ -379,6 +488,9 @@ impl Tmux {
                 if let Some((dir, _)) = &self.mcp {
                     mcp::cleanup(dir, &[]);
                 }
+                if let Some(g) = &self.git {
+                    git::cleanup(&g.run_dir, &[]);
+                }
                 return Ok(0);
             }
             Err(e) => return Err(e),
@@ -391,6 +503,14 @@ impl Tmux {
                 .filter_map(|i| AgentId::new(i).ok())
                 .collect();
             mcp::cleanup(dir, &alive);
+        }
+        if let Some(g) = &self.git {
+            let alive: Vec<AgentId> = out
+                .lines()
+                .filter_map(|l| l.split(' ').next()?.strip_prefix("ulak-"))
+                .filter_map(|i| AgentId::new(i).ok())
+                .collect();
+            git::cleanup(&g.run_dir, &alive);
         }
         for l in out.lines() {
             let Some((name, key)) = l.split_once(' ') else {
@@ -524,7 +644,12 @@ impl Tmux {
                     break; // session is gone
                 };
                 if screen != last {
-                    let frame = format!("\x1b[H\x1b[2J{}", screen.replace('\n', "\r\n"));
+                    let cursor = me
+                        .run("display-message", cursor_argv(&id), None)
+                        .await
+                        .ok()
+                        .and_then(|o| parse_cursor(&o));
+                    let frame = redraw_frame(&screen, cursor);
                     if tx.send(frame.into_bytes()).await.is_err() {
                         break;
                     }
@@ -540,6 +665,9 @@ impl Tmux {
 }
 
 impl AgentHost for Tmux {
+    fn git_access(&self, agent: AgentId, token: GitToken) {
+        self.tokens.put(agent, token);
+    }
     async fn spawn(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
         self.spawn_agent(spec).await
     }
@@ -593,6 +721,39 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn redraw_trims_trailing_blank_rows_and_keeps_content() {
+        let f = redraw_frame("a\n\nb\n   \n\n\n", None);
+        assert_eq!(f, "\x1b[H\x1b[2Ja\r\n\r\nb");
+        // leading and inner blank rows stay
+        assert_eq!(redraw_frame("\n\nx\n", None), "\x1b[H\x1b[2J\r\n\r\nx");
+    }
+
+    #[test]
+    fn redraw_all_blank_pane_is_just_a_clear() {
+        assert_eq!(redraw_frame("\n\n\n", None), "\x1b[H\x1b[2J");
+        assert_eq!(redraw_frame("", Some((0, 0))), "\x1b[H\x1b[2J\x1b[1;1H");
+    }
+
+    #[test]
+    fn redraw_places_the_cursor_where_tmux_reports_it() {
+        assert_eq!(
+            redraw_frame("ab\ncd\n\n", Some((3, 1))),
+            "\x1b[H\x1b[2Jab\r\ncd\x1b[2;4H"
+        );
+    }
+
+    #[test]
+    fn cursor_output_parses_strictly() {
+        assert_eq!(parse_cursor("12 3\n"), Some((12, 3)));
+        assert_eq!(parse_cursor(""), None);
+        assert_eq!(parse_cursor("1"), None);
+        assert_eq!(parse_cursor("a b"), None);
+        assert_eq!(parse_cursor("1 2 3"), None);
+        assert!(cursor_argv(&AgentId::new("a1").unwrap())
+            .contains(&"#{cursor_x} #{cursor_y}".to_owned()));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! `ulak-remote`: the hub binary. Config by env: ULAK_DIR (default ./ulak-data), ULAK_ADDR
 //! (default 0.0.0.0:8443), ULAK_SANS (comma list, default localhost,127.0.0.1),
-//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
+//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_GITHUB_API (GitHub REST base, default https://api.github.com; http only for loopback), ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncBufReadExt;
 use ulak_remote::{Ca, DeviceKind, Hub, HubConfig, Store, TrustedProxies};
@@ -111,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
         origin: env("ULAK_ORIGIN")
             .or_else(|| dev_http.then(|| format!("http://localhost:{dev_port}"))),
         web_dir: env("ULAK_WEB_DIR").map(PathBuf::from),
+        secrets_key_path: Some(dir.join("secrets.key")),
+        github_api: env("ULAK_GITHUB_API").unwrap_or(d.github_api),
         ..HubConfig::default()
     };
     let hub = Hub::new(store, ca, &sans, cfg)?;

@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 use tokio::sync::{broadcast, mpsc};
 use ulak_proto::*;
 
@@ -123,10 +123,12 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
             }
             h.registry.upsert(node.clone());
             h.ui_send(HubToUi::NodeUpdate(node));
+            h.queue_kick.notify_one();
         }
         DaemonToHub::Heartbeat(t) => {
             h.registry.heartbeat(id, t);
             h.node_update(id);
+            h.queue_kick.notify_one();
         }
         DaemonToHub::AgentStatus { agent, status } => {
             h.ui_send(HubToUi::AgentStatus {
@@ -134,9 +136,20 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
                 node: id.clone(),
                 status: status.clone(),
             });
+            h.set_status(agent.clone(), id.clone(), status.clone());
             if matches!(status, AgentStatus::Exited(_) | AgentStatus::Failed) {
                 AgentTokens::revoke_agent(&*h.store, &agent)?;
+                h.queue_kick.notify_one();
             }
+        }
+        DaemonToHub::AgentFailed { agent, reason } => {
+            let reason = sanitize_reason(&reason);
+            h.set_failure(agent.clone(), reason.clone());
+            h.ui_send(HubToUi::AgentFailed {
+                agent,
+                node: id.clone(),
+                reason,
+            });
         }
         DaemonToHub::PaneOutput { agent, data } => h.pane_output(agent, data),
         DaemonToHub::Version(info) => {
@@ -245,6 +258,24 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
             }
         }
     }
+    let statuses = h.statuses();
+    if !statuses.is_empty() && !send(&mut s, &HubToUi::AgentStatuses { statuses }).await {
+        return;
+    }
+    for f in h.failed_frames() {
+        if !send(&mut s, &f).await {
+            return;
+        }
+    }
+    match Queue::queue_list(&*h.store) {
+        Ok(q) if !q.is_empty() => {
+            let items = q.into_iter().map(|e| e.item).collect();
+            if !send(&mut s, &HubToUi::Queue { items }).await {
+                return;
+            }
+        }
+        _ => {}
+    }
     loop {
         tokio::select! {
             m = s.recv() => match m {
@@ -269,54 +300,51 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
     h.detach_all(conn);
 }
 
+/// Runs blocking work (GitHub, crypto, sqlite) off the socket task; the reply goes to the
+/// requester only, an error becomes an `Error` frame.
+fn reply_blocking(
+    h: &Arc<Hub>,
+    tx: &mpsc::UnboundedSender<HubToUi>,
+    f: impl FnOnce(&Hub) -> Result<HubToUi, ServerError> + Send + 'static,
+) {
+    let (h, tx) = (h.clone(), tx.clone());
+    tokio::spawn(async move {
+        let r = tokio::task::spawn_blocking(move || f(&h)).await;
+        let out = match r {
+            Ok(Ok(m)) => m,
+            Ok(Err(e)) => HubToUi::Error {
+                message: e.to_string(),
+            },
+            Err(_) => HubToUi::Error {
+                message: "internal error".into(),
+            },
+        };
+        let _ = tx.send(out);
+    });
+}
+
+fn credentials(h: &Hub) -> Result<HubToUi, ServerError> {
+    Ok(HubToUi::Credentials {
+        credentials: Credentials::list_credentials(&*h.store)?,
+    })
+}
+
 fn on_ui(
-    h: &Hub,
+    h: &Arc<Hub>,
     conn: u64,
     tx: &mpsc::UnboundedSender<HubToUi>,
     m: UiToHub,
 ) -> Result<(), ServerError> {
     let now = now_ms();
     match m {
-        UiToHub::Spawn { target, spec } => {
-            let profile = spec.profile().key()?;
-            let nodes = h.registry.snapshot();
-            // Fail closed: a store error counts as blocked.
-            let blocked =
-                |n: &NodeId| !matches!(Blockers::is_blocked(&*h.store, n, &profile), Ok(None));
-            let node = match pick_node_where(&nodes, &target, &h.cfg.thresholds, blocked) {
-                Ok(n) => n,
-                Err(e) => {
-                    if let SpawnTarget::Node(n) = &target {
-                        if let Some(b) = Blockers::is_blocked(&*h.store, n, &profile)? {
-                            return Err(blocked_err(&b));
-                        }
-                    } else if pick_node(&nodes, &target, &h.cfg.thresholds).is_ok() {
-                        return Err(ServerError::Blocked(format!(
-                            "every eligible node is blocked for {}; resolve the blockers first",
-                            profile.as_str()
-                        )));
-                    }
-                    return Err(e.into());
-                }
-            };
-            let token =
-                AgentTokens::issue(&*h.store, spec.agent_id(), h.cfg.agent_token_ttl_ms, now)?;
-            let mut env: BTreeMap<String, String> = spec.env().clone();
-            env.insert("ULAK_AGENT_TOKEN".into(), token.expose().to_owned());
-            env.insert("ULAK_MCP_URL".into(), h.mcp_url().to_owned());
-            let spec = SpawnSpec::new(
-                spec.agent_id().clone(),
-                spec.profile().clone(),
-                spec.workdir().clone(),
-                spec.prompt().to_owned(),
-                env,
-            )?;
-            let agent = spec.agent_id().clone();
-            if let Err(e) = h.to_daemon(&node, HubToDaemon::Spawn(spec)) {
-                AgentTokens::revoke_agent(&*h.store, &agent)?;
-                return Err(e);
-            }
-        }
+        UiToHub::Spawn { target, spec } => match h.place(&target, &spec, now, &HashSet::new()) {
+            Ok(_) => {}
+            // Nothing can take it now: wait for a node (pinned to the one asked for).
+            Err(ServerError::Schedule(
+                ScheduleError::NoEligibleNode | ScheduleError::NodeNotEligible(_),
+            )) => h.enqueue(target, spec)?,
+            Err(e) => return Err(e),
+        },
         UiToHub::Answer(a) => {
             let id = a.question().clone();
             Questions::answer(&*h.store, a, now)?;
@@ -353,10 +381,12 @@ fn on_ui(
                 },
             )?;
             AgentTokens::revoke_agent(&*h.store, &agent)?;
+            h.queue_kick.notify_one();
         }
         UiToHub::ResolveBlocker { id } => {
             let b = Blockers::resolve(&*h.store, &id, now)?;
             h.ui_send(HubToUi::BlockerClosed { id });
+            h.queue_kick.notify_one();
             // Best effort: the node or agent may be gone.
             let _ = h.to_daemon(
                 b.node(),
@@ -398,6 +428,78 @@ fn on_ui(
             let messages = Mailbox::log(&*h.store, thread.as_ref(), limit.min(1000))?;
             let _ = tx.send(HubToUi::MailboxLog { messages });
         }
+        UiToHub::AddCredential { name, token } => {
+            let name = name.trim().to_owned();
+            if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+                return Err(ServerError::BadArgs(
+                    "credential name must be 1-100 printable characters".into(),
+                ));
+            }
+            reply_blocking(h, tx, move |h| {
+                let login = h.github.login(&token)?;
+                let id = CredentialId::new(&uuid::Uuid::now_v7().to_string())
+                    .map_err(CredentialError::from)?;
+                let (nonce, ct) = h.secrets.seal(&id, &token)?;
+                let info = CredentialInfo {
+                    id,
+                    name,
+                    kind: CredentialKind::Github,
+                    login,
+                    created_ms: now_ms(),
+                };
+                Credentials::insert_credential(&*h.store, &info, &nonce, &ct)?;
+                credentials(h)
+            });
+        }
+        UiToHub::DeleteCredential { id } => {
+            Credentials::delete_credential(&*h.store, &id)?;
+            let _ = tx.send(credentials(h)?);
+        }
+        UiToHub::ListCredentials => {
+            let _ = tx.send(credentials(h)?);
+        }
+        UiToHub::ListRepos {
+            credential,
+            query,
+            page,
+        } => {
+            if query.as_ref().is_some_and(|q| q.chars().count() > 100) {
+                return Err(ServerError::BadArgs("query is too long".into()));
+            }
+            reply_blocking(h, tx, move |h| {
+                let token = h.git_token(&credential)?;
+                let (repos, has_more) = h.github.repos(&token, query.as_deref(), page)?;
+                Ok(HubToUi::Repos {
+                    credential,
+                    query,
+                    repos,
+                    has_more,
+                })
+            });
+        }
+        UiToHub::ListBranches { credential, repo } => {
+            reply_blocking(h, tx, move |h| {
+                let token = h.git_token(&credential)?;
+                let (branches, default_branch) = h.github.branches(&token, &repo)?;
+                Ok(HubToUi::Branches {
+                    credential,
+                    repo,
+                    branches,
+                    default_branch,
+                })
+            });
+        }
+        UiToHub::CancelQueued { id } => {
+            Queue::cancel_queued(&*h.store, &id)?;
+            h.ui_send(HubToUi::QueueRemoved { id });
+        }
+        UiToHub::ListQueue => {
+            let items = Queue::queue_list(&*h.store)?
+                .into_iter()
+                .map(|e| e.item)
+                .collect();
+            let _ = tx.send(HubToUi::Queue { items });
+        }
     }
     Ok(())
 }
@@ -428,16 +530,6 @@ fn update_route(
 }
 
 const RESOLVED_NUDGE: &str = "Login finished. Please continue.";
-
-fn blocked_err(b: &Blocker) -> ServerError {
-    ServerError::Blocked(format!(
-        "{} is blocked on node {} ({:?}: {}); resolve the blocker first",
-        b.profile().as_str(),
-        b.node().as_str(),
-        b.kind(),
-        b.detail()
-    ))
-}
 
 fn devices(h: &Hub) -> Result<HubToUi, ServerError> {
     let devices = Devices::list(&*h.store)?.iter().map(Into::into).collect();

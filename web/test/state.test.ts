@@ -74,6 +74,40 @@ describe('reducer', () => {
     expect(s.nodes[0]!.agents).toEqual(['a1']);
   });
 
+  it('agent_statuses applies like agent_status frames', () => {
+    let s = hub(fresh(), { type: 'node_update', ...node('n1', 'a') });
+    s = hub(s, { type: 'agent_statuses', statuses: [['a1', 'n1', 'Running'], ['a2', 'n1', { Exited: 1 }]] });
+    expect(s.statuses).toEqual({ a1: 'Running', a2: { Exited: 1 } });
+    expect(s.nodes[0]!.agents).toEqual(['a1', 'a2']);
+  });
+
+  it('agent_failed stores the reason and raises an error toast', () => {
+    const s = hub(fresh(), { type: 'agent_failed', agent: 'a1', node: 'n1', reason: 'clone failed' });
+    expect(s.lastFailure['a1']).toEqual({ node: 'n1', reason: 'clone failed', at: 0 });
+    expect(s.toasts.map((t) => [t.kind, t.text])).toEqual([['error', 'agent a1 failed: clone failed']]);
+  });
+
+  it('credentials, repos, branches and queue frames are stored', () => {
+    const item = { id: 'q1', agent: 'a1', source: { kind: 'folder', path: '/x' }, target: 'Auto', profile: 'claude',
+      prompt_preview: '', created_ms: 1, state: 'queued' } as unknown as import('../src/proto').QueuedSpawn;
+    const repo = { full_name: 'o/n', private: false, default_branch: 'main', pushed_at_ms: 0 };
+    let s = apply(fresh(),
+      { type: 'credentials', credentials: [{ id: 'c1', name: 'n', kind: 'github', login: 'me', created_ms: 1 }] },
+      { type: 'repos', credential: 'c1', query: null, repos: [repo], has_more: true },
+      { type: 'repos', credential: 'c1', query: 'x', repos: [], has_more: false },
+      { type: 'branches', credential: 'c1', repo: 'o/n', branches: ['main'], default_branch: 'main' },
+      { type: 'queue', items: [item] },
+      { type: 'queue_changed', item: { ...item, state: { Failed: 'boom' } } });
+    expect(s.credentials[0]!.login).toBe('me');
+    expect(s.repos['c1\0']).toEqual({ repos: [repo], hasMore: true });
+    expect(s.repos['c1\0x']!.repos).toEqual([]);
+    expect(s.branches['c1\0o/n']!.defaultBranch).toBe('main');
+    expect(s.queue).toHaveLength(1);
+    expect(s.queue[0]!.state).toEqual({ Failed: 'boom' });
+    s = hub(s, { type: 'queue_removed', id: 'q1' });
+    expect(s.queue).toEqual([]);
+  });
+
   it('pane output goes to the right agent buffer', () => {
     const s = apply(fresh(), { type: 'pane_output', agent: 'a1', data: bytes('one') },
       { type: 'pane_output', agent: 'a2', data: bytes('two') }, { type: 'pane_output', agent: 'a1', data: bytes('!') });
@@ -265,11 +299,33 @@ describe('store', () => {
 
   it('sends frames, applies local effects, resync re-attaches the selection', () => {
     const { store, sent } = mk();
-    expect(store.resync()).toEqual([]);
+    expect(store.resync()).toEqual([{ type: 'list_credentials' }, { type: 'list_queue' }]);
     expect(store.intent({ kind: 'select', agent: 'a1' })).toBe(true);
     expect(sent).toEqual([{ type: 'attach', agent: 'a1' }]);
     expect(store.state.value.selected).toBe('a1');
-    expect(store.resync()).toEqual([{ type: 'attach', agent: 'a1' }]);
+    expect(store.resync()).toEqual([{ type: 'list_credentials' }, { type: 'list_queue' }, { type: 'attach', agent: 'a1' }]);
+  });
+
+  it('select of a starting agent holds the attach back until it is Running', () => {
+    const { store, sent } = mk();
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Starting' } });
+    expect(store.intent({ kind: 'select', agent: 'a1' })).toBe(true);
+    expect(sent).toEqual([]);
+    expect(store.state.value.selected).toBe('a1');
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Installing' } });
+    expect(sent).toEqual([]);
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Running' } });
+    expect(sent).toEqual([{ type: 'attach', agent: 'a1' }]);
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Running' } });
+    expect(sent).toHaveLength(1); // only the transition attaches
+  });
+
+  it('a starting agent that fails never attaches', () => {
+    const { store, sent } = mk();
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Starting' } });
+    store.intent({ kind: 'select', agent: 'a1' });
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Failed' } });
+    expect(sent).toEqual([]);
   });
 
   it('a validation error becomes an error toast and sends nothing', () => {

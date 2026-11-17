@@ -5,10 +5,12 @@ mod ca;
 mod devices;
 mod enroll;
 mod errors;
+mod github;
 mod passkeys;
 mod proxy;
 mod registry;
 mod scheduler;
+mod secrets;
 mod server;
 mod store;
 mod tokens;
@@ -17,12 +19,14 @@ pub use ca::Ca;
 pub use devices::{Device, DeviceKind, Devices};
 pub use enroll::{Enrolled, Enroller, OtpOffer};
 pub use errors::*;
+pub use github::GitHub;
 pub use passkeys::{PasskeyInfo, Passkeys, Sessions};
 pub use proxy::TrustedProxies;
 pub use registry::Registry;
 pub use scheduler::{pick_node, pick_node_where, Thresholds};
+pub use secrets::Secrets;
 pub use server::{Hub, HubConfig, Running};
-pub use store::{Blockers, Mailbox, Questions, Store};
+pub use store::{Blockers, Credentials, Mailbox, Questions, Queue, QueueEntry, Store, QUEUE_CAP};
 pub use tokens::AgentTokens;
 
 /// Version of this build: the package version plus the git sha embedded by build.rs.

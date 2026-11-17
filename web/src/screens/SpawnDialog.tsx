@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Blocker, NodeInfo } from '../proto';
 import { blockersFor, defaultSpawnForm, kindTitle, store, type SpawnForm, type State } from '../state';
 import { Button, TextField } from '../ui/components';
+import { ConfirmButton } from '../ui/ConfirmButton';
 import { Dialog } from '../ui/Dialog';
 import { AGENT_ID, nodeStateLabel } from '../ui/format';
 import { Segmented } from '../ui/Segmented';
-import { QUEUE_READY, REPO_SOURCE_READY } from './flags';
+import { AddCredential, removeCredential } from './Credentials';
+import { RepoPicker, type RepoChoice } from './RepoPicker';
 
 type Profile = 'claude' | 'antigravity' | 'custom';
 type Source = 'repo' | 'folder';
@@ -37,7 +39,7 @@ function targetNote(s: State, n: NodeInfo, key: string | null): string {
 export function SpawnDialog({ onClose }: { onClose(): void }) {
   const s = store.state.value;
   const [profile, setProfile] = useState<Profile>('claude');
-  const [source, setSource] = useState<Source>(REPO_SOURCE_READY ? 'repo' : 'folder');
+  const [source, setSource] = useState<Source>('repo');
   const [form, setForm] = useState<SpawnForm>(defaultSpawnForm());
   // Hub errors that arrive after this toast id belong to our spawn; null = nothing in flight.
   const [pending, setPending] = useState<{ id: string; since: number; prev: unknown } | null>(null);
@@ -50,21 +52,40 @@ export function SpawnDialog({ onClose }: { onClose(): void }) {
   const idError = form.agentId !== '' && !AGENT_ID.test(form.agentId) ? 'Use 1-64 characters: lowercase letters, digits and "-".' : null;
   const error = pending ? s.toasts.find((t) => t.kind === 'error' && t.id >= pending.since)?.text : undefined;
   const repoSource = source === 'repo';
-  const noneFree = s.nodes.length > 0 && !s.nodes.some((n) => n.state === 'Idle');
+  const toQueue = !s.nodes.some((n) => (form.node === '' || n.id === form.node.trim()) && n.state === 'Idle' && !(key && blockersFor(s, n.id, key).length > 0));
+  const [credId, setCredId] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [choice, setChoice] = useState<RepoChoice | null>(null);
+  const [allowPush, setAllowPush] = useState(false);
+  const [since] = useState(() => store.state.peek().nextToastId);
+  const cred = s.credentials.find((c) => c.id === credId) ?? s.credentials[0];
+  const known = useRef(s.credentials.length);
+  // A newly added token becomes the chosen one.
+  useEffect(() => {
+    if (s.credentials.length > known.current) {
+      setCredId(s.credentials[s.credentials.length - 1]!.id);
+      setAdding(false);
+    }
+    known.current = s.credentials.length;
+  }, [s.credentials]);
+  const listError = s.toasts.filter((t) => t.kind === 'error' && t.id >= since).pop()?.text;
 
   // The agent showed up: done. Select it so its terminal opens. Wait until a node lists it too: the hub refuses an attach to an agent it has not mapped to a node yet.
   useEffect(() => {
     const now = pending ? s.statuses[pending.id] : undefined;
-    if (pending && now !== undefined && now !== pending.prev && s.nodes.some((n) => n.agents.includes(pending.id))) {
-      store.intent({ kind: 'select', agent: pending.id });
+    if (pending && s.queue.some((q) => q.agent === pending.id)) onClose();
+    else if (pending && now !== undefined && now !== pending.prev && s.nodes.some((n) => n.agents.includes(pending.id))) {
+      // A failed agent has nothing to attach to (the failure toast says why).
+      if (now !== 'Failed') store.intent({ kind: 'select', agent: pending.id });
       onClose();
     }
-  }, [pending, s.statuses, onClose]);
+  }, [pending, s.statuses, s.queue, onClose]);
 
   const submit = () => {
     for (const t of s.toasts) if (t.kind === 'error') store.dispatch({ kind: 'dismiss_toast', id: t.id });
-    if (store.intent({ kind: 'spawn', form: { ...form, binary: binary.trim() } })) setPending({ id: form.agentId.trim(), since: store.state.peek().nextToastId, prev: s.statuses[form.agentId.trim()] });
+    if (store.intent({ kind: 'spawn', form: { ...form, binary: binary.trim(), repo: repoSource && cred && choice ? { credential: cred.id, ...choice, allowPush } : undefined } })) setPending({ id: form.agentId.trim(), since: store.state.peek().nextToastId, prev: s.statuses[form.agentId.trim()] });
   };
+  const queueing = toQueue && blocker === null;
   const busy = pending !== null && !error;
   const autoSkips = !form.node && key && !blocker ? [...new Set(blockersFor(s, undefined, key).map((b) => b.node))] : [];
 
@@ -75,8 +96,9 @@ export function SpawnDialog({ onClose }: { onClose(): void }) {
       actions={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          {QUEUE_READY && noneFree && <Button disabled title="TODO(queue): no protocol frame yet">Add to queue</Button>}
-          <Button variant="primary" disabled={busy || blocker !== null || repoSource} onClick={submit}>{busy ? 'Spawning...' : 'Spawn'}</Button>
+          <Button variant="primary" disabled={busy || blocker !== null || (repoSource && !(cred && choice))} onClick={submit}>
+            {queueing ? (busy ? 'Adding...' : 'Add to queue') : busy ? 'Spawning...' : 'Spawn'}
+          </Button>
         </>
       }
     >
@@ -85,17 +107,35 @@ export function SpawnDialog({ onClose }: { onClose(): void }) {
         value={source}
         onChange={setSource}
         options={[
-          { value: 'repo', label: REPO_SOURCE_READY ? 'Repository' : 'Repository (coming next)', disabled: !REPO_SOURCE_READY },
+          { value: 'repo', label: 'Repository' },
           { value: 'folder', label: 'Folder on the node' },
         ]}
       />
       {repoSource && (
-        <>
-          {/* TODO(repo-spawn): wire to the repo spawn frame once the hub has one; the fields below are only layout. */}
-          <TextField label="Repository" value="" onValue={() => undefined} placeholder="owner/name" />
-          <TextField label="Branch" value="" onValue={() => undefined} placeholder="main" mono />
-          <TextField label="Credential" value="" onValue={() => undefined} placeholder="GitHub token" />
-        </>
+        <div class="stack tight">
+          {!cred || adding ? (
+            <AddCredential onCancel={cred ? () => setAdding(false) : undefined} />
+          ) : (
+            <>
+              <div class="row">
+                {s.credentials.length > 1 ? (
+                  <select class="input" aria-label="Credential" value={cred.id} onChange={(e) => setCredId(e.currentTarget.value)}>
+                    {s.credentials.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                ) : null}
+                <span>GitHub · {cred.login}</span>
+                <Button size="sm" variant="ghost" onClick={() => setAdding(true)}>Change</Button>
+                <ConfirmButton label="Remove" confirmLabel="Click again to remove" onConfirm={() => removeCredential(cred)} />
+              </div>
+              <RepoPicker key={cred.id} credential={cred.id} error={pending ? undefined : listError} onChoice={setChoice} />
+              <label class="row">
+                <input type="checkbox" role="switch" checked={allowPush} onChange={(e) => setAllowPush(e.currentTarget.checked)} />
+                Allow this agent to push
+              </label>
+              {allowPush && <p class="warn-note small">The agent will hold your GitHub token and can push with it.</p>}
+            </>
+          )}
+        </div>
       )}
       <div class="field">
         <span class="label">Profile</span>
@@ -119,7 +159,7 @@ export function SpawnDialog({ onClose }: { onClose(): void }) {
       </div>
       {blocker && <p class="warn-note" role="alert">{kindTitle(blocker.kind)} on {blocker.node} ({blocker.profile}): {blocker.detail.slice(0, 120)} Resolve it in the Inbox first.</p>}
       {autoSkips.length > 0 && <p class="warn-note small">Auto skips {autoSkips.join(', ')} because of blockers for {key}.</p>}
-      {QUEUE_READY && noneFree && <p class="queue-note">No node is free: this agent will wait in the queue.</p>}
+      {queueing && <p class="queue-note">No node is free right now. This agent will wait in the queue and start by itself when one is.</p>}
       {error && <p class="err" role="alert">{error}</p>}
     </Dialog>
   );

@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod config;
 pub mod errors;
+pub mod git;
 pub mod guard;
 pub mod hub;
 pub mod join;

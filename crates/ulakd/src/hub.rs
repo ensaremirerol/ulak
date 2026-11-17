@@ -27,8 +27,8 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, WebSocketStream,
 };
 use ulak_proto::{
-    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, HubToDaemon, NodeId, NodeInfo,
-    ProfileKey, SpawnSpec,
+    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, GitToken, HubToDaemon, NodeId,
+    NodeInfo, ProfileKey, SpawnSpec,
 };
 
 /// Something the host wants the hub to hear about, outside of a command's own reply.
@@ -72,6 +72,8 @@ pub trait AgentHost: Send + Sync + 'static {
     }
     /// The user resolved the blocker of `profile`: re-arm login detection.
     fn blocker_resolved(&self, _profile: &ProfileKey) {}
+    /// A repo spawn's token, delivered right before its `Spawn`. Never log it.
+    fn git_access(&self, _agent: AgentId, _token: GitToken) {}
     /// Pane bytes until the receiver is dropped.
     fn attach(
         &self,
@@ -162,12 +164,20 @@ async fn sample(probe: &SharedProbe) -> Result<Probed, crate::errors::TelemetryE
     .expect("probe task does not panic")
 }
 
+/// How long an attach waits for its agent's session, and how often it is retried.
+const PENDING_CAP: Duration = Duration::from_secs(600);
+const PENDING_RETRY: Duration = Duration::from_millis(500);
+
 struct Session<'a, H> {
     cfg: &'a SessionCfg,
     host: &'a H,
     last: Probed,
     known: HashSet<AgentId>,
     attached: HashMap<AgentId, JoinHandle<()>>,
+    /// Spawns in flight (clone/install running; the tmux session may not exist yet).
+    starting: HashSet<AgentId>,
+    /// Attaches that arrived while their agent was starting, with their arrival time.
+    pending: HashMap<AgentId, Instant>,
     out: mpsc::UnboundedSender<DaemonToHub>,
     updates: Option<Arc<Updater>>,
 }
@@ -204,8 +214,17 @@ impl<'a, H: AgentHost> Session<'a, H> {
         .await;
     }
 
+    async fn failed(&self, agent: &AgentId, reason: &str) {
+        self.emit(DaemonToHub::AgentFailed {
+            agent: agent.clone(),
+            reason: ulak_proto::sanitize_reason(reason),
+        })
+        .await;
+    }
+
     fn forget(&mut self, id: &AgentId) {
         self.known.remove(id);
+        self.pending.remove(id);
         if let Some(h) = self.attached.remove(id) {
             h.abort();
         }
@@ -219,6 +238,8 @@ impl<'a, H: AgentHost> Session<'a, H> {
             eprintln!("ulakd: kill {id:?} after prompt failure: {e}");
         }
         self.forget(id);
+        self.failed(id, "the prompt could not be typed into the agent")
+            .await;
         self.status(id, AgentStatus::Failed).await;
         self.emit(self.hello()).await;
     }
@@ -228,6 +249,7 @@ impl<'a, H: AgentHost> Session<'a, H> {
             HubToDaemon::Spawn(spec) => {
                 let id = spec.agent_id().clone();
                 self.status(&id, AgentStatus::Starting).await;
+                self.starting.insert(id.clone());
                 let host = self.host;
                 spawns.push(
                     async move {
@@ -237,6 +259,7 @@ impl<'a, H: AgentHost> Session<'a, H> {
                     .boxed(),
                 );
             }
+            HubToDaemon::GitAccess { agent, token } => self.host.git_access(agent, token),
             HubToDaemon::BlockerResolved { profile } => self.host.blocker_resolved(&profile),
             HubToDaemon::Kill { agent } => match self.host.kill(&agent).await {
                 Ok(()) => {
@@ -256,29 +279,9 @@ impl<'a, H: AgentHost> Session<'a, H> {
                     eprintln!("ulakd: input {agent:?} failed: {e}");
                 }
             }
-            HubToDaemon::Attach { agent } => match self.host.attach(&agent).await {
-                Ok(mut rx) => {
-                    let (out, id) = (self.out.clone(), agent.clone());
-                    let task = tokio::spawn(async move {
-                        while let Some(data) = rx.recv().await {
-                            if out
-                                .send(DaemonToHub::PaneOutput {
-                                    agent: id.clone(),
-                                    data,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
-                    if let Some(old) = self.attached.insert(agent, task) {
-                        old.abort();
-                    }
-                }
-                Err(e) => eprintln!("ulakd: attach {agent:?} failed: {e}"),
-            },
+            HubToDaemon::Attach { agent } => self.attach(agent).await,
             HubToDaemon::Detach { agent } => {
+                self.pending.remove(&agent);
                 if let Some(h) = self.attached.remove(&agent) {
                     h.abort();
                 }
@@ -296,15 +299,63 @@ impl<'a, H: AgentHost> Session<'a, H> {
         }
     }
 
+    /// Starts the pane stream. While the agent is still starting, a refused attach is kept
+    /// pending and retried (see `retry_pending`); for any other agent it is an error.
+    async fn attach(&mut self, agent: AgentId) {
+        match self.host.attach(&agent).await {
+            Ok(mut rx) => {
+                self.pending.remove(&agent);
+                let (out, id) = (self.out.clone(), agent.clone());
+                let task = tokio::spawn(async move {
+                    while let Some(data) = rx.recv().await {
+                        if out
+                            .send(DaemonToHub::PaneOutput {
+                                agent: id.clone(),
+                                data,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                if let Some(old) = self.attached.insert(agent, task) {
+                    old.abort();
+                }
+            }
+            Err(_) if self.starting.contains(&agent) => {
+                self.pending.entry(agent).or_insert_with(Instant::now);
+            }
+            Err(e) => eprintln!("ulakd: attach {agent:?} failed: {e}"),
+        }
+    }
+
+    /// Retries pending attaches (the session may exist before the spawn call returns) and
+    /// drops those older than [`PENDING_CAP`].
+    async fn retry_pending(&mut self) {
+        self.pending.retain(|_, t| t.elapsed() < PENDING_CAP);
+        let ids: Vec<AgentId> = self.pending.keys().cloned().collect();
+        for id in ids {
+            self.attach(id).await;
+        }
+    }
+
     async fn spawned(&mut self, id: AgentId, r: Result<(), AgentError>) {
+        self.starting.remove(&id);
         match r {
             Ok(()) => {
                 self.known.insert(id.clone());
                 self.status(&id, AgentStatus::Running).await;
                 self.emit(self.hello()).await;
+                if self.pending.contains_key(&id) {
+                    self.attach(id.clone()).await;
+                    self.pending.remove(&id); // still refused: give up, the UI can re-attach
+                }
             }
             Err(e) => {
+                self.pending.remove(&id);
                 eprintln!("ulakd: spawn {id:?} failed: {e}");
+                self.failed(&id, &e.to_string()).await;
                 self.status(&id, AgentStatus::Failed).await;
             }
         }
@@ -395,6 +446,8 @@ where
         last: sample(probe).await?,
         known,
         attached: HashMap::new(),
+        starting: HashSet::new(),
+        pending: HashMap::new(),
         out,
         updates: updates.clone(),
     };
@@ -412,6 +465,8 @@ where
             .await?;
     }
     let mut tick = tokio::time::interval(cfg.heartbeat);
+    let mut retry = tokio::time::interval(PENDING_RETRY);
+    retry.tick().await;
     tick.tick().await; // the first tick fires immediately; Hello already covered it
     let result = loop {
         tokio::select! {
@@ -425,6 +480,7 @@ where
                 Some(Ok(_)) => {}
             },
             _ = tick.tick() => s.tick(probe).await,
+            _ = retry.tick(), if !s.pending.is_empty() => s.retry_pending().await,
             Some(id) = host.next_prompt_failure() => s.prompt_failed(&id).await,
             Some(e) = host.next_event() => s.host_event(e).await,
             Some((id, r)) = spawns.next() => s.spawned(id, r).await,

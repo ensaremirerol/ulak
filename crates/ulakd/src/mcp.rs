@@ -4,10 +4,11 @@ use crate::{
     agents::{binary_name, Mcp, Recipe},
     errors::AgentError,
 };
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::BTreeMap,
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 use ulak_proto::{AgentId, SpawnSpec};
@@ -74,7 +75,10 @@ pub fn prepare(
         std::fs::create_dir_all(dir)?;
         let f = file_for(dir, spec.agent_id());
         let mut o = std::fs::OpenOptions::new();
-        o.write(true).create(true).truncate(true).mode(0o600);
+        o.write(true).create(true).truncate(true);
+        // Owner-only file mode where the platform has one (the daemon itself is Linux/macOS).
+        #[cfg(unix)]
+        o.mode(0o600);
         o.open(&f)?
             .write_all(claude_config(url).to_string().as_bytes())?;
         p.args = vec!["--mcp-config".into(), f.to_string_lossy().into_owned()];

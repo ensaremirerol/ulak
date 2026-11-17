@@ -379,18 +379,22 @@ async fn spawn_goes_only_to_an_idle_node_with_token_env() {
         }
         other => panic!("{other:?}"),
     }
-    // Explicitly targeting the busy node fails and nothing reaches it.
+    // Explicitly targeting the busy node queues the spawn and nothing reaches the node.
     send(
         &mut u,
         &UiToHub::Spawn {
-            target: SpawnTarget::Node(busy_id.id),
+            target: SpawnTarget::Node(busy_id.id.clone()),
             spec: spec(&agent("a-2")),
         },
     )
     .await;
     loop {
         match recv::<HubToUi>(&mut u).await {
-            HubToUi::Error { .. } => break,
+            HubToUi::QueueChanged { item } => {
+                assert_eq!(item.target, SpawnTarget::Node(busy_id.id.clone()));
+                break;
+            }
+            HubToUi::Error { message } => panic!("{message}"),
             _ => continue,
         }
     }
@@ -997,6 +1001,25 @@ async fn failed_ui_requests_answer_with_an_error() {
     let fx = start(fast()).await;
     let mut u = ui(&fx).await;
     // No node at all.
+    send(
+        &mut u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Auto,
+            spec: spec(&agent("a-1")),
+        },
+    )
+    .await;
+    // No node: the spawn is queued, a second one for the same agent is refused.
+    loop {
+        match recv::<HubToUi>(&mut u).await {
+            HubToUi::QueueChanged { item } => {
+                assert_eq!(item.agent, agent("a-1"));
+                break;
+            }
+            HubToUi::Error { message } => panic!("{message}"),
+            _ => continue,
+        }
+    }
     send(
         &mut u,
         &UiToHub::Spawn {

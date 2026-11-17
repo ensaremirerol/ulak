@@ -61,6 +61,26 @@ fn updater(dir: &Path) -> Result<Arc<Updater>, Box<dyn std::error::Error>> {
     )))
 }
 
+/// Clone settings: work root `$ULAKD_WORK_DIR` (default `<config>/work`), timeout
+/// `$ULAKD_CLONE_TIMEOUT_SECS` (default 300).
+fn git_cfg(dir: &Path) -> ulakd::git::GitCfg {
+    let root = std::env::var_os("ULAKD_WORK_DIR").map_or_else(|| dir.join("work"), Into::into);
+    let mut c = ulakd::git::GitCfg::new(root, dir.join("run"));
+    if let Some(s) = std::env::var("ULAKD_CLONE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+    {
+        c = c.with_timeout(Duration::from_secs(s));
+    }
+    // Only the test-key build reads this; the default build has no such knob.
+    #[cfg(feature = "test-key")]
+    if let Ok(b) = std::env::var("ULAKD_TEST_GIT_BASE") {
+        c = c.with_test_host(&b);
+    }
+    c
+}
+
 /// `ulakd update --check|--apply`: one-shot, prints the outcome.
 async fn update_cli(dir: &Path, apply: bool) -> Result<(), Box<dyn std::error::Error>> {
     let u = updater(dir)?;
@@ -146,7 +166,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(Mutex::new(Box::new(SystemProbe::new(id.guard.clone()))));
             let agents = Agents::load_or_init(&dir)?;
             let host = Tmux::with_agents(std::env::var("ULAKD_TMUX_SOCKET").ok(), agents)
-                .with_mcp(dir.join("run"), dir.join("ca.pem"));
+                .with_mcp(dir.join("run"), dir.join("ca.pem"))
+                .with_git(git_cfg(&dir));
             host.adopt().await?; // agents of a previous run keep being watched for login prompts
             tokio::select! {
                 r = run_forever_in(&id, Some(&dir), hostname(), Duration::from_secs(5), &host, probe, updates) => { r?; }
@@ -157,6 +178,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_git_base_only_under_test_key() {
+        std::env::set_var("ULAKD_TEST_GIT_BASE", "file:///x");
+        let host = super::git_cfg(std::path::Path::new("/nonexistent"))
+            .host()
+            .to_owned();
+        assert_eq!(host == "file:///x", cfg!(feature = "test-key"));
+        if !cfg!(feature = "test-key") {
+            assert_eq!(host, "https://github.com");
         }
     }
 }

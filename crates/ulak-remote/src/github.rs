@@ -1,0 +1,209 @@
+//! Blocking GitHub REST client (ureq). Call from `spawn_blocking`. The token is only ever put
+//! in the Authorization header: never in a URL, an error message or a log line.
+use crate::ServerError;
+use std::{net::IpAddr, time::Duration};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use ulak_proto::{BranchName, GitToken, RepoInfo, RepoRef};
+
+const MAX_BODY: u64 = 2 << 20;
+const PAGE: usize = 30;
+const SCAN_PAGES: u32 = 10;
+
+pub struct GitHub {
+    agent: ureq::Agent,
+    base: String,
+}
+
+fn gh(m: impl Into<String>) -> ServerError {
+    ServerError::GitHub(m.into())
+}
+
+/// https, or http for a loopback host only (tests, a local GitHub Enterprise proxy).
+pub(crate) fn validate_api(base: &str) -> Result<String, ServerError> {
+    let base = base.trim().trim_end_matches('/');
+    let bad =
+        || ServerError::BadArgs("github_api must be an https URL (http only for loopback)".into());
+    let (scheme, rest) = base.split_once("://").ok_or_else(bad)?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(bad());
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    let loopback = host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    match scheme {
+        "https" => Ok(base.to_owned()),
+        "http" if loopback => Ok(base.to_owned()),
+        _ => Err(bad()),
+    }
+}
+
+impl GitHub {
+    pub fn new(base: &str) -> Result<Self, ServerError> {
+        let base = validate_api(base)?;
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(20)))
+            .max_redirects(0)
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::WebPki)
+                    .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+                        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+                    ))
+                    .build(),
+            )
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Ok(Self { agent, base })
+    }
+
+    /// `(json, has_next_page)`.
+    fn get(&self, path: &str, token: &GitToken) -> Result<(serde_json::Value, bool), ServerError> {
+        let mut resp = self
+            .agent
+            .get(&format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", token.expose()))
+            .header(
+                "User-Agent",
+                concat!("ulak-remote/", env!("CARGO_PKG_VERSION")),
+            )
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .call()
+            .map_err(|_| gh("cannot reach the GitHub API (network error or timeout)"))?;
+        let status = resp.status().as_u16();
+        let h = |n: &str| {
+            resp.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        if status != 200 {
+            return Err(gh(match status {
+                401 => "token rejected (invalid, expired or revoked)".to_owned(),
+                429 => "rate limit exceeded; try again later".to_owned(),
+                403 if h("x-ratelimit-remaining").as_deref() == Some("0") => {
+                    "rate limit exceeded; try again later".to_owned()
+                }
+                403 => "no access with this token".to_owned(),
+                404 => "not found (or the token cannot see it)".to_owned(),
+                n => format!("unexpected HTTP status {n}"),
+            }));
+        }
+        let next = h("link").is_some_and(|l| l.contains("rel=\"next\""));
+        let json = resp
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY)
+            .read_to_vec()
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .ok_or_else(|| gh("unreadable or oversized response"))?;
+        Ok((json, next))
+    }
+
+    /// Validates the token; returns the account login.
+    pub fn login(&self, token: &GitToken) -> Result<String, ServerError> {
+        let (j, _) = self.get("/user", token)?;
+        j["login"]
+            .as_str()
+            .filter(|l| !l.is_empty() && l.len() <= 100 && !l.chars().any(char::is_control))
+            .map(str::to_owned)
+            .ok_or_else(|| gh("response has no login"))
+    }
+
+    fn page(
+        &self,
+        token: &GitToken,
+        per: usize,
+        page: u32,
+    ) -> Result<(Vec<RepoInfo>, bool), ServerError> {
+        let path = format!(
+            "/user/repos?per_page={per}&sort=pushed&affiliation=owner,collaborator,organization_member&page={page}"
+        );
+        let (j, next) = self.get(&path, token)?;
+        let repos = j
+            .as_array()
+            .ok_or_else(|| gh("unexpected response shape"))?
+            .iter()
+            .filter_map(repo_info)
+            .collect();
+        Ok((repos, next))
+    }
+
+    /// 30 repos of the 1-based `page`. With a `query`: scans up to 10 pages of 100, keeps the
+    /// case-insensitive substring matches, then slices.
+    pub fn repos(
+        &self,
+        token: &GitToken,
+        query: Option<&str>,
+        page: u32,
+    ) -> Result<(Vec<RepoInfo>, bool), ServerError> {
+        let page = page.max(1);
+        let q = query.map(str::trim).filter(|q| !q.is_empty());
+        let Some(q) = q else {
+            return self.page(token, PAGE, page);
+        };
+        let q = q.to_lowercase();
+        let mut hits = Vec::new();
+        for p in 1..=SCAN_PAGES {
+            let (repos, next) = self.page(token, 100, p)?;
+            hits.extend(
+                repos
+                    .into_iter()
+                    .filter(|r| r.full_name.as_str().to_lowercase().contains(&q)),
+            );
+            if !next {
+                break;
+            }
+        }
+        let start = (page as usize - 1).saturating_mul(PAGE);
+        let end = start.saturating_add(PAGE);
+        let has_more = hits.len() > end;
+        Ok((hits.into_iter().skip(start).take(PAGE).collect(), has_more))
+    }
+
+    /// `(branch names, default branch)`.
+    pub fn branches(
+        &self,
+        token: &GitToken,
+        repo: &RepoRef,
+    ) -> Result<(Vec<String>, String), ServerError> {
+        let base = format!("/repos/{}/{}", repo.owner(), repo.name());
+        let (info, _) = self.get(&base, token)?;
+        let default = info["default_branch"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let (j, _) = self.get(&format!("{base}/branches?per_page=100"), token)?;
+        let names = j
+            .as_array()
+            .ok_or_else(|| gh("unexpected response shape"))?
+            .iter()
+            .filter_map(|b| b["name"].as_str())
+            .filter(|n| BranchName::new(n).is_ok())
+            .map(str::to_owned)
+            .collect();
+        Ok((names, default))
+    }
+}
+
+fn repo_info(v: &serde_json::Value) -> Option<RepoInfo> {
+    let pushed_at_ms = v["pushed_at"]
+        .as_str()
+        .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
+        .map_or(0, |t| (t.unix_timestamp_nanos() / 1_000_000).max(0) as u64);
+    Some(RepoInfo {
+        full_name: RepoRef::new(v["full_name"].as_str()?).ok()?,
+        private: v["private"].as_bool().unwrap_or(false),
+        default_branch: v["default_branch"].as_str().unwrap_or("main").to_owned(),
+        pushed_at_ms,
+        description: v["description"]
+            .as_str()
+            .map(|d| d.chars().filter(|c| !c.is_control()).take(300).collect()),
+    })
+}

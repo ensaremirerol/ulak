@@ -400,7 +400,8 @@ mod tests {
         (
             Recipe {
                 check: Some(vec![bin.display().to_string()]),
-                install: Some(vec![inst.display().to_string()]),
+                // via sh: exec'ing a just-written file can hit ETXTBSY while another thread forks
+                install: Some(vec!["sh".into(), inst.display().to_string()]),
                 install_timeout_secs: secs,
                 ..Recipe::default()
             },

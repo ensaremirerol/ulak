@@ -15,10 +15,12 @@ export function takeTokenFromLocation(loc: Location = location, hist: History = 
   const found = frag.get('token') ?? query.get('token');
   if (!found) return false;
   token = found;
+  const inHash = frag.has('token');
   frag.delete('token');
   query.delete('token');
   const search = query.toString();
-  const hash = frag.toString();
+  // Re-serialising a route hash like `#/agents` would mangle it, so only touch it when it held the token.
+  const hash = inHash ? frag.toString() : loc.hash.replace(/^#/, '');
   hist.replaceState(null, '', loc.pathname + (search ? `?${search}` : '') + (hash ? `#${hash}` : ''));
   return true;
 }

@@ -1,6 +1,6 @@
 import type {
   AgentId, AgentStatus, Blocker, DeviceInfo, DeviceKind, HubToUi, Message, NodeId, NodeInfo,
-  OtpOffer, Question, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
+  OtpOffer, Question, CredentialInfo, RepoInfo, QueuedSpawn, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
 } from '../proto';
 import type { ConnState } from '../net';
 
@@ -28,6 +28,8 @@ export interface State {
   /** Open blockers, oldest first. */
   blockers: Blocker[];
   statuses: Record<AgentId, AgentStatus>;
+  /** Last reported failure reason per agent. */
+  lastFailure: Record<AgentId, { node: NodeId; reason: string; at: number }>;
   mailbox: Message[];
   devices: DeviceInfo[];
   otp: OtpOffer | null;
@@ -39,6 +41,12 @@ export interface State {
   hubVersion: VersionInfo | null;
   nodeVersions: Record<NodeId, VersionInfo>;
   updates: Record<NodeId, UpdateState>;
+  credentials: CredentialInfo[];
+  /** Repo pages by `credential\0query\0`; the latest frame per key wins. */
+  repos: Record<string, { repos: RepoInfo[]; hasMore: boolean }>;
+  /** Branches by `credential\0repo`. */
+  branches: Record<string, { branches: string[]; defaultBranch: string }>;
+  queue: QueuedSpawn[];
 }
 
 export type Event =
@@ -61,6 +69,8 @@ export interface SpawnForm {
   prompt: string;
   /** Optional profile directory (CLAUDE_CONFIG_DIR style); empty = none. */
   configDir: string;
+  /** Present = repo spawn (workdir is then sent as ''); absent = folder spawn at `workdir`. */
+  repo?: { credential: string; repo: string; branch: string; allowPush: boolean };
 }
 
 export type Intent =
@@ -69,6 +79,14 @@ export type Intent =
   | { kind: 'send_keys'; data: Uint8Array }
   | { kind: 'answer'; question: QuestionId; text: string }
   | { kind: 'spawn'; form: SpawnForm }
+  /** The token only lives in the frame; it is never kept in state. */
+  | { kind: 'add_credential'; name: string; token: string }
+  | { kind: 'delete_credential'; id: string }
+  | { kind: 'list_credentials' }
+  | { kind: 'list_repos'; credential: string; query: string | null; page: number }
+  | { kind: 'list_branches'; credential: string; repo: string }
+  | { kind: 'cancel_queued'; id: string }
+  | { kind: 'list_queue' }
   | { kind: 'kill'; agent: AgentId }
   | { kind: 'add_device'; device: DeviceKind }
   | { kind: 'revoke_device'; id: NodeId }

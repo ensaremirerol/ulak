@@ -13,9 +13,10 @@ const MAX_TOASTS = 4;
 
 export function initialState(now = Date.now()): State {
   return {
-    conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, mailbox: [], devices: [],
+    conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, lastFailure: {}, mailbox: [], devices: [],
     otp: null, terminals: {}, selected: null, toasts: [], nextToastId: 1, now,
     hubVersion: null, nodeVersions: {}, updates: {},
+    credentials: [], repos: {}, branches: {}, queue: [],
   };
 }
 
@@ -95,7 +96,8 @@ export function reduce(s: State, e: Event): State {
       if (e.state === s.conn) return s;
       const next = { ...s, conn: e.state };
       // Connected clears old error toasts (the Rust UI cleared last_error).
-      return e.state === 'open' ? { ...next, toasts: s.toasts.filter((t) => t.kind !== 'error') } : next;
+      // Statuses and the queue are replayed on connect only when non-empty: reset them first.
+      return e.state === 'open' ? { ...next, statuses: {}, queue: [], toasts: s.toasts.filter((t) => t.kind !== 'error') } : next;
     }
     case 'tick':
       return ageToasts({ ...s, now: e.now });
@@ -106,6 +108,14 @@ export function reduce(s: State, e: Event): State {
     case 'hub':
       return reduceHub(s, e.frame);
   }
+}
+
+export const repoKey = (credential: string, query: string | null): string => `${credential}\0${query ?? ''}`;
+export const branchKey = (credential: string, repo: string): string => `${credential}\0${repo}`;
+
+function setStatus(s: State, agent: string, node: NodeId, status: AgentStatus): State {
+  const nodes = s.nodes.map((n) => (n.id === node && !n.agents.includes(agent) ? { ...n, agents: [...n.agents, agent] } : n));
+  return { ...s, nodes, statuses: { ...s.statuses, [agent]: status } };
 }
 
 function reduceHub(s: State, f: HubToUi): State {
@@ -130,12 +140,31 @@ function reduceHub(s: State, f: HubToUi): State {
       return { ...s, mailbox: f.messages };
     case 'pane_output':
       return { ...s, terminals: { ...s.terminals, [f.agent]: appendPane(s.terminals[f.agent], f.data) } };
-    case 'agent_status': {
-      const nodes = s.nodes.map((n) =>
-        n.id === f.node && !n.agents.includes(f.agent) ? { ...n, agents: [...n.agents, f.agent] } : n,
+    case 'agent_status':
+      return setStatus(s, f.agent, f.node, f.status);
+    case 'agent_statuses':
+      return f.statuses.reduce((acc, [a, n, st]) => setStatus(acc, a, n, st), s);
+    case 'agent_failed':
+      return addToast(
+        { ...s, lastFailure: { ...s.lastFailure, [f.agent]: { node: f.node, reason: f.reason, at: s.now } } },
+        'error',
+        `agent ${f.agent} failed: ${f.reason}`,
       );
-      return { ...s, nodes, statuses: { ...s.statuses, [f.agent]: f.status } };
-    }
+    case 'credentials':
+      return { ...s, credentials: f.credentials };
+    case 'repos':
+      return { ...s, repos: { ...s.repos, [repoKey(f.credential, f.query)]: { repos: f.repos, hasMore: f.has_more } } };
+    case 'branches':
+      return {
+        ...s,
+        branches: { ...s.branches, [branchKey(f.credential, f.repo)]: { branches: f.branches, defaultBranch: f.default_branch } },
+      };
+    case 'queue':
+      return { ...s, queue: f.items };
+    case 'queue_changed':
+      return { ...s, queue: upsert(s.queue, f.item, (a, b) => a.id === b.id) };
+    case 'queue_removed':
+      return { ...s, queue: s.queue.filter((q) => q.id !== f.id) };
     case 'otp_offer': {
       const o = body(f);
       return { ...s, otp: o };
@@ -200,6 +229,9 @@ export function agentTone(st: AgentStatus | undefined): 'ok' | 'info' | 'warn' |
     case 'Failed': return 'bad';
   }
 }
+
+/** True while the agent has no tmux session yet (a repo spawn clones first): attaching would be refused. */
+export const awaitsSession = (st: AgentStatus | undefined): boolean => st === 'Starting' || st === 'Installing';
 
 export function agentStatusLabel(st: AgentStatus | undefined): string {
   if (st === undefined) return 'Unknown';

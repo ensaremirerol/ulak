@@ -1,9 +1,9 @@
 import { useState } from 'preact/hooks';
-import type { NodeInfo } from '../proto';
-import { agentStatusLabel, agentTone, availableVersion, kindTitle, keysFromText, nodeOf, store } from '../state';
+import type { NodeInfo, QueuedSpawn } from '../proto';
+import { agentStatusLabel, agentTone, awaitsSession, availableVersion, kindTitle, keysFromText, nodeOf, store } from '../state';
 import { Button, Card, Dot, EmptyState, Pill, ProgressBar } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { nodeStateLabel, nodeStateTone } from '../ui/format';
+import { ageLabel, nodeStateLabel, nodeStateTone } from '../ui/format';
 import { Terminal } from '../ui/Terminal';
 import { SpawnDialog } from './SpawnDialog';
 
@@ -21,7 +21,7 @@ function NodeCard({ n }: { n: NodeInfo }) {
   const note = typeof n.state === 'object' ? 'Not taking new agents' : off ? 'Offline' : '';
   return (
     <article class="card node-card" aria-label={`Node ${n.hostname}`}>
-      <div class="card-title"><strong>{n.hostname}</strong><Pill tone={nodeStateTone(n.state)}>{nodeStateLabel(n.state)}</Pill></div>
+      <div class="card-title"><strong>{n.hostname}</strong><Pill tone={nodeStateTone(n.state)} title={nodeStateLabel(n.state)}>{nodeStateLabel(n.state)}</Pill></div>
       <div class="stack tight">
         <ProgressBar label="CPU" value={off ? null : t.cpu_pct} />
         <ProgressBar label="GPU" value={off ? null : t.gpu_pct} />
@@ -55,7 +55,9 @@ function AgentTerminal({ agent }: { agent: string }) {
           <ConfirmButton label="Kill" confirmLabel="Click again to kill" onConfirm={() => store.intent({ kind: 'kill', agent })} />
         </div>
       </div>
-      <Terminal agent={agent} />
+      {awaitsSession(st)
+        ? <div class="term-host term-wait muted" role="status">{st === 'Installing' ? 'Installing…' : 'Starting…'} The terminal opens when the agent is running (a repository is cloned first).</div>
+        : <Terminal agent={agent} />}
       <div class="keybar" aria-label="Keys">
         {KEYS.map(([label, seq]) => <button key={label} type="button" class="key" onClick={() => send(seq)}>{label}</button>)}
       </div>
@@ -71,6 +73,29 @@ function AgentTerminal({ agent }: { agent: string }) {
         <Button type="submit" variant="primary" aria-label="Send">Send</Button>
       </form>
     </div>
+  );
+}
+
+const sourceLabel = (q: QueuedSpawn): string => (q.source.kind === 'repo' ? `${q.source.repo}@${q.source.branch ?? 'default'}` : q.source.path);
+const targetLabel = (q: QueuedSpawn): string => (q.target === 'Auto' ? 'Auto' : `node ${q.target.Node}`);
+
+function QueuePanel({ items, now }: { items: QueuedSpawn[]; now: number }) {
+  return (
+    <Card dashed title="Queue" aside={<span class="muted small">{items.length} waiting</span>}>
+      <ul class="agent-list" aria-label="Queue">
+        {items.map((q) => (
+          <li key={q.id} class="row">
+            <span class="agent-name">
+              <span>{q.agent}</span>
+              <span class="muted small">{sourceLabel(q)} · {targetLabel(q)} · {ageLabel(Math.max(0, now - q.created_ms))}</span>
+              {typeof q.state === 'object' && <span class="err small" role="alert">{q.state.Failed}</span>}
+            </span>
+            <Pill tone={q.state === 'Queued' ? 'info' : 'bad'}>{q.state === 'Queued' ? 'Queued' : 'Failed'}</Pill>
+            <ConfirmButton label="Cancel" confirmLabel="Click again to cancel" onConfirm={() => store.intent({ kind: 'cancel_queued', id: q.id })} />
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -114,6 +139,7 @@ export function Agents() {
                 </ul>
               </Card>
             )}
+            {s.queue.length > 0 && <QueuePanel items={s.queue} now={s.now} />}
           </div>
           {s.selected ? <AgentTerminal agent={s.selected} /> : agents.length > 0 && <div class="term-card empty-term muted">Select an agent to open its terminal.</div>}
         </div>

@@ -39,6 +39,11 @@ pub enum DaemonToHub {
     /// First thing a current daemon sends after connecting.
     Version(VersionInfo),
     UpdateStatus(UpdateState),
+    /// Why an agent ended up `Failed` (sanitized, at most 300 chars, never a credential).
+    AgentFailed {
+        agent: AgentId,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +56,13 @@ pub enum HubToDaemon {
     /// The user fixed the blocker for this profile; spawning is allowed again.
     BlockerResolved {
         profile: ProfileKey,
+    },
+    /// Sent right before the `Spawn` of a repo source, to the chosen node only: the token for
+    /// cloning (and, if `allow_push`, pushing). Never log it, never write it to disk or the
+    /// agent's environment beyond what git needs.
+    GitAccess {
+        agent: AgentId,
+        token: GitToken,
     },
     Spawn(SpawnSpec),
     Kill {
@@ -76,6 +88,7 @@ pub enum HubToDaemon {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // one short-lived frame per message; boxing would change every caller
 pub enum UiToHub {
     Spawn {
         target: SpawnTarget,
@@ -118,6 +131,31 @@ pub enum UiToHub {
         thread: Option<ThreadId>,
         limit: u32,
     },
+    /// Validated against GitHub, then stored encrypted. Reply: `Credentials` or `Error`.
+    AddCredential {
+        name: String,
+        token: GitToken,
+    },
+    /// Reply: `Credentials`.
+    DeleteCredential {
+        id: CredentialId,
+    },
+    ListCredentials,
+    /// `page` is 1-based, 30 repos per page. `query` filters by substring of the full name.
+    ListRepos {
+        credential: CredentialId,
+        query: Option<String>,
+        page: u32,
+    },
+    ListBranches {
+        credential: CredentialId,
+        repo: RepoRef,
+    },
+    /// Removes a queued or failed item. Reply to everyone: `QueueRemoved`.
+    CancelQueued {
+        id: QueueId,
+    },
+    ListQueue,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,9 +211,53 @@ pub enum HubToUi {
         node: NodeId,
         status: UpdateState,
     },
+    /// After `Blockers` on connect, only when at least one agent status is known.
+    AgentStatuses {
+        statuses: Vec<(AgentId, NodeId, AgentStatus)>,
+    },
+    /// Daemon-only origin; `node` is the daemon's connection, never the payload. Also replayed
+    /// after `AgentStatuses` for agents whose status is `Failed`.
+    AgentFailed {
+        agent: AgentId,
+        node: NodeId,
+        reason: String,
+    },
+    Credentials {
+        credentials: Vec<CredentialInfo>,
+    },
+    Repos {
+        credential: CredentialId,
+        query: Option<String>,
+        repos: Vec<RepoInfo>,
+        has_more: bool,
+    },
+    Branches {
+        credential: CredentialId,
+        repo: RepoRef,
+        branches: Vec<String>,
+        default_branch: String,
+    },
+    /// Full queue; on connect only when non-empty, and as the reply to `ListQueue`.
+    Queue {
+        items: Vec<QueuedSpawn>,
+    },
+    /// A new item, or an existing one whose state changed (e.g. to `Failed`).
+    QueueChanged {
+        item: QueuedSpawn,
+    },
+    /// Placed on a node, or cancelled.
+    QueueRemoved {
+        id: QueueId,
+    },
     Error {
         message: String,
     },
+}
+
+/// Failure reason for the UI: control characters stripped, at most 300 chars. Callers must not
+/// pass anything that contains a credential.
+pub fn sanitize_reason(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(300).collect()
 }
 
 pub fn encode<T: Serialize>(v: &T) -> Result<String, ProtoError> {

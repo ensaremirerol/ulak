@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'preact/hooks';
 import { utf8 } from '../proto';
 import { store } from '../state';
 import { termBytes } from '../state/reducer';
+import { cursorScrollTop } from './scroll';
 
 // The protocol has no resize frame and ulakd creates every tmux pane at 200x50 (tmux.rs), so render at exactly that size
 // and scroll the host instead of fitting: fitting to the window would wrap/crop the redraw.
@@ -87,9 +88,14 @@ export function Terminal({ agent }: { agent: string }) {
     const t = term.current!;
     t.reset();
     const old = termBytes(store.state.peek().terminals[agent]);
-    if (old.length > 0) t.write(old);
+    const follow = () => {
+      const h = host.current;
+      if (!h) return;
+      h.scrollTop = cursorScrollTop(t.buffer.active.cursorY, h.scrollHeight / ROWS, h.scrollTop, h.clientHeight);
+    };
+    if (old.length > 0) t.write(old, follow);
     t.focus();
-    return store.onPane(agent, (d) => t.write(d));
+    return store.onPane(agent, (d) => t.write(d, follow));
   }, [agent]);
 
   return <div class="term-host" ref={host} />;

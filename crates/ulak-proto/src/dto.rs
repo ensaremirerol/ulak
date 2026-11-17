@@ -55,6 +55,8 @@ id_type!(ThreadId);
 id_type!(MessageId);
 id_type!(QuestionId);
 id_type!(BlockerId);
+id_type!(CredentialId);
+id_type!(QueueId);
 
 impl AgentId {
     pub fn tmux_session(&self) -> String {
@@ -373,9 +375,13 @@ impl Blocker {
 pub struct SpawnSpec {
     agent_id: AgentId,
     profile: AgentProfile,
+    /// Folder spawns: where the agent runs. Repo spawns: empty, the daemon chooses.
     workdir: PathBuf,
     prompt: String,
     env: BTreeMap<String, String>,
+    /// Absent (old peers, `new`) means `Source::Folder { path: workdir }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<Source>,
 }
 impl SpawnSpec {
     pub fn new(
@@ -392,7 +398,24 @@ impl SpawnSpec {
             workdir,
             prompt,
             env,
+            source: None,
         })
+    }
+    /// Spawn from a GitHub repository; the daemon clones it into a workdir of its choosing.
+    pub fn new_repo(
+        agent_id: AgentId,
+        profile: AgentProfile,
+        source: Source,
+        prompt: String,
+        env: BTreeMap<String, String>,
+    ) -> Result<Self, ProtoError> {
+        let mut s = Self::new(agent_id, profile, PathBuf::new(), prompt, env)?;
+        if let Source::Folder { path } = source {
+            s.workdir = path;
+        } else {
+            s.source = Some(source);
+        }
+        Ok(s)
     }
     pub fn agent_id(&self) -> &AgentId {
         &self.agent_id
@@ -408,6 +431,241 @@ impl SpawnSpec {
     }
     pub fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+    /// Where the agent's files come from (a folder spec reports its workdir).
+    pub fn source(&self) -> Source {
+        self.source.clone().unwrap_or_else(|| Source::Folder {
+            path: self.workdir.clone(),
+        })
+    }
+    /// Same spec with another environment (the hub adds the agent token and MCP URL).
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+    /// Frames from the wire are not re-validated on decode; the hub calls this on UI input.
+    pub fn check(&self) -> Result<(), ProtoError> {
+        non_empty(&self.prompt, "prompt")?;
+        match &self.source {
+            Some(Source::Folder { path }) if path != &self.workdir => Err(ProtoError::OutOfRange {
+                field: "source.path",
+            }),
+            None if self.workdir.as_os_str().is_empty() => {
+                Err(ProtoError::Empty { field: "workdir" })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// `owner/name` of a GitHub repository (host is always github.com). Validated: owner
+/// `[A-Za-z0-9-]{1,39}` without a leading `-`; name `[A-Za-z0-9._-]{1,100}` without a leading
+/// `-`, never `.`/`..`, no `..` anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RepoRef(String);
+impl RepoRef {
+    pub fn new(s: &str) -> Result<Self, ProtoError> {
+        let ok = s.split_once('/').is_some_and(|(o, n)| {
+            let word = |x: &str, max: usize, extra: bool| {
+                (1..=max).contains(&x.len())
+                    && !x.starts_with('-')
+                    && x.bytes().all(|b| {
+                        b.is_ascii_alphanumeric()
+                            || b == b'-'
+                            || (extra && (b == b'.' || b == b'_'))
+                    })
+            };
+            word(o, 39, false) && word(n, 100, true) && !n.contains("..") && n != "."
+        });
+        if ok {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(ProtoError::InvalidId {
+                kind: "RepoRef",
+                value: s.chars().filter(|c| !c.is_control()).take(40).collect(),
+            })
+        }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn owner(&self) -> &str {
+        self.0.split_once('/').map_or("", |x| x.0)
+    }
+    pub fn name(&self) -> &str {
+        self.0.split_once('/').map_or("", |x| x.1)
+    }
+}
+impl TryFrom<String> for RepoRef {
+    type Error = ProtoError;
+    fn try_from(s: String) -> Result<Self, ProtoError> {
+        Self::new(&s)
+    }
+}
+impl From<RepoRef> for String {
+    fn from(v: RepoRef) -> String {
+        v.0
+    }
+}
+
+/// A git branch name that is safe to pass to `git`: 1..=200 printable chars, no leading `-` or
+/// `/`, none of ` ~^:?*[\\`, no `..`, `@{`, `//`, and no trailing `/`, `.` or `.lock`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BranchName(String);
+impl BranchName {
+    pub fn new(s: &str) -> Result<Self, ProtoError> {
+        let bad = s.is_empty()
+            || s.len() > 200
+            || s.starts_with(['-', '/'])
+            || s.ends_with(['/', '.'])
+            || s.ends_with(".lock")
+            || s.contains("..")
+            || s.contains("@{")
+            || s.contains("//")
+            || s.chars()
+                .any(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c));
+        if bad {
+            Err(ProtoError::InvalidId {
+                kind: "BranchName",
+                value: s.chars().filter(|c| !c.is_control()).take(40).collect(),
+            })
+        } else {
+            Ok(Self(s.to_owned()))
+        }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for BranchName {
+    type Error = ProtoError;
+    fn try_from(s: String) -> Result<Self, ProtoError> {
+        Self::new(&s)
+    }
+}
+impl From<BranchName> for String {
+    fn from(v: BranchName) -> String {
+        v.0
+    }
+}
+
+/// Where a spawned agent's files come from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Source {
+    Folder {
+        path: PathBuf,
+    },
+    Repo {
+        repo: RepoRef,
+        /// `None`: the repository's default branch.
+        #[serde(default)]
+        branch: Option<BranchName>,
+        credential: CredentialId,
+        /// May the agent push? The daemon enforces it (the token itself is not scoped).
+        #[serde(default)]
+        allow_push: bool,
+    },
+}
+
+/// A GitHub token. `Debug` never prints it; it is serialised as a plain string, but only the
+/// hub's UI socket (add) and the hub-to-daemon socket (`GitAccess`) ever carry it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GitToken(String);
+impl GitToken {
+    pub fn new(s: &str) -> Result<Self, ProtoError> {
+        if (8..=255).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            Ok(Self(s.to_owned()))
+        } else {
+            // Never echo the value.
+            Err(ProtoError::OutOfRange { field: "token" })
+        }
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+impl TryFrom<String> for GitToken {
+    type Error = ProtoError;
+    fn try_from(s: String) -> Result<Self, ProtoError> {
+        Self::new(&s)
+    }
+}
+impl From<GitToken> for String {
+    fn from(v: GitToken) -> String {
+        v.0
+    }
+}
+impl std::fmt::Debug for GitToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitToken(***)")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Github,
+}
+
+/// A stored GitHub credential as shown to UIs. Never contains the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialInfo {
+    pub id: CredentialId,
+    pub name: String,
+    pub kind: CredentialKind,
+    pub login: String,
+    pub created_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoInfo {
+    pub full_name: RepoRef,
+    pub private: bool,
+    pub default_branch: String,
+    /// 0 when GitHub reports none (empty repository).
+    pub pushed_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueState {
+    /// Waiting for an eligible node.
+    Queued,
+    /// Placement failed with this message; stays listed until cancelled.
+    Failed(String),
+}
+
+/// A spawn request waiting for a node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedSpawn {
+    pub id: QueueId,
+    pub agent: AgentId,
+    pub source: Source,
+    pub target: SpawnTarget,
+    pub profile: ProfileKey,
+    /// First line of the prompt, at most 120 chars.
+    pub prompt_preview: String,
+    pub created_ms: u64,
+    pub state: QueueState,
+}
+impl QueuedSpawn {
+    pub fn preview(prompt: &str) -> String {
+        prompt
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(120)
+            .collect()
     }
 }
 

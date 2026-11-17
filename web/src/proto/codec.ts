@@ -1,7 +1,7 @@
 import { b64ToBytes, bytesToB64 } from './bytes';
 import type {
-  AgentStatus, Blocker, DeviceInfo, HubToUi, HubToUiType, Message, NodeInfo, NodeState,
-  OtpOffer, Question, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
+  AgentStatus, Blocker, CredentialInfo, DeviceInfo, HubToUi, HubToUiType, Message, NodeInfo, NodeState,
+  OtpOffer, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
   VersionInfo,
 } from './types';
 
@@ -136,6 +136,62 @@ function otpOffer(o: Obj): OtpOffer {
 }
 
 const s = (v: unknown, w: string) => str(v, w);
+const optStr = (v: unknown, w: string) => opt(v, (x) => str(x, w));
+
+export function source(v: unknown): Source {
+  const o = obj(v, 'source');
+  if (o.kind === 'folder') return { kind: 'folder', path: str(o.path, 'path') };
+  return {
+    kind: oneOf(o.kind, ['repo'] as const, 'source kind'),
+    repo: str(o.repo, 'repo'),
+    branch: opt(o.branch, (x) => str(x, 'branch')),
+    credential: str(o.credential, 'credential'),
+    allow_push: bool(o.allow_push, 'allow_push'),
+  };
+}
+
+const target = (v: unknown) => (v === 'Auto' ? 'Auto' : { Node: str(obj(v, 'target').Node, 'node') });
+
+function credentialInfo(v: unknown): CredentialInfo {
+  const o = obj(v, 'credential');
+  return {
+    id: str(o.id, 'id'),
+    name: str(o.name, 'name'),
+    kind: oneOf(o.kind, ['github'] as const, 'kind'),
+    login: str(o.login, 'login'),
+    created_ms: num(o.created_ms, 'created_ms'),
+  };
+}
+
+function repoInfo(v: unknown): RepoInfo {
+  const o = obj(v, 'repo');
+  return {
+    full_name: str(o.full_name, 'full_name'),
+    private: bool(o.private, 'private'),
+    default_branch: str(o.default_branch, 'default_branch'),
+    pushed_at_ms: num(o.pushed_at_ms, 'pushed_at_ms'),
+    ...(typeof o.description === 'string' ? { description: o.description } : {}),
+  };
+}
+
+function queueState(v: unknown): QueueState {
+  if (v === 'Queued') return v;
+  return { Failed: str(obj(v, 'queue state').Failed, 'Failed') };
+}
+
+export function queuedSpawn(v: unknown): QueuedSpawn {
+  const o = obj(v, 'queued spawn');
+  return {
+    id: str(o.id, 'id'),
+    agent: str(o.agent, 'agent'),
+    source: source(o.source),
+    target: target(o.target),
+    profile: str(o.profile, 'profile'),
+    prompt_preview: str(o.prompt_preview, 'prompt_preview'),
+    created_ms: num(o.created_ms, 'created_ms'),
+    state: queueState(o.state),
+  };
+}
 
 type Decoder<T> = (o: Obj) => T;
 // A table, not a switch: `satisfies` makes a missing variant a compile error.
@@ -156,6 +212,32 @@ const hubDecoders = {
   hub_version: (o) => ({ type: 'hub_version', ...versionInfo(o) }),
   node_version: (o) => ({ type: 'node_version', node: s(o.node, 'node'), info: versionInfo(o.info) }),
   update_status: (o) => ({ type: 'update_status', node: s(o.node, 'node'), status: updateState(o.status) }),
+  agent_statuses: (o) => ({
+    type: 'agent_statuses',
+    statuses: arr(o.statuses, 'statuses', (x) => {
+      const t = arr(x, 'status entry', (y) => y);
+      return [str(t[0], 'agent'), str(t[1], 'node'), agentStatus(t[2])] as [string, string, AgentStatus];
+    }),
+  }),
+  agent_failed: (o) => ({ type: 'agent_failed', agent: s(o.agent, 'agent'), node: s(o.node, 'node'), reason: s(o.reason, 'reason') }),
+  credentials: (o) => ({ type: 'credentials', credentials: arr(o.credentials, 'credentials', credentialInfo) }),
+  repos: (o) => ({
+    type: 'repos',
+    credential: s(o.credential, 'credential'),
+    query: optStr(o.query, 'query'),
+    repos: arr(o.repos, 'repos', repoInfo),
+    has_more: bool(o.has_more, 'has_more'),
+  }),
+  branches: (o) => ({
+    type: 'branches',
+    credential: s(o.credential, 'credential'),
+    repo: s(o.repo, 'repo'),
+    branches: arr(o.branches, 'branches', (x) => str(x, 'branch')),
+    default_branch: s(o.default_branch, 'default_branch'),
+  }),
+  queue: (o) => ({ type: 'queue', items: arr(o.items, 'items', queuedSpawn) }),
+  queue_changed: (o) => ({ type: 'queue_changed', item: queuedSpawn(o.item) }),
+  queue_removed: (o) => ({ type: 'queue_removed', id: s(o.id, 'id') }),
   error: (o) => ({ type: 'error', message: s(o.message, 'message') }),
 } satisfies { [K in HubToUiType]: Decoder<Extract<HubToUi, { type: K }>> };
 
@@ -213,15 +295,15 @@ function spawnSpec(v: unknown): SpawnSpec {
     workdir: str(o.workdir, 'workdir'),
     prompt: str(o.prompt, 'prompt'),
     env: Object.fromEntries(Object.entries(env).map(([k, x]) => [k, str(x, 'env value')])),
+    ...(o.source === undefined ? {} : { source: source(o.source) }),
   };
 }
 
-const optStr = (v: unknown, w: string) => opt(v, (x) => str(x, w));
 
 const uiDecoders = {
   spawn: (o) => ({
     type: 'spawn',
-    target: o.target === 'Auto' ? 'Auto' : { Node: str(obj(o.target, 'target').Node, 'node') },
+    target: target(o.target),
     spec: spawnSpec(o.spec),
   }),
   answer: (o) => ({ type: 'answer', question: s(o.question, 'question'), text: s(o.text, 'text') }),
@@ -236,6 +318,18 @@ const uiDecoders = {
   check_update: (o) => ({ type: 'check_update', node: optStr(o.node, 'node') }),
   update_node: (o) => ({ type: 'update_node', node: optStr(o.node, 'node') }),
   mailbox_log: (o) => ({ type: 'mailbox_log', thread: optStr(o.thread, 'thread'), limit: num(o.limit, 'limit') }),
+  add_credential: (o) => ({ type: 'add_credential', name: s(o.name, 'name'), token: s(o.token, 'token') }),
+  delete_credential: (o) => ({ type: 'delete_credential', id: s(o.id, 'id') }),
+  list_credentials: () => ({ type: 'list_credentials' }),
+  list_repos: (o) => ({
+    type: 'list_repos',
+    credential: s(o.credential, 'credential'),
+    query: optStr(o.query, 'query'),
+    page: num(o.page, 'page'),
+  }),
+  list_branches: (o) => ({ type: 'list_branches', credential: s(o.credential, 'credential'), repo: s(o.repo, 'repo') }),
+  cancel_queued: (o) => ({ type: 'cancel_queued', id: s(o.id, 'id') }),
+  list_queue: () => ({ type: 'list_queue' }),
 } satisfies { [K in UiToHubType]: Decoder<Extract<UiToHub, { type: K }>> };
 
 export const UI_TO_HUB_TYPES = Object.keys(uiDecoders) as UiToHubType[];
