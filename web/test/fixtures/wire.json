@@ -326,6 +326,12 @@
       "id": "q-1",
       "type": "queue_removed"
     },
+    "release_cache": {
+      "checked_ms": 1700000007000,
+      "error": "release fetch failed: HTTP 404",
+      "latest": "0.1.4",
+      "type": "release_cache"
+    },
     "repos": {
       "credential": "cred-1",
       "has_more": true,

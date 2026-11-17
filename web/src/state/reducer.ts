@@ -15,7 +15,7 @@ export function initialState(now = Date.now()): State {
   return {
     conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, lastFailure: {}, mailbox: [], devices: [],
     otp: null, terminals: {}, selected: null, toasts: [], nextToastId: 1, now,
-    hubVersion: null, nodeVersions: {}, updates: {},
+    hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
     credentials: [], repos: {}, branches: {}, queue: [],
   };
 }
@@ -183,6 +183,8 @@ function reduceHub(s: State, f: HubToUi): State {
       const v = body(f);
       return { ...s, hubVersion: v };
     }
+    case 'release_cache':
+      return { ...s, releaseCache: { latest: f.latest, checkedMs: f.checked_ms, error: f.error } };
     case 'node_version':
       return { ...s, nodeVersions: { ...s.nodeVersions, [f.node]: f.info } };
     case 'update_status':

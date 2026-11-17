@@ -228,6 +228,7 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
     if !send(&mut s, &snap).await
         || !send(&mut s, &open).await
         || !send(&mut s, &HubToUi::HubVersion(crate::version_info())).await
+        || (h.cfg.release_dir.is_some() && !send(&mut s, &h.release_frame()).await)
     {
         return;
     }
@@ -405,7 +406,18 @@ fn on_ui(
                 );
             }
         }
-        UiToHub::CheckUpdate { node } => update_route(h, node, || HubToDaemon::CheckUpdate)?,
+        UiToHub::CheckUpdate { node } => {
+            // Refresh the hub's cache first (at most once a minute), then ask the nodes.
+            let (h, tx) = (h.clone(), tx.clone());
+            tokio::spawn(async move {
+                h.refresh_releases(false).await;
+                if let Err(e) = update_route(&h, node, || HubToDaemon::CheckUpdate) {
+                    let _ = tx.send(HubToUi::Error {
+                        message: e.to_string(),
+                    });
+                }
+            });
+        }
         UiToHub::UpdateNode { node } => update_route(h, node, || HubToDaemon::UpdateNow)?,
         UiToHub::AddDevice { kind } => {
             let o = h.enroller().begin(kind, now);

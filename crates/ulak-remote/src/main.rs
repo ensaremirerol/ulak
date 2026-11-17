@@ -1,8 +1,9 @@
 //! `ulak-remote`: the hub binary. Config by env: ULAK_DIR (default ./ulak-data), ULAK_ADDR
 //! (default 0.0.0.0:8443), ULAK_SANS (comma list, default localhost,127.0.0.1),
-//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_GITHUB_API (GitHub REST base, default https://api.github.com; http only for loopback), ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
+//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_GITHUB_API (GitHub REST base, default https://api.github.com; http only for loopback), ULAK_RELEASE_REPO (owner/name, default ensaremirerol/ulak), ULAK_RELEASE_INTERVAL_HOURS (default 6), ULAK_RELEASE_CREDENTIAL (stored credential id, preferred) or ULAK_RELEASE_TOKEN_FILE / ULAK_GH_TOKEN (kept in memory only) for the hub release cache that nodes update from, ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncBufReadExt;
+use ulak_proto::{CredentialId, GitToken};
 use ulak_remote::{Ca, DeviceKind, Hub, HubConfig, Store, TrustedProxies};
 
 fn parse_kind(s: &str) -> Option<DeviceKind> {
@@ -95,6 +96,22 @@ async fn main() -> anyhow::Result<()> {
     if http_addr.is_some_and(|a| !a.ip().is_loopback()) && trusted.is_empty() {
         eprintln!("WARNING: ULAK_HTTP_ADDR is not loopback and ULAK_TRUSTED_PROXIES is empty: X-Forwarded-For is ignored, so every client behind the proxy shares one enrollment rate limit. Set ULAK_TRUSTED_PROXIES to the proxy address.");
     }
+    let release_credential = env("ULAK_RELEASE_CREDENTIAL")
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| CredentialId::new(v.trim()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("bad ULAK_RELEASE_CREDENTIAL: {e}"))?;
+    let token_text = match env("ULAK_RELEASE_TOKEN_FILE") {
+        Some(f) => Some(
+            std::fs::read_to_string(&f)
+                .map_err(|e| anyhow::anyhow!("cannot read ULAK_RELEASE_TOKEN_FILE {f}: {e}"))?,
+        ),
+        None => env("ULAK_GH_TOKEN"),
+    };
+    let release_token = token_text
+        .map(|t| GitToken::new(t.trim()))
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("the release token (ULAK_RELEASE_TOKEN_FILE / ULAK_GH_TOKEN) is not a valid GitHub token"))?;
     let cfg = HubConfig {
         trusted_proxies: trusted,
         ask_timeout: ms("ULAK_ASK_TIMEOUT_MS")?.unwrap_or(d.ask_timeout),
@@ -113,8 +130,33 @@ async fn main() -> anyhow::Result<()> {
         web_dir: env("ULAK_WEB_DIR").map(PathBuf::from),
         secrets_key_path: Some(dir.join("secrets.key")),
         github_api: env("ULAK_GITHUB_API").unwrap_or(d.github_api),
+        release_dir: Some(dir.join("releases")),
+        release_repo: env("ULAK_RELEASE_REPO").unwrap_or(d.release_repo),
+        release_key: ulakd::update::trust::release_key().ok(),
+        release_token,
+        release_credential,
+        release_interval: std::time::Duration::from_secs(
+            3600 * num::<u64>("ULAK_RELEASE_INTERVAL_HOURS")?
+                .filter(|h| *h > 0)
+                .unwrap_or(6),
+        ),
         ..HubConfig::default()
     };
+    println!(
+        "release cache: {} every {} h, {}",
+        cfg.release_repo,
+        cfg.release_interval.as_secs() / 3600,
+        if cfg.release_credential.is_some() {
+            "stored credential"
+        } else if cfg.release_token.is_some() {
+            "token from env/file"
+        } else {
+            "no token (unauthenticated: public repos only, low rate limit)"
+        }
+    );
+    if cfg.release_key.is_none() {
+        eprintln!("WARNING: this build has no release signing key; the hub release cache is off");
+    }
     let hub = Hub::new(store, ca, &sans, cfg)?;
     let running = hub.bind(addr).await?;
     println!("ulak-remote listening on https://{}", running.local_addr());

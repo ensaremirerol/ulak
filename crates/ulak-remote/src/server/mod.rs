@@ -2,6 +2,7 @@
 mod hub;
 mod mcp;
 mod place;
+pub(crate) mod releases;
 mod web;
 mod ws;
 

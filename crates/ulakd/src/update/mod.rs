@@ -5,6 +5,7 @@
 //! Installing immediately is fine even with agents running: they live in tmux, not in this process.
 pub mod config;
 pub mod http;
+pub mod hub;
 pub mod install;
 pub mod release;
 pub mod trust;
@@ -129,7 +130,25 @@ impl Updater {
             .unwrap_or_else(|e| Err(task_failed("http", &e)))
     }
 
+    fn use_hub(&self) -> bool {
+        self.cfg.source(&self.dir) == config::Source::Hub
+    }
+
+    /// Blocking hub request (identity files are re-read each time).
+    async fn hub<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(hub::HubClient) -> Result<T, UpdateError> + Send + 'static,
+    ) -> Result<T, UpdateError> {
+        let dir = self.dir.clone();
+        tokio::task::spawn_blocking(move || f(hub::HubClient::load(&dir)?))
+            .await
+            .unwrap_or_else(|e| Err(task_failed("hub http", &e)))
+    }
+
     async fn latest(&self) -> Result<Option<Release>, UpdateError> {
+        if self.use_hub() {
+            return self.hub(|c| c.latest()).await.map(Some);
+        }
         let url = format!(
             "{}/repos/{}/releases/latest",
             self.cfg.api_base.trim_end_matches('/'),
@@ -145,6 +164,20 @@ impl Updater {
     async fn asset(&self, a: &release::Asset, max: u64) -> Result<Vec<u8>, UpdateError> {
         if a.size > max {
             return Err(UpdateError::TooLarge(max));
+        }
+        if self.use_hub() {
+            let path = a.url.clone();
+            return self
+                .hub(move |c| c.get(&path, max))
+                .await
+                .and_then(|b| match a.size {
+                    0 => Ok(b),
+                    n if b.len() as u64 == n => Ok(b),
+                    n => Err(UpdateError::Truncated {
+                        got: b.len() as u64,
+                        want: n,
+                    }),
+                });
         }
         let same = origin(&a.url) == origin(&self.cfg.api_base);
         let bytes = self.get(&a.url, same, OCTET, max).await?;

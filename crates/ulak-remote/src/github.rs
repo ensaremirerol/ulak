@@ -11,7 +11,32 @@ const SCAN_PAGES: u32 = 10;
 
 pub struct GitHub {
     agent: ureq::Agent,
+    /// Same TLS setup, long timeout: release assets are tens of MiB.
+    dl: ureq::Agent,
     base: String,
+}
+
+fn agent(global: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(global)))
+        .max_redirects(0)
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::WebPki)
+                .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+                    tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .build(),
+        )
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+fn origin(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    &url[..url.len() - rest.len() + rest.find('/').unwrap_or(rest.len())]
 }
 
 fn gh(m: impl Into<String>) -> ServerError {
@@ -43,22 +68,8 @@ pub(crate) fn validate_api(base: &str) -> Result<String, ServerError> {
 impl GitHub {
     pub fn new(base: &str) -> Result<Self, ServerError> {
         let base = validate_api(base)?;
-        let agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(20)))
-            .max_redirects(0)
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::WebPki)
-                    .unversioned_rustls_crypto_provider(std::sync::Arc::new(
-                        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-                    ))
-                    .build(),
-            )
-            .http_status_as_error(false)
-            .build()
-            .into();
-        Ok(Self { agent, base })
+        let (agent, dl) = (agent(20), agent(600));
+        Ok(Self { agent, dl, base })
     }
 
     /// `(json, has_next_page)`.
@@ -107,6 +118,97 @@ impl GitHub {
     }
 
     /// Validates the token; returns the account login.
+    /// GET with at most `max` body bytes. The token goes only to the API host itself; redirects
+    /// (assets live on a CDN host) are followed by hand and never carry it. Errors never contain
+    /// the URL (signed asset links carry credentials in the query).
+    fn fetch(
+        &self,
+        url: &str,
+        token: Option<&GitToken>,
+        accept: &str,
+        max: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        let mut url = url.to_owned();
+        let mut send_token = token.filter(|_| origin(&url) == origin(&self.base));
+        for _ in 0..=5 {
+            // Same rule as the API base: https, or http for loopback (tests).
+            validate_api(origin(&url))?;
+            let mut req = self
+                .dl
+                .get(&url)
+                .header("Accept", accept)
+                .header(
+                    "User-Agent",
+                    concat!("ulak-remote/", env!("CARGO_PKG_VERSION")),
+                )
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            if let Some(t) = send_token {
+                req = req.header("Authorization", format!("Bearer {}", t.expose()));
+            }
+            let mut resp = req
+                .call()
+                .map_err(|_| gh("cannot reach GitHub (network error or timeout)"))?;
+            let status = resp.status().as_u16();
+            if (300..400).contains(&status) {
+                let loc = resp
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| gh("redirect without Location"))?;
+                url = if loc.contains("://") {
+                    loc.to_owned()
+                } else {
+                    format!("{}{loc}", origin(&url))
+                };
+                send_token = None;
+                continue;
+            }
+            if status != 200 {
+                return Err(gh(match status {
+                    401 | 403 | 404 => "HTTP 404 from GitHub: release not found, or a token is required (set ULAK_RELEASE_CREDENTIAL or ULAK_GH_TOKEN)".to_owned(),
+                    429 => "rate limit exceeded; try again later".to_owned(),
+                    n => format!("unexpected HTTP status {n}"),
+                }));
+            }
+            return resp
+                .body_mut()
+                .with_config()
+                .limit(max)
+                .read_to_vec()
+                .map_err(|e| match e {
+                    ureq::Error::BodyExceedsLimit(_) => {
+                        gh(format!("download larger than {max} bytes"))
+                    }
+                    _ => gh("download failed"),
+                });
+        }
+        Err(gh("too many redirects"))
+    }
+
+    /// JSON of `releases/latest` of `repo` (`owner/name`).
+    pub fn latest_release(
+        &self,
+        repo: &str,
+        token: Option<&GitToken>,
+    ) -> Result<String, ServerError> {
+        let url = format!("{}/repos/{repo}/releases/latest", self.base);
+        let b = self.fetch(&url, token, "application/vnd.github+json", MAX_BODY)?;
+        String::from_utf8(b).map_err(|_| gh("unreadable response"))
+    }
+
+    /// One release asset by its API URL (must be on the API host).
+    pub fn asset(
+        &self,
+        url: &str,
+        token: Option<&GitToken>,
+        max: u64,
+    ) -> Result<Vec<u8>, ServerError> {
+        if origin(url) != origin(&self.base) {
+            return Err(gh("asset URL is not on the API host"));
+        }
+        self.fetch(url, token, "application/octet-stream", max)
+    }
+
     pub fn login(&self, token: &GitToken) -> Result<String, ServerError> {
         let (j, _) = self.get("/user", token)?;
         j["login"]

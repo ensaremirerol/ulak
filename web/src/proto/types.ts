@@ -203,6 +203,7 @@ export type HubToUi =
   | { type: 'devices'; devices: DeviceInfo[] }
   | { type: 'mailbox_log'; messages: Message[] }
   | ({ type: 'hub_version' } & VersionInfo)
+  | { type: 'release_cache'; latest: string | null; checked_ms: number; error: string | null }
   | { type: 'node_version'; node: NodeId; info: VersionInfo }
   | { type: 'update_status'; node: NodeId; status: UpdateState }
   | { type: 'agent_statuses'; statuses: [AgentId, NodeId, AgentStatus][] }

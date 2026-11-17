@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use ulak_proto::*;
 
 const UI_VARIANTS: usize = 20;
-const HUB_VARIANTS: usize = 25;
+const HUB_VARIANTS: usize = 26;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -144,6 +144,7 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::Devices { .. } => "devices",
         HubToUi::MailboxLog { .. } => "mailbox_log",
         HubToUi::HubVersion(_) => "hub_version",
+        HubToUi::ReleaseCache { .. } => "release_cache",
         HubToUi::NodeVersion { .. } => "node_version",
         HubToUi::UpdateStatus { .. } => "update_status",
         HubToUi::AgentStatuses { .. } => "agent_statuses",
@@ -409,6 +410,14 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
             },
         ),
         ("hub_version", HubToUi::HubVersion(version())),
+        (
+            "release_cache",
+            HubToUi::ReleaseCache {
+                latest: Some("0.1.4".into()),
+                checked_ms: 1_700_000_007_000,
+                error: Some("release fetch failed: HTTP 404".into()),
+            },
+        ),
         (
             "node_version",
             HubToUi::NodeVersion {

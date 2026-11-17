@@ -203,6 +203,14 @@ pub enum HubToUi {
     },
     /// Sent right after Blockers on connect.
     HubVersion(VersionInfo),
+    /// The hub's release cache (what nodes update from), after `HubVersion` on connect and on
+    /// every change. `latest` is the newest verified version, `checked_ms` the last fetch attempt
+    /// (0 = never), `error` the last failure text (never a token).
+    ReleaseCache {
+        latest: Option<String>,
+        checked_ms: u64,
+        error: Option<String>,
+    },
     NodeVersion {
         node: NodeId,
         info: VersionInfo,

@@ -210,6 +210,7 @@ const hubDecoders = {
   devices: (o) => ({ type: 'devices', devices: arr(o.devices, 'devices', deviceInfo) }),
   mailbox_log: (o) => ({ type: 'mailbox_log', messages: arr(o.messages, 'messages', message) }),
   hub_version: (o) => ({ type: 'hub_version', ...versionInfo(o) }),
+  release_cache: (o) => ({ type: 'release_cache', latest: optStr(o.latest, 'latest'), checked_ms: num(o.checked_ms, 'checked_ms'), error: optStr(o.error, 'error') }),
   node_version: (o) => ({ type: 'node_version', node: s(o.node, 'node'), info: versionInfo(o.info) }),
   update_status: (o) => ({ type: 'update_status', node: s(o.node, 'node'), status: updateState(o.status) }),
   agent_statuses: (o) => ({

@@ -151,7 +151,7 @@ impl Http {
 }
 
 /// Error texts can echo URLs (signed asset links carry credentials in the query).
-fn redact(s: &str) -> String {
+pub(crate) fn redact(s: &str) -> String {
     s.split_whitespace()
         .map(|w| w.split('?').next().unwrap_or(w))
         .collect::<Vec<_>>()

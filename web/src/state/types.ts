@@ -39,6 +39,7 @@ export interface State {
   nextToastId: number;
   now: number;
   hubVersion: VersionInfo | null;
+  releaseCache: { latest: string | null; checkedMs: number; error: string | null } | null;
   nodeVersions: Record<NodeId, VersionInfo>;
   updates: Record<NodeId, UpdateState>;
   credentials: CredentialInfo[];

@@ -39,6 +39,8 @@ pub enum AdminRequest {
     Fingerprint,
     Credentials,
     CredentialDelete { id: String },
+    Releases,
+    ReleasesRefresh,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -59,6 +61,11 @@ pub enum AdminResponse {
         credentials: Vec<CredentialInfo>,
     },
     Done,
+    Releases {
+        versions: Vec<String>,
+        checked_at: u64,
+        error: Option<String>,
+    },
     Fingerprint {
         fingerprint: String,
         ca_pem: String,
@@ -98,7 +105,7 @@ fn now_ms() -> u64 {
     crate::server::now_ms()
 }
 
-fn handle(hub: &Hub, listen: &[String], line: &[u8]) -> AdminResponse {
+async fn handle(hub: &Arc<Hub>, listen: &[String], line: &[u8]) -> AdminResponse {
     let req: Envelope<AdminRequest> = match serde_json::from_slice(line) {
         Ok(r) => r,
         Err(e) => return err(format!("bad request: {e}")),
@@ -108,6 +115,18 @@ fn handle(hub: &Hub, listen: &[String], line: &[u8]) -> AdminResponse {
     }
     let id = |s: &str| NodeId::new(s.trim()).map_err(|e| err(format!("bad id: {e}")));
     match req.body {
+        r @ (AdminRequest::Releases | AdminRequest::ReleasesRefresh) => {
+            let rep = if r == AdminRequest::Releases {
+                hub.release_report()
+            } else {
+                hub.refresh_releases(true).await
+            };
+            AdminResponse::Releases {
+                versions: rep.versions,
+                checked_at: rep.checked_at,
+                error: rep.error,
+            }
+        }
         AdminRequest::Otp { kind } => {
             let now = now_ms();
             let o = hub.enroller().begin(kind, now);
@@ -184,7 +203,7 @@ async fn serve_conn(hub: Arc<Hub>, listen: Arc<Vec<String>>, mut s: tokio::net::
         Err(_) => err("read timeout"),
         Ok(Err(e)) => err(e),
         Ok(Ok(_)) if line.len() > MAX_LINE => err("request too long"),
-        Ok(Ok(_)) => handle(&hub, &listen, &line),
+        Ok(Ok(_)) => handle(&hub, &listen, &line).await,
     };
     let mut out = serde_json::to_vec(&Envelope {
         v: VERSION,
@@ -262,6 +281,12 @@ impl Hub {
 
 /// Client side (blocking): one request, one reply.
 pub fn call(path: &Path, req: AdminRequest) -> Result<AdminResponse, String> {
+    // A forced release refresh talks to GitHub: allow it more time.
+    let read_s = if req == AdminRequest::ReleasesRefresh {
+        150
+    } else {
+        10
+    };
     let mut s = UnixStream::connect(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
             "the hub is not running (no admin socket at {}). Is ULAK_DIR right? Use --dir.",
@@ -274,7 +299,7 @@ pub fn call(path: &Path, req: AdminRequest) -> Result<AdminResponse, String> {
         _ => format!("cannot connect to {}: {e}", path.display()),
     })?;
     for r in [
-        s.set_read_timeout(Some(Duration::from_secs(10))),
+        s.set_read_timeout(Some(Duration::from_secs(read_s))),
         s.set_write_timeout(Some(Duration::from_secs(10))),
     ] {
         r.map_err(|e| e.to_string())?;
@@ -362,6 +387,16 @@ pub fn render(r: &AdminResponse, join_host: Option<&str>) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         AdminResponse::Done => "done".into(),
+        AdminResponse::Releases {
+            versions,
+            checked_at,
+            error,
+        } => format!(
+            "cached: {}\nlast check: {}\nlast error: {}",
+            if versions.is_empty() { "none".into() } else { versions.join(", ") },
+            if *checked_at == 0 { "never".into() } else { ts(*checked_at) },
+            error.as_deref().unwrap_or("none")
+        ),
         AdminResponse::Fingerprint { fingerprint, .. } => fingerprint.clone(),
         AdminResponse::Status {
             version,
@@ -394,7 +429,7 @@ pub fn cli(
             rest.push(a.as_str());
         }
     }
-    let usage = "usage: ulak-remote admin [--dir D] otp device|browser (ui, node: same as device) | devices | revoke <id> | passkeys | revoke-passkey <id> | credentials | credential-delete <id> | status | fingerprint | ca [--pem]";
+    let usage = "usage: ulak-remote admin [--dir D] otp device|browser (ui, node: same as device) | devices | revoke <id> | passkeys | revoke-passkey <id> | credentials | credential-delete <id> | releases | releases-refresh | status | fingerprint | ca [--pem]";
     let req = match rest.as_slice() {
         ["otp", k] => AdminRequest::Otp {
             kind: match *k {
@@ -410,6 +445,8 @@ pub fn cli(
         ["revoke-passkey", id] => AdminRequest::RevokePasskey { id: (*id).into() },
         ["credentials"] => AdminRequest::Credentials,
         ["credential-delete", id] => AdminRequest::CredentialDelete { id: (*id).into() },
+        ["releases"] => AdminRequest::Releases,
+        ["releases-refresh"] => AdminRequest::ReleasesRefresh,
         ["status"] => AdminRequest::Status,
         ["fingerprint"] => AdminRequest::Fingerprint,
         ["ca"] | ["ca", "--pem"] => {

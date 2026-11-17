@@ -122,6 +122,9 @@ pub enum UpdateError {
     Config(String),
     #[error("update server: {0}")]
     Http(String),
+    /// Hub update source: the text is already the user-facing message.
+    #[error("{0}")]
+    Hub(String),
     #[error("bad release data: {0}")]
     Release(String),
     #[error("the release has no asset named {0}")]

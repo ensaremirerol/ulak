@@ -105,7 +105,14 @@ Any enrolled (non-revoked) device may act as a node (`/ws/daemon`) or as a UI (`
 
 ## Admin (stdin)
 Prefer the admin socket (`ulak-remote admin ...`, see First-time setup); stdin is only useful with an attached terminal.
-`otp device|browser`, `revoke <device-id>` (closes its sockets; a revoked node leaves the registry and UIs see it Offline).
+`otp device|browser`, `revoke <device-id>` (closes its sockets; a revoked node leaves the registry and UIs see it Offline). Socket-only: `releases`, `releases-refresh` (see Hub release cache).
+
+## Hub release cache (node updates)
+The hub is the only party that talks to GitHub for updates: set **one** token on the hub; nodes need none. The hub fetches the latest release of `ULAK_RELEASE_REPO` every `ULAK_RELEASE_INTERVAL_HOURS` (and when a UI sends `CheckUpdate`, at most once per 60 s), verifies every `ulakd-*.tar.gz` against its `.sig`, `SHA256SUMS` and `SHA256SUMS.sig` with the embedded release key, and only then stores it in `$ULAK_DIR/releases/<version>/` (the newest 2 are kept; the cache is re-verified at start). Nodes download from the hub over mTLS and verify the signatures again with their own embedded key: **the hub is untrusted for integrity**, so a compromised hub cannot push a binary.
+- Env: `ULAK_RELEASE_REPO` (default `ensaremirerol/ulak`), `ULAK_RELEASE_INTERVAL_HOURS` (default 6), `ULAK_RELEASE_CREDENTIAL` (id of a stored credential, preferred), or `ULAK_RELEASE_TOKEN_FILE` / `ULAK_GH_TOKEN` (kept in memory, never logged or stored). With no token the hub tries unauthenticated (public repos, low rate limit) and says so at startup. A build without a release key does not cache.
+- Admin: `ulak-remote admin releases` (cached versions, last check, last error) and `admin releases-refresh` (fetch now).
+- Endpoints (client certificate of an active device only; browser sessions, agent tokens, revoked and anonymous callers are refused; 30 requests per minute per device): `GET /api/releases/latest` (version, assets with size and sha256), `GET /api/releases/{version}/{asset}` (only names in the verified listing). The Nodes screen shows the cache line (latest, checked time, last error).
+- 0.1.3 daemons only know GitHub: 0.1.4 needs a one-time manual install on each node; after that nodes update through the hub.
 
 ## Endpoints
 - mTLS (8443 only): `/ws/daemon`, `/ws/ui` (also session cookie/token), `POST /renew` (`{"public_key": PEM}`, only in the last 30 days of the cert; 409 `{"earliest_renewal_ms"}` before; 403 revoked).

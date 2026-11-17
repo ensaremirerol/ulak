@@ -42,6 +42,7 @@ function Row({ n }: { n: NodeInfo }) {
 export function Nodes() {
   const s = store.state.value;
   const hub = s.hubVersion;
+  const rc = s.releaseCache;
   return (
     <>
       <header class="page-head">
@@ -52,6 +53,13 @@ export function Nodes() {
         </div>
       </header>
       <p class="muted small">{hub ? `Hub ${hub.version} (${hub.git.slice(0, 7)}), protocol ${hub.proto}, ${hub.os} ${hub.arch}` : 'Hub version unknown'}</p>
+      {rc && (
+        <p class="muted small">
+          {rc.latest ? `Hub release cache: ${rc.latest}` : 'Hub release cache: empty'}
+          {rc.checkedMs > 0 && `, checked ${new Date(rc.checkedMs).toLocaleString()}`}
+          {rc.error && <span class="err">{` (last error: ${rc.error})`}</span>}
+        </p>
+      )}
       {s.blockers.length > 0 && <section class="stack" aria-label="Needs attention">{s.blockers.map((b) => <BlockerCard key={b.id} b={b} />)}</section>}
       {s.nodes.length === 0 ? <EmptyState title="No nodes yet">Enrol one from the Devices page.</EmptyState> : (
         <section class="table-wrap" aria-label="Nodes">

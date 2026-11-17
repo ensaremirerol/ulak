@@ -1,4 +1,4 @@
-use super::{mcp, web, ws};
+use super::{mcp, releases, web, ws};
 use crate::github::GitHub;
 use crate::*;
 use axum::{
@@ -83,6 +83,18 @@ pub struct HubConfig {
     pub github_api: String,
     /// How often the spawn queue is retried when nothing kicks it.
     pub queue_tick: Duration,
+    /// Where verified release archives for nodes are cached; `None` = no release cache.
+    pub release_dir: Option<PathBuf>,
+    /// `owner/name` whose latest release is cached (uses `github_api`).
+    pub release_repo: String,
+    /// Public half of the release signing key; archives that do not verify are never stored.
+    pub release_key: Option<ed25519_dalek::VerifyingKey>,
+    /// Token for the release fetch from env/file (memory only). A stored credential wins.
+    pub release_token: Option<GitToken>,
+    /// Stored credential used for the release fetch.
+    pub release_credential: Option<CredentialId>,
+    /// How often the cache is refreshed on its own.
+    pub release_interval: Duration,
 }
 
 impl Default for HubConfig {
@@ -108,6 +120,12 @@ impl Default for HubConfig {
             secrets_key_path: None,
             github_api: "https://api.github.com".into(),
             queue_tick: Duration::from_secs(10),
+            release_dir: None,
+            release_repo: "ensaremirerol/ulak".into(),
+            release_key: None,
+            release_token: None,
+            release_credential: None,
+            release_interval: Duration::from_secs(6 * 3600),
         }
     }
 }
@@ -143,6 +161,11 @@ pub struct Hub {
     pub(crate) failures: Mutex<HashMap<AgentId, String>>,
     /// Wakes the queue scheduler: a node may now be able to take a queued spawn.
     pub(crate) queue_kick: tokio::sync::Notify,
+    /// Verified release versions served to nodes.
+    pub(crate) releases: Mutex<super::releases::CacheState>,
+    /// Held while a release fetch runs.
+    pub(crate) release_busy: tokio::sync::Mutex<()>,
+    pub(crate) release_hits: Mutex<HashMap<NodeId, Vec<u64>>>,
     // ponytail: in-memory per-IP window; resets on restart.
     enroll_hits: Mutex<HashMap<IpAddr, Vec<u64>>>,
 }
@@ -204,7 +227,7 @@ impl Hub {
             .with_client_cert_verifier(verifier)
             .with_single_cert(chain, key)?;
         tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-        Ok(Arc::new(Self {
+        let this = Arc::new(Self {
             enroller: Enroller::new(ca, store.clone()).with_cert_days(cfg.cert_days),
             store,
             registry: Registry::default(),
@@ -232,9 +255,14 @@ impl Hub {
             statuses: Mutex::default(),
             failures: Mutex::default(),
             queue_kick: tokio::sync::Notify::new(),
+            releases: Mutex::default(),
+            release_busy: tokio::sync::Mutex::new(()),
+            release_hits: Mutex::default(),
             enroll_hits: Mutex::default(),
             cfg,
-        }))
+        });
+        this.init_releases();
+        Ok(this)
     }
 
     pub fn enroller(&self) -> &Enroller {
@@ -441,6 +469,8 @@ impl Hub {
             .route("/auth/login/finish", post(web::login_finish))
             .route("/auth/logout", post(web::logout))
             .route("/api/version", get(web::version))
+            .route("/api/releases/latest", get(releases::latest))
+            .route("/api/releases/{version}/{asset}", get(releases::asset))
             .route("/api/devices", get(web::devices))
             .route("/api/devices/otp", post(web::device_otp))
             .route("/api/devices/{id}/revoke", post(web::device_revoke))
@@ -549,9 +579,17 @@ impl Hub {
                 h.queue_once(now_ms());
             }
         });
+        let h = self.clone();
+        let release_loop = tokio::spawn(async move {
+            let mut t = tokio::time::interval(h.cfg.release_interval);
+            loop {
+                t.tick().await;
+                h.refresh_releases(true).await;
+            }
+        });
         Ok(Running {
             addr,
-            tasks: vec![accept, nudges, expiry, scheduler],
+            tasks: vec![accept, nudges, expiry, scheduler, release_loop],
         })
     }
 

@@ -94,6 +94,15 @@ describe('Nodes', () => {
     unmount();
   });
 
+  it('shows the hub release cache line with the last error', () => {
+    render(<Nodes />);
+    expect(screen.queryByText(/Hub release cache/)).toBeNull();
+    feed({ type: 'release_cache', latest: '0.1.4', checked_ms: 1700000007000, error: 'HTTP 404' });
+    render(<Nodes />);
+    expect(screen.getAllByText(/Hub release cache: 0\.1\.4, checked/).length).toBeGreaterThan(0);
+    expect(screen.getByText('(last error: HTTP 404)')).toBeTruthy();
+  });
+
   it('going offline clears update and version info', () => {
     feed({ type: 'node_version', node: 'n1', info: ver('1.0.0') });
     status('n1', { state: 'available', version: '2.0.0' });

@@ -4,9 +4,19 @@ use crate::errors::UpdateError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Hub,
+    Github,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpdateConfig {
+    /// Where releases come from. Unset = `hub` for an enrolled daemon, else `github`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
     /// `owner/name` of the GitHub repo that publishes releases.
     pub repo: String,
     pub api_base: String,
@@ -23,6 +33,7 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
+            source: None,
             repo: "ensaremirerol/ulak".into(),
             api_base: "https://api.github.com".into(),
             token_file: None,
@@ -89,6 +100,20 @@ impl UpdateConfig {
             return bad("api_base must be an https:// URL");
         }
         Ok(())
+    }
+
+    /// The configured source, else hub when `dir` holds a hub identity, else github.
+    pub fn source(&self, dir: &Path) -> Source {
+        self.source.unwrap_or_else(|| {
+            let enrolled = ["hub_url", "ca.pem", "cert.pem", "key.pem"]
+                .iter()
+                .all(|f| dir.join(f).is_file());
+            if enrolled {
+                Source::Hub
+            } else {
+                Source::Github
+            }
+        })
     }
 
     /// `ULAKD_AUTO_UPDATE` > file > (not in a container).
@@ -204,5 +229,34 @@ mod tests {
         assert_eq!(UpdateConfig::default().token(&no_env).unwrap(), None);
         let bad = |k: &str| (k == "ULAKD_GH_TOKEN").then(|| "a b".to_owned());
         assert!(c.token(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn source_defaults_by_identity_and_parses_lowercase() {
+        let d = tempfile::tempdir().unwrap();
+        let c = UpdateConfig::default();
+        assert_eq!(c.source(d.path()), Source::Github);
+        for f in ["hub_url", "ca.pem", "cert.pem"] {
+            std::fs::write(d.path().join(f), "x").unwrap();
+        }
+        assert_eq!(c.source(d.path()), Source::Github); // incomplete identity
+        std::fs::write(d.path().join("key.pem"), "x").unwrap();
+        assert_eq!(c.source(d.path()), Source::Hub);
+        let g: UpdateConfig = serde_json::from_str(r#"{"source":"github"}"#).unwrap();
+        assert_eq!(g.source(d.path()), Source::Github);
+        let h: UpdateConfig = serde_json::from_str(r#"{"source":"hub"}"#).unwrap();
+        assert_eq!(h.source, Some(Source::Hub));
+        assert!(serde_json::from_str::<UpdateConfig>(r#"{"source":"x"}"#).is_err());
+        // first-run file does not pin a source
+        let fresh = UpdateConfig::load_or_init(&d.path().join("n"), false).unwrap();
+        assert!(!std::fs::read_to_string(d.path().join("n/update.json"))
+            .unwrap()
+            .contains("source"));
+        assert_eq!(fresh.source, None);
     }
 }
