@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'preact/hooks';
-import type { CleanItem, NodeInfo, NodeSettings, RepoEntry, Telemetry } from '../proto';
-import { agentStatusLabel, agentTone, availableVersion, settingsErrors, settingsToForm, store, useHubAck, type SettingsForm, type Tri } from '../state';
+import type { CleanItem, NodeInfo, NodeSettings, ProfileInfo, RepoEntry, Telemetry } from '../proto';
+import { agentStatusLabel, agentTone, availableVersion, installKey, settingsErrors, settingsToForm, store, useHubAck, type SettingsForm, type Tri } from '../state';
 import { Button, Card, EmptyState, Pill, ProgressBar, TextField } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { ageLabel, clock, day, nodeStateLabel, nodeStateTone } from '../ui/format';
@@ -116,6 +116,29 @@ function NodeRepos({ n }: { n: NodeInfo }) {
         </div>
       )}
     </section>
+  );
+}
+
+/** One reported profile: install state, the last install's outcome, Install / Reinstall. */
+function ReportedProfile({ node, p, off }: { node: string; p: ProfileInfo; off: boolean }) {
+  const run = store.state.value.installs[installKey(node, p.name)];
+  const running = run?.running === true;
+  const send = () => store.intent({ kind: 'install_profile', node, name: p.name });
+  return (
+    <li>
+      <span class="strong">{p.name}</span>
+      <span class="muted mono">{p.config_dir ?? 'default config'}</span>
+      {/* A successful install's pill already says Installed. */}
+      {run?.ok !== true && <Pill tone={p.installed ? 'ok' : 'muted'}>{p.installed ? 'Installed' : 'Not installed'}</Pill>}
+      {p.login_blocked && <Pill tone="warn">Login required</Pill>}
+      {p.from_hub && <Pill tone="info">from hub</Pill>}
+      {p.installable && (p.installed
+        ? <ConfirmButton variant="default" label="Reinstall" confirmLabel="Click again to reinstall" disabled={off || running} onConfirm={send} />
+        : <Button size="sm" disabled={off || running} onClick={send}>Install</Button>)}
+      {running && <span class="muted" role="status">Installing…</span>}
+      {run && !running && <Pill tone={run.ok ? 'ok' : 'bad'}>{run.ok ? 'Installed' : 'Install failed'}</Pill>}
+      {run && !running && run.detail && <span class="mono small pre-wrap full">{run.detail}</span>}
+    </li>
   );
 }
 
@@ -242,15 +265,7 @@ export function NodeDetail({ id }: { id: string }) {
       <Card title="Profiles">
         {reported.length === 0 ? <p class="muted small">The node has not reported any profiles.</p> : (
           <ul class="repo-list small" aria-label={`Profiles on ${n.hostname}`}>
-            {reported.map((p) => (
-              <li key={p.name}>
-                <span class="strong">{p.name}</span>
-                <span class="muted mono">{p.config_dir ?? 'default config'}</span>
-                <Pill tone={p.installed ? 'ok' : 'muted'}>{p.installed ? 'Installed' : 'Not installed'}</Pill>
-                {p.login_blocked && <Pill tone="warn">Login required</Pill>}
-                {p.from_hub && <Pill tone="info">from hub</Pill>}
-              </li>
-            ))}
+            {reported.map((p) => <ReportedProfile key={p.name} node={id} p={p} off={off} />)}
           </ul>
         )}
         <strong class="small">Hub profiles for this node only</strong>

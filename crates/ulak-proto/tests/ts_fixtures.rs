@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 26;
-const HUB_VARIANTS: usize = 31;
+const UI_VARIANTS: usize = 27;
+const HUB_VARIANTS: usize = 32;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -132,6 +132,7 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::DeleteProfile { .. } => "delete_profile",
         UiToHub::SaveNodeSettings { .. } => "save_node_settings",
         UiToHub::NodeStats { .. } => "node_stats",
+        UiToHub::InstallProfile { .. } => "install_profile",
     }
 }
 
@@ -167,6 +168,7 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::CleanReport { .. } => "clean_report",
         HubToUi::HubConfig { .. } => "hub_config",
         HubToUi::NodeStats { .. } => "node_stats",
+        HubToUi::InstallStatus { .. } => "install_status",
         HubToUi::Error { .. } => "error",
     }
 }
@@ -178,6 +180,7 @@ fn hub_profile() -> HubProfile {
         args: vec!["--model".into(), "opus".into()],
         config_dir: Some("~/.claude-work".into()),
         env: BTreeMap::from([("HTTPS_PROXY".to_owned(), "http://proxy:3128".to_owned())]),
+        install: Some("curl -fsSL https://example.org/install.sh | bash".into()),
     }
 }
 
@@ -320,6 +323,7 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
                     args: vec![],
                     config_dir: Some("~/.claude-personal".into()),
                     env: BTreeMap::new(),
+                    install: None,
                 },
             },
         ),
@@ -338,6 +342,20 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
             },
         ),
         ("node_stats", UiToHub::NodeStats { node: node() }),
+        (
+            "install_profile_node",
+            UiToHub::InstallProfile {
+                node: Some(node()),
+                name: "claude-work".into(),
+            },
+        ),
+        (
+            "install_profile_all",
+            UiToHub::InstallProfile {
+                node: None,
+                name: "claude-work".into(),
+            },
+        ),
         (
             "clean_node_dry",
             UiToHub::CleanNode {
@@ -625,6 +643,7 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                         installed: true,
                         login_blocked: false,
                         from_hub: true,
+                        installable: true,
                     },
                     ProfileInfo {
                         name: "antigravity".into(),
@@ -633,6 +652,7 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                         installed: false,
                         login_blocked: true,
                         from_hub: false,
+                        installable: false,
                     },
                 ],
             },
@@ -687,6 +707,7 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                             args: vec![],
                             config_dir: Some("~/.claude-personal".into()),
                             env: BTreeMap::new(),
+                            install: None,
                         },
                     },
                 ],
@@ -705,6 +726,26 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                     Telemetry::new(0.5, 12.5, Some(3.0), 40.0, 1_700_000_005_000).unwrap(),
                     Telemetry::new(0.7, 20.0, None, 41.5, 1_700_000_010_000).unwrap(),
                 ],
+            },
+        ),
+        (
+            "install_status_started",
+            HubToUi::InstallStatus {
+                node: node(),
+                name: "claude-work".into(),
+                done: false,
+                ok: false,
+                detail: String::new(),
+            },
+        ),
+        (
+            "install_status_failed",
+            HubToUi::InstallStatus {
+                node: node(),
+                name: "claude-work".into(),
+                done: true,
+                ok: false,
+                detail: "installing claude failed (exit status: 1): npm ERR! EACCES".into(),
             },
         ),
         (

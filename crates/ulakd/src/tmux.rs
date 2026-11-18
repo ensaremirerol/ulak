@@ -519,6 +519,24 @@ impl Tmux {
         Ok(Some((path, claim)))
     }
 
+    /// Runs a profile's install command now (a reinstall if it is installed already).
+    pub async fn install_profile(&self, name: &str) -> Result<(), String> {
+        let agents = Arc::clone(&self.live.read().expect("live config lock").agents);
+        if !agents.names().any(|n| n == name) {
+            return Err(format!("no profile named {name} on this node"));
+        }
+        let r = agents.recipe(name);
+        let binary = r.binary.as_deref().map_or_else(
+            || name.to_owned(),
+            |b| {
+                repos::expand_tilde(Path::new(b))
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        );
+        self.installer.ensure(&binary, &r).await
+    }
+
     /// The node's named profiles (`agents.json` plus defaults plus the hub's).
     pub async fn profiles(&self) -> Vec<ProfileInfo> {
         let (agents, hub) = {
@@ -544,6 +562,7 @@ impl Tmux {
             let config_dir = r.config_dir.as_deref().map(tilde);
             let login_blocked = blocked.contains(name);
             let from_hub = hub.contains(name);
+            let installable = r.install.as_ref().is_some_and(|a| !a.is_empty());
             let name = name.to_owned();
             async move {
                 ProfileInfo {
@@ -553,6 +572,7 @@ impl Tmux {
                     config_dir,
                     login_blocked,
                     from_hub,
+                    installable,
                 }
             }
         });
@@ -1051,6 +1071,9 @@ impl AgentHost for Tmux {
     }
     async fn profiles(&self) -> Option<Vec<ProfileInfo>> {
         Some(Tmux::profiles(self).await)
+    }
+    async fn install(&self, name: String) -> Result<(), String> {
+        self.install_profile(&name).await
     }
     async fn repo_index(&self) -> Option<Vec<RepoEntry>> {
         Tmux::repo_index(self).await

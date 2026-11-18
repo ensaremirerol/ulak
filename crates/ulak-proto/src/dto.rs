@@ -593,11 +593,15 @@ pub struct ProfileInfo {
     /// The profile comes from the hub (`HubToDaemon::Config`), not the node's `agents.json`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub from_hub: bool,
+    /// The node has an install command for it (local recipe or hub `install`): `InstallProfile` works.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub installable: bool,
 }
 
-/// A profile defined on the hub. Never carries install or check commands: those stay in the
-/// node's local `agents.json`. A hub profile whose name matches a local entry keeps that entry's
-/// install/check/login/MCP fields and overrides `binary`, `args`, `config_dir` and `env`.
+/// A profile defined on the hub. A hub profile whose name matches a local `agents.json` entry
+/// keeps that entry's check/login/MCP fields (and its install recipe unless `install` is set) and
+/// overrides `binary`, `args`, `config_dir` and `env`. The hub may supply an install script: the
+/// hub can already start any program on a node (custom spawns), so this grants nothing new.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubProfile {
     /// `[A-Za-z0-9._-]{1,64}`; what a spawn uses as `profile.binary`.
@@ -613,6 +617,11 @@ pub struct HubProfile {
     /// Extra environment (at most 32; keys `[A-Za-z_][A-Za-z0-9_]*`, never `ULAK*`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Install script, run on the node as `sh -c <script>` (1-4096 chars, no NUL; newlines
+    /// allowed) when a spawn finds the binary missing, or on `InstallProfile`. E.g.
+    /// `curl -fsSL https://example.org/install.sh | bash`. Runs as the ulakd user, 600 s timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<String>,
 }
 
 /// A hub profile and where it applies: `node: None` = every node; a node-scoped profile beats a

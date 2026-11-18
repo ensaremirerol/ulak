@@ -487,3 +487,33 @@ describe('profile and settings intents', () => {
     expect(() => intentToFrames(fresh(), { kind: 'save_node_settings', node: 'n1', form: { ...settingsToForm(), cpuBusyPct: '0' } })).toThrow(IntentError);
   });
 });
+
+describe('profile installs', () => {
+  const st = (done: boolean, ok: boolean, detail = ''): HubToUi => ({ type: 'install_status', node: 'n1', name: 'cw', done, ok, detail });
+  const key = 'n1\0cw';
+
+  it('install_status: started runs, failed keeps the detail, success is ok', () => {
+    let s = apply(fresh(), st(false, false));
+    expect(s.installs[key]).toEqual({ running: true, detail: '', at: 0 });
+    s = apply(s, st(true, false, 'exit status: 1: EACCES'));
+    expect(s.installs[key]).toEqual({ running: false, ok: false, detail: 'exit status: 1: EACCES', at: 0 });
+    s = apply(s, st(false, false), st(true, true, 'added 1 package'));
+    expect(s.installs[key]).toEqual({ running: false, ok: true, detail: 'added 1 package', at: 0 });
+  });
+
+  it('install_profile frames: one node or all', () => {
+    expect(intentToFrames(fresh(), { kind: 'install_profile', node: 'n1', name: 'cw' })).toEqual([{ type: 'install_profile', node: 'n1', name: 'cw' }]);
+    expect(intentToFrames(fresh(), { kind: 'install_profile', node: null, name: 'cw' })).toEqual([{ type: 'install_profile', node: null, name: 'cw' }]);
+  });
+
+  it('install script: optional, at most 4096 chars, no NUL; empty is left out', () => {
+    const f = (install: string): ProfileForm => ({ ...emptyProfileForm(), name: 'cw', binary: 'claude', install });
+    expect(profileErrors(f('x'.repeat(4096)))).toEqual({});
+    expect(profileErrors(f('x'.repeat(4097))).install).toMatch(/4096/);
+    expect(profileErrors(f('a\0b')).install).toMatch(/NUL/);
+    expect(() => intentToFrames(fresh(), { kind: 'save_profile', node: null, form: f('a\0b') })).toThrow(IntentError);
+    const save = (install: string) => intentToFrames(fresh(), { kind: 'save_profile', node: null, form: f(install) });
+    expect(save(' \n ')).toEqual([{ type: 'save_profile', node: null, profile: { name: 'cw', binary: 'claude' } }]);
+    expect(save('npm i -g x\nx --version\n')).toEqual([{ type: 'save_profile', node: null, profile: { name: 'cw', binary: 'claude', install: 'npm i -g x\nx --version' } }]);
+  });
+});

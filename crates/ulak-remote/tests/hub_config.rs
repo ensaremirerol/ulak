@@ -230,6 +230,7 @@ fn hp(name: &str, binary: &str) -> HubProfile {
         args: vec![],
         config_dir: None,
         env: BTreeMap::new(),
+        install: None,
     }
 }
 
@@ -600,6 +601,7 @@ async fn hub_profiles_reported_back_by_a_node_steer_placement() {
         installed: true,
         login_blocked: false,
         from_hub,
+        installable: false,
     };
     send(
         &mut da,
@@ -648,4 +650,149 @@ async fn hub_profiles_reported_back_by_a_node_steer_placement() {
     }
     let got: Vec<HubToDaemon> = drain(&mut db, 200).await;
     assert!(!got.iter().any(|m| matches!(m, HubToDaemon::Spawn(_))));
+}
+
+async fn install_req(d: &mut Ws) -> String {
+    loop {
+        if let HubToDaemon::InstallProfile { name } = recv(d).await {
+            return name;
+        }
+    }
+}
+
+#[tokio::test]
+async fn install_requests_reach_installable_nodes_and_status_is_relayed() {
+    let fx = start().await;
+    let (mut u, _) = ui(&fx).await;
+    let (a, mut da, _) = daemon_v(&fx, "a").await;
+    let (_b, mut db, _) = daemon_v(&fx, "b").await;
+    let prof = |installable: bool| ProfileInfo {
+        name: "cw".into(),
+        binary: "claude".into(),
+        config_dir: None,
+        installed: false,
+        login_blocked: false,
+        from_hub: true,
+        installable,
+    };
+    send(
+        &mut da,
+        &DaemonToHub::Profiles {
+            profiles: vec![prof(true)],
+        },
+    )
+    .await;
+    send(
+        &mut db,
+        &DaemonToHub::Profiles {
+            profiles: vec![prof(false)],
+        },
+    )
+    .await;
+    let mut reports = 0;
+    while reports < 2 {
+        if let HubToUi::NodeProfiles { .. } = recv(&mut u).await {
+            reports += 1;
+        }
+    }
+    // all nodes: only the one that can install gets it
+    send(
+        &mut u,
+        &UiToHub::InstallProfile {
+            node: None,
+            name: "cw".into(),
+        },
+    )
+    .await;
+    assert_eq!(install_req(&mut da).await, "cw");
+    let to_b: Vec<HubToDaemon> = drain(&mut db, 200).await;
+    assert!(
+        !to_b
+            .iter()
+            .any(|m| matches!(m, HubToDaemon::InstallProfile { .. })),
+        "{to_b:?}"
+    );
+    // explicit node
+    send(
+        &mut u,
+        &UiToHub::InstallProfile {
+            node: Some(a.id.clone()),
+            name: "cw".into(),
+        },
+    )
+    .await;
+    assert_eq!(install_req(&mut da).await, "cw");
+    // nobody can install it
+    send(
+        &mut u,
+        &UiToHub::InstallProfile {
+            node: None,
+            name: "nope".into(),
+        },
+    )
+    .await;
+    assert!(error(&mut u)
+        .await
+        .contains("no connected node can install nope"));
+    // status relay, sanitized
+    send(
+        &mut da,
+        &DaemonToHub::InstallStatus {
+            name: "cw".into(),
+            done: true,
+            ok: false,
+            detail: "boom\u{7}".into(),
+        },
+    )
+    .await;
+    loop {
+        if let HubToUi::InstallStatus {
+            node,
+            name,
+            done,
+            ok,
+            detail,
+        } = recv(&mut u).await
+        {
+            assert_eq!(
+                (node, name.as_str(), done, ok),
+                (a.id.clone(), "cw", true, false)
+            );
+            assert!(!detail.contains('\u{7}'), "{detail:?}");
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn install_script_is_validated() {
+    let fx = start().await;
+    let (mut u, _) = ui(&fx).await;
+    for bad in [String::new(), "a\0b".into(), "x".repeat(4097)] {
+        send(
+            &mut u,
+            &UiToHub::SaveProfile {
+                node: None,
+                profile: HubProfile {
+                    install: Some(bad),
+                    ..hp("cw", "claude")
+                },
+            },
+        )
+        .await;
+        assert!(error(&mut u).await.contains("install script"));
+    }
+    let (p, _) = save(
+        &mut u,
+        None,
+        HubProfile {
+            install: Some("curl -fsSL https://x/i.sh | bash\necho ok".into()),
+            ..hp("cw", "claude")
+        },
+    )
+    .await;
+    assert_eq!(
+        p[0].profile.install.as_deref(),
+        Some("curl -fsSL https://x/i.sh | bash\necho ok")
+    );
 }

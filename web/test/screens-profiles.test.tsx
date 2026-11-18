@@ -203,6 +203,43 @@ describe('Node screen: profiles, repositories, cleanup', () => {
   });
 });
 
+describe('Node screen: install a profile', () => {
+  const status = (done: boolean, ok: boolean, detail = '') => act(() => feed({ type: 'install_status', node: 'n1', name: 'cw', done, ok, detail }));
+
+  it('Install only for installable profiles; sends the frame, shows progress, then the failure', () => {
+    feed({ type: 'node_profiles', node: 'n1', profiles: [prof('cw', { installed: false, installable: true }), prof('plain', { installed: false })] });
+    render(<NodeDetail id="n1" />);
+    const list = within(screen.getByRole('list', { name: 'Profiles on alpha' }));
+    expect(list.getAllByRole('button', { name: 'Install' })).toHaveLength(1);
+    sent.length = 0;
+    fireEvent.click(list.getByRole('button', { name: 'Install' }));
+    expect(sent).toEqual([{ type: 'install_profile', node: 'n1', name: 'cw' }]);
+    status(false, false);
+    expect(list.getByText('Installing…')).toBeTruthy();
+    expect((list.getByRole('button', { name: 'Install' }) as HTMLButtonElement).disabled).toBe(true);
+    status(true, false, 'installing claude failed (exit status: 1): npm ERR! EACCES');
+    expect(list.queryByText('Installing…')).toBeNull();
+    expect(list.getByText('Install failed')).toBeTruthy();
+    expect(list.getByText('installing claude failed (exit status: 1): npm ERR! EACCES')).toBeTruthy();
+    expect((list.getByRole('button', { name: 'Install' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('Reinstall needs two clicks; success shows Installed once', () => {
+    feed({ type: 'node_profiles', node: 'n1', profiles: [prof('cw', { installable: true })] });
+    render(<NodeDetail id="n1" />);
+    const list = within(screen.getByRole('list', { name: 'Profiles on alpha' }));
+    sent.length = 0;
+    fireEvent.click(list.getByRole('button', { name: 'Reinstall' }));
+    expect(sent).toEqual([]);
+    fireEvent.click(list.getByRole('button', { name: 'Click again to reinstall' }));
+    expect(sent).toEqual([{ type: 'install_profile', node: 'n1', name: 'cw' }]);
+    status(false, false);
+    status(true, true, 'done');
+    expect(list.getAllByText('Installed')).toHaveLength(1);
+    expect(list.getByText('done')).toBeTruthy();
+  });
+});
+
 describe('Agents: failed agents', () => {
   it('a failed agent the node never listed shows up without a reload', () => {
     render(<Agents />);

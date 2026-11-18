@@ -14,6 +14,7 @@ export function ProfileDialog({ node, editing, onClose }: { node: string | null;
   const [keep, setKeep] = useState<Record<string, string>>(editing?.env ?? {});
   const [tried, setTried] = useState(false);
   const envId = useId();
+  const installId = useId();
   const set = (k: keyof ProfileForm) => (v: string) => setForm((f) => ({ ...f, [k]: v }));
   const errors = tried ? profileErrors(form, keep) : {};
   const { ack, start } = useHubAck();
@@ -51,6 +52,11 @@ export function ProfileDialog({ node, editing, onClose }: { node: string | null;
         <textarea id={envId} class="input mono" rows={3} placeholder="HTTPS_PROXY=http://proxy:3128" spellcheck={false} value={form.env} aria-invalid={errors.env ? true : undefined} onInput={(e) => set('env')(e.currentTarget.value)} />
         {errors.env ? <span class="err" role="alert">{errors.env}</span> : <span class="hint">One KEY=value per line. Values are hidden after saving.</span>}
       </div>
+      <div class="field">
+        <label for={installId}>Install script</label>
+        <textarea id={installId} class="input mono" rows={3} placeholder="curl -fsSL https://example.org/install.sh | bash" spellcheck={false} value={form.install} aria-invalid={errors.install ? true : undefined} onInput={(e) => set('install')(e.currentTarget.value)} />
+        {errors.install ? <span class="err" role="alert">{errors.install}</span> : <span class="hint">Runs on the node with sh -c when the program is missing, or when you press Install. Runs as the node's user.</span>}
+      </div>
     </Dialog>
   );
 }
@@ -71,7 +77,9 @@ export function HubProfiles({ node, label }: { node: string | null; label: strin
                 <span class="muted small mono wrap">{[p.binary, ...(p.args ?? [])].join(' ')}</span>
                 {p.config_dir && <span class="muted small mono wrap">config {p.config_dir}</span>}
                 {p.env && <span class="muted small mono wrap">{Object.keys(p.env).map((k) => `${k}=${MASK}`).join(' ')}</span>}
+                {p.install && <span class="muted small mono pre-wrap">install script: {p.install}</span>}
               </span>
+              {node === null && p.install && <ConfirmButton variant="default" label="Install on all nodes" confirmLabel="Runs on every node: confirm" onConfirm={() => store.intent({ kind: 'install_profile', node: null, name: p.name })} />}
               <Button size="sm" variant="ghost" aria-label={`Edit ${p.name}`} onClick={() => setOpen({ editing: p })}>Edit</Button>
               <ConfirmButton label="Delete" confirmLabel="Click again to delete" onConfirm={() => store.intent({ kind: 'delete_profile', node, name: p.name })} />
             </li>

@@ -173,6 +173,8 @@ export interface ProfileInfo {
   login_blocked: boolean;
   /** From the hub, not the node's agents.json. On the wire only when true. */
   from_hub?: boolean;
+  /** The node has an install command for it (`install_profile` works). On the wire only when true. */
+  installable?: boolean;
 }
 
 /** A hub-defined profile. Optional fields are absent on the wire when empty. */
@@ -182,6 +184,8 @@ export interface HubProfile {
   args?: string[];
   config_dir?: string;
   env?: Record<string, string>;
+  /** Shell script run on the node as `sh -c` (1-4096 chars, no NUL) when the binary is missing or on `install_profile`. */
+  install?: string;
 }
 
 /** `node: null` = every node; a node-scoped profile beats a global one of the same name. */
@@ -261,6 +265,8 @@ export type UiToHub =
   | { type: 'delete_profile'; node: NodeId | null; name: string }
   | { type: 'save_node_settings'; node: NodeId; settings: NodeSettings }
   | { type: 'node_stats'; node: NodeId }
+  /** `node: null` = every connected node reporting the profile installable. */
+  | { type: 'install_profile'; node: NodeId | null; name: string }
   | { type: 'clean_node'; node: NodeId; dry_run: boolean }
   | { type: 'clean_repo'; node: NodeId; path: string };
 
@@ -294,6 +300,8 @@ export type HubToUi =
   | { type: 'node_repos'; node: NodeId; repos: RepoEntry[] }
   | { type: 'hub_config'; profiles: ScopedProfile[]; settings: NodeSettingsEntry[] }
   | { type: 'node_stats'; node: NodeId; connected_ms: number | null; samples: Telemetry[] }
+  /** `done: false` = started; `done: true` with `ok` and `detail` (error, or output tail) = finished. */
+  | { type: 'install_status'; node: NodeId; name: string; done: boolean; ok: boolean; detail: string }
   | { type: 'clean_report'; node: NodeId; dry_run: boolean; removed: CleanItem[]; kept: CleanItem[] }
   | { type: 'error'; message: string };
 

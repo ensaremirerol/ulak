@@ -47,11 +47,11 @@ const chars = (v: string) => [...v].length;
 const words = (v: string) => v.split(/\s+/).filter(Boolean);
 const lines = (v: string) => v.split('\n').map((l) => l.trim()).filter(Boolean);
 
-export const emptyProfileForm = (): ProfileForm => ({ name: '', binary: '', args: '', configDir: '', env: '' });
+export const emptyProfileForm = (): ProfileForm => ({ name: '', binary: '', args: '', configDir: '', env: '', install: '' });
 
 /** The dialog fields of a stored profile; env values stay out (they are kept separately, masked). */
 export const profileToForm = (p: HubProfile): ProfileForm =>
-  ({ name: p.name, binary: p.binary, args: (p.args ?? []).join(' '), configDir: p.config_dir ?? '', env: '' });
+  ({ name: p.name, binary: p.binary, args: (p.args ?? []).join(' '), configDir: p.config_dir ?? '', env: '', install: p.install ?? '' });
 
 /** `KEY=value` lines; a malformed line is reported, not dropped. */
 function parseEnv(text: string): { env: [string, string][]; error: string | null } {
@@ -82,6 +82,9 @@ export function profileErrors(f: ProfileForm, keepEnv?: Record<string, string>):
   const env = parseEnv(f.env);
   if (env.error) e.env = env.error;
   else if (Object.keys(mergedEnv(f, keepEnv)).length > 32) e.env = 'At most 32 variables.';
+  const install = f.install.trim();
+  if (chars(install) > 4096) e.install = 'At most 4096 characters.';
+  else if (install.includes('\0')) e.install = 'No NUL characters.';
   return e;
 }
 
@@ -90,12 +93,14 @@ export function profileFromForm(f: ProfileForm, keepEnv?: Record<string, string>
   const args = words(f.args);
   const configDir = f.configDir.trim();
   const env = mergedEnv(f, keepEnv);
+  const install = f.install.trim();
   return {
     name: f.name.trim(),
     binary: f.binary.trim(),
     ...(args.length > 0 ? { args } : {}),
     ...(configDir ? { config_dir: configDir } : {}),
     ...(Object.keys(env).length > 0 ? { env } : {}),
+    ...(install ? { install } : {}),
   };
 }
 
@@ -218,6 +223,8 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'node_stats', node: i.node }];
     case 'unwatch_node':
       return [];
+    case 'install_profile':
+      return [{ type: 'install_profile', node: i.node, name: i.name }];
     case 'clean_node':
       return [{ type: 'clean_node', node: i.node, dry_run: i.dryRun }];
     case 'clean_repo':

@@ -21,6 +21,7 @@ export function initialState(now = Date.now()): State {
     credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
     hubProfiles: [], nodeSettings: {}, stats: null,
     acks: { config: 0, error: 0, lastError: '' },
+    installs: {},
   };
 }
 
@@ -115,6 +116,7 @@ export function reduce(s: State, e: Event): State {
 }
 
 export const repoKey = (credential: string, query: string | null): string => `${credential}\0${query ?? ''}`;
+export const installKey = (node: NodeId, name: string): string => `${node}\0${name}`;
 export const branchKey = (credential: string, repo: string): string => `${credential}\0${repo}`;
 
 function setStatus(s: State, agent: string, node: NodeId, status: AgentStatus): State {
@@ -216,6 +218,10 @@ function reduceHub(s: State, f: HubToUi): State {
       };
     case 'node_stats':
       return s.stats?.node === f.node ? { ...s, stats: { node: f.node, connectedMs: f.connected_ms, samples: f.samples.slice(-STATS_CAP) } } : s;
+    case 'install_status': {
+      const run = { running: !f.done, detail: f.detail, at: s.now, ...(f.done ? { ok: f.ok } : {}) };
+      return { ...s, installs: { ...s.installs, [installKey(f.node, f.name)]: run } };
+    }
     case 'clean_report':
       return { ...s, lastClean: { ...s.lastClean, [f.node]: { dryRun: f.dry_run, removed: f.removed, kept: f.kept } } };
     case 'error':

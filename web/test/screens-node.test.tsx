@@ -186,4 +186,31 @@ describe('Settings: global profiles', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(sent).toEqual([{ type: 'save_profile', node: null, profile: { name: 'h', binary: 'claude' } }]);
   });
+
+  it('install script: sent when set, shown in the list, installs on all nodes after two clicks', () => {
+    const script = 'curl -fsSL https://example.org/install.sh | bash';
+    render(<Settings />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add profile' }));
+    type('Name', 'h');
+    type('Program', 'claude');
+    type('Install script', script);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(sent).toEqual([{ type: 'save_profile', node: null, profile: { name: 'h', binary: 'claude', install: script } }]);
+    applied([{ node: null, profile: { name: 'h', binary: 'claude', install: script } }]);
+    const list = within(screen.getByRole('list', { name: 'Global profiles' }));
+    expect(list.getByText(`install script: ${script}`)).toBeTruthy();
+    // Editing shows the script; clearing it leaves the field out.
+    fireEvent.click(list.getByRole('button', { name: 'Edit h' }));
+    expect((screen.getByLabelText('Install script') as HTMLTextAreaElement).value).toBe(script);
+    type('Install script', '');
+    sent.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(sent).toEqual([{ type: 'save_profile', node: null, profile: { name: 'h', binary: 'claude' } }]);
+    applied([{ node: null, profile: { name: 'h', binary: 'claude', install: script } }]);
+    sent.length = 0;
+    fireEvent.click(list.getByRole('button', { name: 'Install on all nodes' }));
+    expect(sent).toEqual([]);
+    fireEvent.click(list.getByRole('button', { name: 'Runs on every node: confirm' }));
+    expect(sent).toEqual([{ type: 'install_profile', node: null, name: 'h' }]);
+  });
 });

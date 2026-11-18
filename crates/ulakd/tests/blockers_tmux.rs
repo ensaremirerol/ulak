@@ -147,7 +147,7 @@ async fn missing_binary_without_recipe_raises_install_blocker() {
         panic!("no blocker")
     };
     assert_eq!(kind, BlockerKind::Install);
-    assert!(detail.contains("no install recipe"), "{detail}");
+    assert!(detail.contains("no install command"), "{detail}");
     assert!(t.list().await.unwrap().is_empty());
     kill_server(&sock);
 }

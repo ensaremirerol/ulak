@@ -92,6 +92,10 @@ pub trait AgentHost: Send + Sync + 'static {
     fn clean(&self, _req: CleanReq) -> impl Future<Output = Option<Cleaned>> + Send {
         std::future::ready(None)
     }
+    /// Runs a profile's install command (`HubToDaemon::InstallProfile`).
+    fn install(&self, _name: String) -> impl Future<Output = Result<(), String>> + Send {
+        std::future::ready(Err("this node cannot install agents".into()))
+    }
     /// How often [`AgentHost::maintain`] runs.
     fn maintenance_interval(&self) -> Duration {
         Duration::from_secs(600)
@@ -122,6 +126,7 @@ enum Done {
     Indexed(Option<Vec<ProfileInfo>>, Option<Vec<RepoEntry>>),
     Cleaned(bool, Option<Cleaned>),
     Maintained(Option<Cleaned>),
+    Installed(String, Result<(), String>),
 }
 
 pub type SharedProbe = Arc<Mutex<Box<dyn Probe>>>;
@@ -331,6 +336,22 @@ impl<'a, H: AgentHost> Session<'a, H> {
                 }
                 self.refresh();
             }
+            Done::Installed(name, r) => {
+                eprintln!(
+                    "ulakd: install {name}: {}",
+                    r.as_ref().map_or_else(|e| e.as_str(), |()| "ok")
+                );
+                let _ = self.out.send(DaemonToHub::InstallStatus {
+                    name,
+                    done: true,
+                    ok: r.is_ok(),
+                    detail: r
+                        .err()
+                        .map(|e| ulak_proto::sanitize_reason(&e))
+                        .unwrap_or_default(),
+                });
+                self.refresh();
+            }
             Done::Maintained(c) => {
                 if let Some(c) = c.filter(|c| !c.removed.is_empty()) {
                     self.report(false, c);
@@ -466,6 +487,23 @@ impl<'a, H: AgentHost> Session<'a, H> {
                 if let Some(u) = self.updates.clone() {
                     tokio::spawn(async move { u.on_update_now().await });
                 }
+            }
+            HubToDaemon::InstallProfile { name } => {
+                self.emit(DaemonToHub::InstallStatus {
+                    name: name.clone(),
+                    done: false,
+                    ok: false,
+                    detail: String::new(),
+                })
+                .await;
+                let host = self.host;
+                self.jobs().push(
+                    async move {
+                        let r = host.install(name.clone()).await;
+                        Done::Installed(name, r)
+                    }
+                    .boxed(),
+                );
             }
             HubToDaemon::CleanRepos { dry_run } => self.clean(CleanReq::All { dry_run }),
             HubToDaemon::CleanRepo { path } => self.clean(CleanReq::One { path }),

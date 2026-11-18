@@ -175,6 +175,7 @@
             "env": {
               "HTTPS_PROXY": "http://proxy:3128"
             },
+            "install": "curl -fsSL https://example.org/install.sh | bash",
             "name": "claude-work"
           }
         },
@@ -211,6 +212,22 @@
       "type": "hub_version",
       "version": "0.1.2"
     },
+    "install_status_failed": {
+      "detail": "installing claude failed (exit status: 1): npm ERR! EACCES",
+      "done": true,
+      "name": "claude-work",
+      "node": "vps-fra",
+      "ok": false,
+      "type": "install_status"
+    },
+    "install_status_started": {
+      "detail": "",
+      "done": false,
+      "name": "claude-work",
+      "node": "vps-fra",
+      "ok": false,
+      "type": "install_status"
+    },
     "mailbox_log": {
       "messages": [
         {
@@ -242,6 +259,7 @@
           "binary": "claude",
           "config_dir": "/home/u/.claude-work",
           "from_hub": true,
+          "installable": true,
           "installed": true,
           "login_blocked": false,
           "name": "claude-work"
@@ -623,6 +641,16 @@
       "agent": "reviewer-2",
       "type": "detach"
     },
+    "install_profile_all": {
+      "name": "claude-work",
+      "node": null,
+      "type": "install_profile"
+    },
+    "install_profile_node": {
+      "name": "claude-work",
+      "node": "vps-fra",
+      "type": "install_profile"
+    },
     "kill": {
       "agent": "reviewer-2",
       "type": "kill"
@@ -705,6 +733,7 @@
         "env": {
           "HTTPS_PROXY": "http://proxy:3128"
         },
+        "install": "curl -fsSL https://example.org/install.sh | bash",
         "name": "claude-work"
       },
       "type": "save_profile"

@@ -59,6 +59,15 @@ pub enum DaemonToHub {
         removed: Vec<CleanItem>,
         kept: Vec<CleanItem>,
     },
+    /// An `InstallProfile` started (`done: false`) or finished (`done: true`; `ok` and `detail`:
+    /// the error, or the output tail on success; at most 300 chars, never a credential).
+    /// A successful install also re-sends `Profiles`.
+    InstallStatus {
+        name: String,
+        done: bool,
+        ok: bool,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +87,11 @@ pub enum HubToDaemon {
     /// Delete one clone; `path` must equal the path of an indexed work-root entry.
     CleanRepo {
         path: String,
+    },
+    /// Run the profile's install command now (even if installed: a reinstall/upgrade). Answered
+    /// with `InstallStatus`; a profile without an install command answers `ok: false` at once.
+    InstallProfile {
+        name: String,
     },
     /// Look for a newer release in the daemon's own configured repo; report via `UpdateStatus`.
     CheckUpdate,
@@ -200,6 +214,12 @@ pub enum UiToHub {
     SaveNodeSettings {
         node: NodeId,
         settings: NodeSettings,
+    },
+    /// Run a profile's install command on a node, or (`node: None`) on every connected node that
+    /// reports the profile as installable. Progress: `InstallStatus` (broadcast).
+    InstallProfile {
+        node: Option<NodeId>,
+        name: String,
     },
     /// Telemetry history of a node. Reply: `NodeStats` (to the requester only).
     NodeStats {
@@ -337,6 +357,14 @@ pub enum HubToUi {
         node: NodeId,
         connected_ms: Option<u64>,
         samples: Vec<Telemetry>,
+    },
+    /// Relay of `DaemonToHub::InstallStatus`.
+    InstallStatus {
+        node: NodeId,
+        name: String,
+        done: bool,
+        ok: bool,
+        detail: String,
     },
     /// Relay of `DaemonToHub::CleanReport`.
     CleanReport {

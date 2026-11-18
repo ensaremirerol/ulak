@@ -388,6 +388,25 @@ impl Hub {
         Some(p.iter().map(|i| i.name.clone()).collect())
     }
 
+    /// Connected nodes that report `name` with an install command, sorted.
+    pub(crate) fn installable_nodes(&self, name: &str) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = self
+            .versions
+            .lock()
+            .expect("versions lock is never held across a panic")
+            .iter()
+            .filter(|(_, m)| {
+                m.profiles
+                    .iter()
+                    .flatten()
+                    .any(|p| p.name == name && p.installable)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Some connected node reports `name` as a profile.
     pub(crate) fn profile_known(&self, name: &str) -> bool {
         self.versions

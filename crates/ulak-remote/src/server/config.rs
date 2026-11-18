@@ -67,6 +67,13 @@ pub(crate) fn check_profile(p: &HubProfile) -> Result<(), ServerError> {
             )));
         }
     }
+    // Newlines and tabs are fine in a script; NUL is not.
+    if p.install
+        .as_deref()
+        .is_some_and(|s| !(1..=4096).contains(&s.chars().count()) || s.contains('\0'))
+    {
+        return Err(bad("install script must be 1-4096 characters without NUL"));
+    }
     Ok(())
 }
 
@@ -292,6 +299,7 @@ mod tests {
             args: vec![],
             config_dir: None,
             env: BTreeMap::new(),
+            install: None,
         };
         let a = NodeId::new("a").unwrap();
         let b = NodeId::new("b").unwrap();
@@ -328,6 +336,7 @@ mod tests {
             args: vec![],
             config_dir: Some("~/.claude-work".into()),
             env: BTreeMap::from([("FOO_1".into(), "bar".into())]),
+            install: None,
         };
         assert!(check_profile(&p).is_ok());
         for bad in ["", "a b", "x/y", &"a".repeat(65)] {

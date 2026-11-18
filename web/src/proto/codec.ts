@@ -184,6 +184,7 @@ function profileInfo(v: unknown): ProfileInfo {
     installed: bool(o.installed, 'installed'),
     login_blocked: bool(o.login_blocked, 'login_blocked'),
     ...(o.from_hub === undefined ? {} : bool(o.from_hub, 'from_hub') ? { from_hub: true } : {}),
+    ...(o.installable === undefined ? {} : bool(o.installable, 'installable') ? { installable: true } : {}),
   };
 }
 
@@ -199,6 +200,7 @@ export function hubProfile(v: unknown): HubProfile {
     ...some(o, 'args', (x) => arr(x, 'args', (y) => str(y, 'arg'))),
     ...some(o, 'config_dir', (x) => str(x, 'config_dir')),
     ...some(o, 'env', (x) => Object.fromEntries(Object.entries(obj(x, 'env')).map(([k, y]) => [k, str(y, 'env value')]))),
+    ...some(o, 'install', (x) => str(x, 'install')),
   };
 }
 
@@ -323,6 +325,14 @@ const hubDecoders = {
     connected_ms: optNum(o.connected_ms, 'connected_ms'),
     samples: arr(o.samples, 'samples', telemetry),
   }),
+  install_status: (o) => ({
+    type: 'install_status',
+    node: s(o.node, 'node'),
+    name: s(o.name, 'name'),
+    done: bool(o.done, 'done'),
+    ok: bool(o.ok, 'ok'),
+    detail: s(o.detail, 'detail'),
+  }),
   clean_report: (o) => ({
     type: 'clean_report',
     node: s(o.node, 'node'),
@@ -426,6 +436,7 @@ const uiDecoders = {
   delete_profile: (o) => ({ type: 'delete_profile', node: optStr(o.node, 'node'), name: s(o.name, 'name') }),
   save_node_settings: (o) => ({ type: 'save_node_settings', node: s(o.node, 'node'), settings: nodeSettings(o.settings) }),
   node_stats: (o) => ({ type: 'node_stats', node: s(o.node, 'node') }),
+  install_profile: (o) => ({ type: 'install_profile', node: optStr(o.node, 'node'), name: s(o.name, 'name') }),
   clean_node: (o) => ({ type: 'clean_node', node: s(o.node, 'node'), dry_run: bool(o.dry_run, 'dry_run') }),
   clean_repo: (o) => ({ type: 'clean_repo', node: s(o.node, 'node'), path: s(o.path, 'path') }),
 } satisfies { [K in UiToHubType]: Decoder<Extract<UiToHub, { type: K }>> };

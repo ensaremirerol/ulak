@@ -160,6 +160,25 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
                 repos,
             });
         }
+        DaemonToHub::InstallStatus {
+            name,
+            done,
+            ok,
+            detail,
+        } => {
+            if name.chars().count() > 64 {
+                return Err(ServerError::BadArgs(
+                    "oversize install status dropped".into(),
+                ));
+            }
+            h.ui_send(HubToUi::InstallStatus {
+                node: id.clone(),
+                name,
+                done,
+                ok,
+                detail: ulak_proto::sanitize_reason(&detail),
+            });
+        }
         DaemonToHub::CleanReport {
             dry_run,
             removed,
@@ -542,6 +561,20 @@ fn on_ui(
             });
         }
         UiToHub::UpdateNode { node } => update_route(h, node, || HubToDaemon::UpdateNow)?,
+        UiToHub::InstallProfile { node, name } => {
+            let nodes = match node {
+                Some(n) => vec![n],
+                None => h.installable_nodes(&name),
+            };
+            if nodes.is_empty() {
+                return Err(ServerError::BadArgs(format!(
+                    "no connected node can install {name}"
+                )));
+            }
+            for n in nodes {
+                h.to_daemon(&n, HubToDaemon::InstallProfile { name: name.clone() })?;
+            }
+        }
         UiToHub::CleanNode { node, dry_run } => {
             h.to_daemon(&node, HubToDaemon::CleanRepos { dry_run })?;
         }

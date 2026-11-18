@@ -62,6 +62,8 @@ export interface State {
   /** Counts of `hub_config` and `error` frames, plus the last error text: a form that sent a
    *  config change waits for one of them to move (see `useHubAck`). */
   acks: { config: number; error: number; lastError: string };
+  /** The latest install per `node\0profile` (see `installKey`); `ok` only once done. */
+  installs: Record<string, { running: boolean; ok?: boolean; detail: string; at: number }>;
 }
 
 export type Event =
@@ -97,6 +99,8 @@ export interface ProfileForm {
   configDir: string;
   /** `KEY=value` lines (added to / overriding the kept env). */
   env: string;
+  /** Install script; empty = none. */
+  install: string;
 }
 
 export type Tri = 'inherit' | 'on' | 'off';
@@ -143,5 +147,7 @@ export type Intent =
   /** The node screen opened (asks for its history) / closed (stops collecting, unless another node took over). */
   | { kind: 'watch_node'; node: NodeId }
   | { kind: 'unwatch_node'; node: NodeId }
+  /** `node` null = every connected node that can install it. */
+  | { kind: 'install_profile'; node: NodeId | null; name: string }
   | { kind: 'clean_node'; node: NodeId; dryRun: boolean }
   | { kind: 'clean_repo'; node: NodeId; path: string };

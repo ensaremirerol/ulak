@@ -560,6 +560,7 @@ impl AgentHost for IndexHost {
             installed: true,
             login_blocked: false,
             from_hub: false,
+            installable: false,
         }])
     }
     async fn repo_index(&self) -> Option<Vec<RepoEntry>> {
@@ -691,6 +692,7 @@ fn hub_profile(name: &str, binary: &str, cfg: Option<&str>) -> HubProfile {
         args: vec![],
         config_dir: cfg.map(Into::into),
         env: Default::default(),
+        install: None,
     }
 }
 
@@ -901,5 +903,123 @@ async fn hub_config_changes_the_maintenance_interval_live() {
     })
     .await
     .expect("maintenance runs at the new interval");
+    daemon.abort();
+}
+
+async fn install_status<S>(ws: &mut S) -> (String, bool, bool, String)
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        if let DaemonToHub::InstallStatus {
+            name,
+            done,
+            ok,
+            detail,
+        } = next_frame(ws).await
+        {
+            return (name, done, ok, detail);
+        }
+    }
+}
+
+#[tokio::test]
+async fn hub_install_script_runs_on_request_and_reports_status() {
+    use ulakd::{agents::Agents, tmux::Tmux};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws/daemon", listener.local_addr().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("t-tool");
+    let tm = Tmux::with_agents(
+        Some(format!("ulakd-install-{}", std::process::id())),
+        Agents::from_json("{}").unwrap(),
+    );
+    let probe: SharedProbe = Arc::new(Mutex::new(Box::new(FakeProbe(Arc::new(Mutex::new(
+        NodeState::Idle,
+    ))))));
+    let cfg = SessionCfg {
+        node_id: NodeId::new("node-1").unwrap(),
+        hostname: "box".into(),
+        heartbeat: Duration::from_millis(200),
+    };
+    let h = tm.clone();
+    let daemon = tokio::spawn(async move {
+        let ws = connect(&url, None).await.unwrap();
+        ulakd::hub::run_session_with(ws, &cfg, &h, &probe, None).await
+    });
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut hub = accept_async(tcp).await.unwrap();
+    let script = format!(
+        "printf '#!/bin/sh\\necho hi\\n' > {0} && chmod +x {0}",
+        bin.display()
+    );
+    hub.send(send(HubToDaemon::Config {
+        profiles: vec![
+            HubProfile {
+                install: Some(script),
+                ..hub_profile("t-tool", bin.to_str().unwrap(), None)
+            },
+            HubProfile {
+                install: Some("echo nope >&2; exit 3".into()),
+                ..hub_profile("t-bad", "/nonexistent/t-bad", None)
+            },
+            hub_profile("t-none", "/nonexistent/t-none", None),
+        ],
+        settings: NodeSettings::default(),
+    }))
+    .await
+    .unwrap();
+    let p = profiles_where(&mut hub, |p| p.iter().any(|i| i.name == "t-tool")).await;
+    let get = |p: &[ProfileInfo], n: &str| p.iter().find(|i| i.name == n).cloned().unwrap();
+    assert!(get(&p, "t-tool").installable && !get(&p, "t-tool").installed);
+    assert!(!get(&p, "t-none").installable);
+
+    hub.send(send(HubToDaemon::InstallProfile {
+        name: "t-tool".into(),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        install_status(&mut hub).await,
+        ("t-tool".into(), false, false, String::new())
+    );
+    let (n, done, ok, detail) = install_status(&mut hub).await;
+    assert!(n == "t-tool" && done && ok, "{detail}");
+    assert!(bin.exists());
+    let p = profiles_where(&mut hub, |p| {
+        p.iter().any(|i| i.name == "t-tool" && i.installed)
+    })
+    .await;
+    assert!(get(&p, "t-tool").from_hub);
+
+    hub.send(send(HubToDaemon::InstallProfile {
+        name: "t-bad".into(),
+    }))
+    .await
+    .unwrap();
+    install_status(&mut hub).await;
+    let (_, done, ok, detail) = install_status(&mut hub).await;
+    assert!(done && !ok);
+    assert!(
+        detail.contains("exit status: 3") && detail.contains("nope"),
+        "{detail}"
+    );
+
+    hub.send(send(HubToDaemon::InstallProfile {
+        name: "t-none".into(),
+    }))
+    .await
+    .unwrap();
+    install_status(&mut hub).await;
+    let (_, _, ok, detail) = install_status(&mut hub).await;
+    assert!(!ok && detail.contains("no install command"), "{detail}");
+    hub.send(send(HubToDaemon::InstallProfile {
+        name: "ghost".into(),
+    }))
+    .await
+    .unwrap();
+    install_status(&mut hub).await;
+    let (_, _, ok, detail) = install_status(&mut hub).await;
+    assert!(!ok && detail.contains("no profile named ghost"), "{detail}");
     daemon.abort();
 }

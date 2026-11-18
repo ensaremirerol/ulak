@@ -2,12 +2,13 @@
 //! the spawn's `profile.binary` (its file name); an entry may run another `binary` with its own
 //! `args`, `config_dir` and `env` (e.g. two claude accounts as `claude-work` and
 //! `claude-personal`), and then inherits whatever it leaves out from that binary's entry.
-//! Install recipes come ONLY from this local file (and the built-in defaults); the hub never
-//! supplies a command. Recipes are argv vectors, run without a shell.
+//! Local recipes are argv vectors, run without a shell.
 //!
-//! Hub profiles ([`Agents::with_hub`]) only set `binary`, `args`, `config_dir` and `env`; a hub
-//! profile of a local name keeps that entry's check/install/login/MCP fields, a new name gets
-//! none of its own (so it inherits them from its binary's local entry, if any).
+//! Hub profiles ([`Agents::with_hub`]) set `binary`, `args`, `config_dir`, `env` and optionally an
+//! install script (run as `sh -c <script>`; the hub can already start any program through a
+//! custom spawn, so this grants it nothing new). A hub profile of a local name keeps that entry's
+//! check/login/MCP fields and its install recipe unless the hub gives a script; a new name
+//! inherits them from its binary's local entry, if any. Check commands never come from the hub.
 use crate::{errors::ConfigError, repos::expand_tilde};
 use futures_util::{
     future::{BoxFuture, Shared},
@@ -251,13 +252,18 @@ impl Agents {
                 eprintln!("ulakd: ignoring hub profile: {e}");
                 continue;
             }
-            // Only these four fields come from the hub; never check/install/login/MCP.
+            // These fields (and an install script) come from the hub; never check/login/MCP.
             let base = self.0.get(&p.name).cloned().unwrap_or_default();
+            let install = match &p.install {
+                Some(script) => Some(vec!["sh".to_owned(), "-c".to_owned(), script.clone()]),
+                None => base.install.clone(),
+            };
             let r = Recipe {
                 binary: Some(p.binary.clone()),
                 args: p.args.clone(),
                 config_dir: p.config_dir.clone(),
                 env: p.env.clone(),
+                install,
                 ..base
             };
             me.0.insert(p.name.clone(), r);
@@ -306,6 +312,12 @@ pub fn check_hub_profile(p: &HubProfile) -> Result<(), String> {
     };
     if p.env.len() > 32 || !p.env.keys().all(|k| key_ok(k)) {
         return Err(format!("{n}: bad env"));
+    }
+    if p.install
+        .as_deref()
+        .is_some_and(|s| !(1..=4096).contains(&s.chars().count()) || s.contains('\0'))
+    {
+        return Err(format!("{n}: bad install script"));
     }
     Ok(())
 }
@@ -395,7 +407,7 @@ async fn install_flow(binary: String, r: Recipe) -> Result<(), String> {
     let name = binary_name(&binary).to_owned();
     let Some(a) = r.install.as_ref().filter(|a| !a.is_empty()) else {
         return Err(format!(
-            "{name} is not installed and no install recipe is configured (agents.json)"
+            "{name} is not installed and has no install command (agents.json or the hub profile)"
         ));
     };
     let secs = r.install_timeout_secs;
@@ -603,7 +615,47 @@ pub(crate) mod tests {
             args: vec![],
             config_dir: cfg.map(Into::into),
             env: BTreeMap::new(),
+            install: None,
         }
+    }
+
+    #[test]
+    fn hub_install_script_becomes_sh_c_and_local_recipe_stays_otherwise() {
+        let local = Agents::from_json(
+            r#"{"tool":{"install":["local-installer"]},"other":{"install":["other-installer"]}}"#,
+        )
+        .unwrap();
+        let (a, _) = local.with_hub(&[
+            HubProfile {
+                install: Some("curl -fsSL https://x/i.sh | bash".into()),
+                ..hub("tool", "/opt/tool", None)
+            },
+            hub("other", "/opt/other", None),
+            hub("via-tool", "tool", None),
+            HubProfile {
+                install: Some("a\0b".into()),
+                ..hub("nul", "x", None)
+            },
+        ]);
+        assert_eq!(
+            a.recipe("tool").install,
+            Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "curl -fsSL https://x/i.sh | bash".into()
+            ])
+        );
+        // no hub script: a local name keeps its own recipe
+        assert_eq!(
+            a.recipe("other").install,
+            Some(vec!["other-installer".to_owned()])
+        );
+        // a new name inherits from its binary's entry, here the hub-scripted `tool`
+        assert_eq!(a.recipe("via-tool").install, a.recipe("tool").install);
+        assert!(
+            !a.names().any(|n| n == "nul"),
+            "a NUL script drops the profile"
+        );
     }
 
     #[test]
@@ -785,7 +837,7 @@ pub(crate) mod tests {
             .ensure("no-such-agent-x", &none)
             .await
             .unwrap_err();
-        assert!(e.contains("no install recipe"), "{e}");
+        assert!(e.contains("no install command"), "{e}");
 
         let npmless = Recipe {
             install: argv(&["no-such-installer-x", "a"]),
