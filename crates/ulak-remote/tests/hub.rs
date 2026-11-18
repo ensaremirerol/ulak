@@ -218,6 +218,10 @@ async fn ui(fx: &Fx) -> Ws {
         recv::<HubToUi>(&mut ws).await,
         HubToUi::HubVersion(_)
     ));
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::HubConfig { .. }
+    ));
     ws
 }
 
@@ -1329,7 +1333,7 @@ fn dinfo(proto: u32) -> VersionInfo {
     VersionInfo::new("0.0.9", "deadbee", proto, "linux", "x86_64").unwrap()
 }
 
-/// A fresh UI's connect burst: Snapshot, Blockers, HubVersion, then per-node frames until `n` arrive.
+/// A fresh UI's connect burst: Snapshot, Blockers, HubVersion, HubConfig, then per-node frames until `n` arrive.
 async fn fresh_ui_versions(fx: &Fx, n: usize) -> (VersionInfo, Vec<HubToUi>) {
     let id = enroll_as(fx, DeviceKind::Ui, "phone").await;
     let mut ws = connect(fx, "/ws/ui", Some(&id)).await.unwrap();
@@ -1344,6 +1348,10 @@ async fn fresh_ui_versions(fx: &Fx, n: usize) -> (VersionInfo, Vec<HubToUi>) {
     let HubToUi::HubVersion(v) = recv::<HubToUi>(&mut ws).await else {
         panic!("HubVersion must follow Blockers");
     };
+    assert!(matches!(
+        recv::<HubToUi>(&mut ws).await,
+        HubToUi::HubConfig { .. }
+    ));
     let mut rest = vec![];
     for _ in 0..n {
         rest.push(recv::<HubToUi>(&mut ws).await);

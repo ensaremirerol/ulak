@@ -1,3 +1,4 @@
+use super::config::{check_name, check_profile, check_settings, MAX_HUB_PROFILES};
 use super::hub::{now_ms, Hub, Peer};
 use crate::*;
 use axum::{
@@ -77,6 +78,7 @@ async fn daemon_loop(h: Arc<Hub>, id: NodeId, mut s: WebSocket) {
         .lock()
         .expect("daemon map lock is never held across a panic")
         .insert(id.clone(), tx.clone());
+    h.set_connected(&id, Some(now_ms()));
     loop {
         tokio::select! {
             m = s.recv() => match m {
@@ -106,6 +108,7 @@ async fn daemon_loop(h: Arc<Hub>, id: NodeId, mut s: WebSocket) {
     if daemons.get(&id).is_some_and(|t| t.same_channel(&tx)) {
         daemons.remove(&id);
         drop(daemons);
+        h.set_connected(&id, None);
         let meta = h
             .versions
             .lock()
@@ -181,11 +184,13 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
             if &node.id != id {
                 return Err(ServerError::SpoofedHello);
             }
+            h.record_telemetry(id, node.telemetry.clone(), now_ms());
             h.registry.upsert(node.clone());
             h.ui_send(HubToUi::NodeUpdate(node));
             h.queue_kick.notify_one();
         }
         DaemonToHub::Heartbeat(t) => {
+            h.record_telemetry(id, t.clone(), now_ms());
             h.registry.heartbeat(id, t);
             h.node_update(id);
             h.queue_kick.notify_one();
@@ -225,6 +230,8 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
                 node: id.clone(),
                 info,
             });
+            // Only now: the daemon has identified itself.
+            h.push_config(id)?;
         }
         DaemonToHub::UpdateStatus(status) => {
             h.meta(id, |m| m.update = Some(status.clone()));
@@ -280,6 +287,12 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
         || !send(&mut s, &HubToUi::HubVersion(crate::version_info())).await
         || (h.cfg.release_dir.is_some() && !send(&mut s, &h.release_frame()).await)
     {
+        return;
+    }
+    let config = h.hub_config().unwrap_or_else(|e| HubToUi::Error {
+        message: e.to_string(),
+    });
+    if !send(&mut s, &config).await {
         return;
     }
     let known: Vec<_> = h
@@ -378,19 +391,27 @@ fn reply_blocking(
     tx: &mpsc::UnboundedSender<HubToUi>,
     f: impl FnOnce(&Hub) -> Result<HubToUi, ServerError> + Send + 'static,
 ) {
+    let out = tx.clone();
+    run_blocking(h, tx, move |h| {
+        let _ = out.send(f(h)?);
+        Ok(())
+    });
+}
+
+/// `reply_blocking` for work that replies by broadcast: only an error goes to the requester.
+fn run_blocking(
+    h: &Arc<Hub>,
+    tx: &mpsc::UnboundedSender<HubToUi>,
+    f: impl FnOnce(&Hub) -> Result<(), ServerError> + Send + 'static,
+) {
     let (h, tx) = (h.clone(), tx.clone());
     tokio::spawn(async move {
-        let r = tokio::task::spawn_blocking(move || f(&h)).await;
-        let out = match r {
-            Ok(Ok(m)) => m,
-            Ok(Err(e)) => HubToUi::Error {
-                message: e.to_string(),
-            },
-            Err(_) => HubToUi::Error {
-                message: "internal error".into(),
-            },
+        let message = match tokio::task::spawn_blocking(move || f(&h)).await {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => "internal error".into(),
         };
-        let _ = tx.send(out);
+        let _ = tx.send(HubToUi::Error { message });
     });
 }
 
@@ -408,12 +429,37 @@ fn on_ui(
 ) -> Result<(), ServerError> {
     let now = now_ms();
     match m {
-        // TODO(0.1.7): hub profiles, node settings, node stats.
-        UiToHub::SaveProfile { .. }
-        | UiToHub::DeleteProfile { .. }
-        | UiToHub::SaveNodeSettings { .. }
-        | UiToHub::NodeStats { .. } => {
-            return Err(ServerError::BadArgs("not implemented yet".into()));
+        UiToHub::SaveProfile { node, profile } => {
+            check_profile(&profile)?;
+            run_blocking(h, tx, move |h| {
+                if let Some(n) = &node {
+                    h.known_node(n)?;
+                }
+                h.config_change(node.as_ref(), |s| {
+                    s.upsert_hub_profile(node.as_ref(), &profile, MAX_HUB_PROFILES)
+                })
+            });
+        }
+        UiToHub::DeleteProfile { node, name } => {
+            check_name(&name)?;
+            run_blocking(h, tx, move |h| {
+                h.config_change(node.as_ref(), |s| {
+                    s.delete_hub_profile(node.as_ref(), &name)
+                })
+            });
+        }
+        UiToHub::SaveNodeSettings { node, settings } => {
+            check_settings(&settings)?;
+            run_blocking(h, tx, move |h| {
+                // Clearing a revoked node's leftovers is allowed.
+                if settings != NodeSettings::default() {
+                    h.known_node(&node)?;
+                }
+                h.config_change(Some(&node), |s| s.save_node_settings(&node, &settings))
+            });
+        }
+        UiToHub::NodeStats { node } => {
+            let _ = tx.send(h.node_stats(node, now));
         }
         UiToHub::Spawn { target, spec } => match h.place(&target, &spec, now, &HashSet::new()) {
             Ok(_) => {}
