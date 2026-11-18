@@ -1,7 +1,7 @@
 import type {
   AgentId, AgentStatus, Blocker, DeviceInfo, DeviceKind, HubToUi, Message, NodeId, NodeInfo,
   OtpOffer, Question, CredentialInfo, RepoInfo, QueuedSpawn, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
-  ProfileInfo, RepoEntry, CleanItem,
+  ProfileInfo, RepoEntry, CleanItem, ScopedProfile, NodeSettings, Telemetry,
 } from '../proto';
 import type { ConnState } from '../net';
 
@@ -53,6 +53,12 @@ export interface State {
   nodeRepos: Record<NodeId, RepoEntry[]>;
   /** The latest clean report per node. */
   lastClean: Record<NodeId, { dryRun: boolean; removed: CleanItem[]; kept: CleanItem[] }>;
+  /** Hub-defined profiles (global and node-scoped), replaced by every `hub_config`. */
+  hubProfiles: ScopedProfile[];
+  /** Hub-stored settings per node, replaced by every `hub_config`. */
+  nodeSettings: Record<NodeId, NodeSettings>;
+  /** Telemetry history of the node whose screen is open (oldest first, capped); null when none is. */
+  stats: { node: NodeId; connectedMs: number | null; samples: Telemetry[] } | null;
 }
 
 export type Event =
@@ -79,6 +85,31 @@ export interface SpawnForm {
   repo?: { credential: string; repo: string; branch: string; allowPush: boolean; fresh?: boolean };
 }
 
+/** Raw fields of the hub profile dialog. */
+export interface ProfileForm {
+  name: string;
+  binary: string;
+  /** Whitespace-separated. */
+  args: string;
+  configDir: string;
+  /** `KEY=value` lines (added to / overriding the kept env). */
+  env: string;
+}
+
+export type Tri = 'inherit' | 'on' | 'off';
+
+/** Raw fields of the node settings form; empty / 'inherit' = no hub value (the node decides). */
+export interface SettingsForm {
+  /** One folder per line. */
+  repoRoots: string;
+  indexIntervalMins: string;
+  cleanAuto: Tri;
+  cleanAfterExitHours: string;
+  autoUpdate: Tri;
+  cpuBusyPct: string;
+  gpuBusyPct: string;
+}
+
 export type Intent =
   | { kind: 'select'; agent: AgentId }
   | { kind: 'detach' }
@@ -102,5 +133,11 @@ export type Intent =
   /** `node` omitted = every connected node. */
   | { kind: 'check_update'; node?: NodeId }
   | { kind: 'update_node'; node?: NodeId }
+  /** `keepEnv`: env of the profile being edited that the user kept (values never shown). */
+  | { kind: 'save_profile'; node: NodeId | null; form: ProfileForm; keepEnv?: Record<string, string> }
+  | { kind: 'delete_profile'; node: NodeId | null; name: string }
+  | { kind: 'save_node_settings'; node: NodeId; form: SettingsForm }
+  /** The node screen opened (asks for its history) or closed (`node` null: stop collecting). */
+  | { kind: 'watch_node'; node: NodeId | null }
   | { kind: 'clean_node'; node: NodeId; dryRun: boolean }
   | { kind: 'clean_repo'; node: NodeId; path: string };

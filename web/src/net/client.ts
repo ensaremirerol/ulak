@@ -58,7 +58,7 @@ export const PONG_WITHIN_MS = 10_000;
 
 /** Frames that are idempotent reads: queued while offline and sent once on reconnect. Never keystrokes. */
 export function isQueueable(f: UiToHub): boolean {
-  return f.type === 'list_devices' || f.type === 'mailbox_log' || f.type === 'check_update';
+  return f.type === 'list_devices' || f.type === 'mailbox_log' || f.type === 'check_update' || f.type === 'node_stats';
 }
 
 const realTimers: Timers = {

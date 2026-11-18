@@ -10,6 +10,8 @@ export const MAILBOX_LIMIT = 200;
 /** An error toast disappears this long after the tick that first saw it. */
 export const TOAST_TTL_MS = 8_000;
 const MAX_TOASTS = 4;
+/** Telemetry points kept for the node screen chart (an hour at 5 s). */
+export const STATS_CAP = 720;
 
 export function initialState(now = Date.now()): State {
   return {
@@ -17,6 +19,7 @@ export function initialState(now = Date.now()): State {
     otp: null, terminals: {}, selected: null, toasts: [], nextToastId: 1, now,
     hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
     credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
+    hubProfiles: [], nodeSettings: {}, stats: null,
   };
 }
 
@@ -120,13 +123,21 @@ function setStatus(s: State, agent: string, node: NodeId, status: AgentStatus): 
   return { ...s, nodes, lastFailure, statuses: { ...s.statuses, [agent]: status } };
 }
 
+/** Live telemetry of the watched node joins its history; repeats (same `at_ms`) and offline reports do not. */
+function addSample(st: State['stats'], n: NodeInfo): State['stats'] {
+  if (st?.node !== n.id || n.state === 'Offline') return st;
+  const last = st.samples[st.samples.length - 1];
+  if (last && n.telemetry.at_ms <= last.at_ms) return st;
+  return { ...st, samples: [...st.samples, n.telemetry].slice(-STATS_CAP) };
+}
+
 function reduceHub(s: State, f: HubToUi): State {
   switch (f.type) {
     case 'snapshot':
       return forgetOffline({ ...s, nodes: f.nodes, questions: f.questions });
     case 'node_update': {
       const n = body(f);
-      return forgetOffline({ ...s, nodes: upsert(s.nodes, n, (a, b) => a.id === b.id) });
+      return forgetOffline({ ...s, nodes: upsert(s.nodes, n, (a, b) => a.id === b.id), stats: addSample(s.stats, n) });
     }
     case 'question_opened': {
       const q = body(f);
@@ -195,6 +206,10 @@ function reduceHub(s: State, f: HubToUi): State {
       return { ...s, nodeProfiles: { ...s.nodeProfiles, [f.node]: f.profiles } };
     case 'node_repos':
       return { ...s, nodeRepos: { ...s.nodeRepos, [f.node]: f.repos } };
+    case 'hub_config':
+      return { ...s, hubProfiles: f.profiles, nodeSettings: Object.fromEntries(f.settings.map((e) => [e.node, e.settings])) };
+    case 'node_stats':
+      return s.stats?.node === f.node ? { ...s, stats: { node: f.node, connectedMs: f.connected_ms, samples: f.samples.slice(-STATS_CAP) } } : s;
     case 'clean_report':
       return { ...s, lastClean: { ...s.lastClean, [f.node]: { dryRun: f.dry_run, removed: f.removed, kept: f.kept } } };
     case 'error':

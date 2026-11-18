@@ -6,7 +6,7 @@ import { Segmented } from '../src/ui/Segmented';
 import { ToastHost } from '../src/ui/Toast';
 import { Pill, ProgressBar } from '../src/ui/components';
 import { cursorScrollTop } from '../src/ui/scroll';
-import { parseRoute } from '../src/ui/router';
+import { nodeHref, parseNodeId, parseRoute } from '../src/ui/router';
 
 describe('Dialog', () => {
   const setup = (onClose = vi.fn()) => {
@@ -85,6 +85,16 @@ describe('misc', () => {
     render(<><ProgressBar label="CPU" value={140} /><ProgressBar label="GPU" value={null} /></>);
     expect(screen.getByRole('progressbar', { name: 'CPU' }).getAttribute('aria-valuenow')).toBe('100');
     expect(screen.getByText('n/a')).toBeTruthy();
+  });
+  it('node detail routes keep the nodes tab and decode the id', () => {
+    expect(parseRoute('#/nodes/vps-fra')).toBe('nodes');
+    expect(parseNodeId('#/nodes/vps-fra')).toBe('vps-fra');
+    expect(parseNodeId(nodeHref('a b/c'))).toBe('a b/c');
+    expect(parseNodeId('#/nodes/x%2Fy?tab=1')).toBe('x/y');
+    expect(parseNodeId('#/nodes')).toBeNull();
+    expect(parseNodeId('#/nodes/')).toBeNull();
+    expect(parseNodeId('#/agents/x')).toBeNull();
+    expect(parseNodeId('#/nodes/%E0%A4%A')).toBeNull();
   });
   it('parseRoute falls back to agents', () => {
     expect(parseRoute('#/inbox')).toBe('inbox');

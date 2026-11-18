@@ -171,6 +171,39 @@ export interface ProfileInfo {
   config_dir: string | null;
   installed: boolean;
   login_blocked: boolean;
+  /** From the hub, not the node's agents.json. On the wire only when true. */
+  from_hub?: boolean;
+}
+
+/** A hub-defined profile. Optional fields are absent on the wire when empty. */
+export interface HubProfile {
+  name: string;
+  binary: string;
+  args?: string[];
+  config_dir?: string;
+  env?: Record<string, string>;
+}
+
+/** `node: null` = every node; a node-scoped profile beats a global one of the same name. */
+export interface ScopedProfile {
+  node: NodeId | null;
+  profile: HubProfile;
+}
+
+/** Hub-stored node settings; an absent field = the node's own file or default. */
+export interface NodeSettings {
+  repo_roots?: string[];
+  index_interval_mins?: number;
+  clean_auto?: boolean;
+  clean_after_exit_hours?: number;
+  auto_update?: boolean;
+  cpu_busy_pct?: number;
+  gpu_busy_pct?: number;
+}
+
+export interface NodeSettingsEntry {
+  node: NodeId;
+  settings: NodeSettings;
 }
 
 /** A git checkout on a node. */
@@ -224,6 +257,10 @@ export type UiToHub =
   | { type: 'list_branches'; credential: CredentialId; repo: RepoRef }
   | { type: 'cancel_queued'; id: QueueId }
   | { type: 'list_queue' }
+  | { type: 'save_profile'; node: NodeId | null; profile: HubProfile }
+  | { type: 'delete_profile'; node: NodeId | null; name: string }
+  | { type: 'save_node_settings'; node: NodeId; settings: NodeSettings }
+  | { type: 'node_stats'; node: NodeId }
   | { type: 'clean_node'; node: NodeId; dry_run: boolean }
   | { type: 'clean_repo'; node: NodeId; path: string };
 
@@ -255,6 +292,8 @@ export type HubToUi =
   | { type: 'queue_removed'; id: QueueId }
   | { type: 'node_profiles'; node: NodeId; profiles: ProfileInfo[] }
   | { type: 'node_repos'; node: NodeId; repos: RepoEntry[] }
+  | { type: 'hub_config'; profiles: ScopedProfile[]; settings: NodeSettingsEntry[] }
+  | { type: 'node_stats'; node: NodeId; connected_ms: number | null; samples: Telemetry[] }
   | { type: 'clean_report'; node: NodeId; dry_run: boolean; removed: CleanItem[]; kept: CleanItem[] }
   | { type: 'error'; message: string };
 

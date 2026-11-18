@@ -4,6 +4,7 @@ import { Button, Card } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { day } from '../ui/format';
 import { AddCredential, removeCredential } from './Credentials';
+import { HubProfiles } from './HubProfiles';
 
 export function Settings() {
   const s = store.state.value;
@@ -23,6 +24,10 @@ export function Settings() {
           ))}
         </ul>
         {adding && <AddCredential onCancel={() => setAdding(false)} />}
+      </Card>
+      <Card title="Profiles">
+        <p class="muted small">Agent profiles the hub sends to every node. A node profile with the same name wins on that node; set those on the node's page.</p>
+        <HubProfiles node={null} label="Global profiles" />
       </Card>
     </>
   );
