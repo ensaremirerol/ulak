@@ -1,5 +1,5 @@
-//! Hub release cache: the hub is the only party with a GitHub token. It fetches the latest
-//! release, verifies it with the release key (the same code ulakd runs), keeps the last two
+//! Hub release cache: the hub is the only party with a GitHub token (or ships the release in its
+//! image, see `seed`). It fetches the latest release, verifies it with the release key (the same code ulakd runs), keeps the last two
 //! versions under `<dir>/<version>/` and serves them to nodes over mTLS. Nodes verify again: the
 //! hub is not trusted for integrity.
 use super::hub::{now_ms, Hub, Peer};
@@ -71,8 +71,10 @@ fn safe_name(n: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
+/// Archives served to devices: `ulakd-*` (nodes) and `ulak-*` (the app); never the hub's own.
 fn is_tarball(n: &str) -> bool {
-    n.starts_with("ulakd-") && n.ends_with(".tar.gz")
+    (n.starts_with("ulakd-") || (n.starts_with("ulak-") && !n.starts_with("ulak-remote-")))
+        && n.ends_with(".tar.gz")
 }
 
 /// Verifies every `ulakd-*.tar.gz` of an in-memory release; `files` are (name, bytes).
@@ -92,7 +94,7 @@ fn verify_all(key: &VerifyingKey, files: &[(String, Vec<u8>)]) -> Result<(), Str
         any = true;
     }
     any.then_some(())
-        .ok_or_else(|| "release has no ulakd archive".into())
+        .ok_or_else(|| "release has no ulakd or ulak archive".into())
 }
 
 /// Reads and verifies `<dir>/<version>`; `None` if anything is off.
@@ -438,4 +440,25 @@ pub(crate) async fn asset(
         body,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn serves_node_and_app_archives_only() {
+        for n in [
+            "ulakd-aarch64-unknown-linux-gnu.tar.gz",
+            "ulak-x86_64-pc-windows-msvc.tar.gz",
+            "ulak-aarch64-apple-darwin.tar.gz",
+        ] {
+            assert!(super::is_tarball(n), "{n}");
+        }
+        for n in [
+            "ulak-remote-x86_64-unknown-linux-gnu.tar.gz",
+            "ulak-x86_64-pc-windows-msvc.zip",
+            "SHA256SUMS",
+        ] {
+            assert!(!super::is_tarball(n), "{n}");
+        }
+    }
 }

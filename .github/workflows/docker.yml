@@ -21,7 +21,7 @@ jobs:
             file: Dockerfile.ulakd
     steps:
       - uses: actions/checkout@v4
-      # The hub serves these to nodes (ULAK_BUNDLED_RELEASES); the hub re-verifies them at start.
+      # The hub serves these (node + app archives) to devices (ULAK_BUNDLED_RELEASES); the hub re-verifies them at start.
       - name: Bundle the signed node release (tags only)
         if: github.ref_type == 'tag'
         env:
@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           d="bundle/${TAG#v}"
-          gh release download "$TAG" -D "$d" -p 'ulakd-*' -p 'SHA256SUMS*'
+          gh release download "$TAG" -D "$d" -p 'ulakd-*' -p 'ulak-x86_64-*' -p 'ulak-aarch64-*' -p 'SHA256SUMS*'
           gh release view "$TAG" --json publishedAt --jq '{published_at: .publishedAt}' > "$d/meta.json"
           ls -l "$d"
       - uses: docker/setup-qemu-action@v3

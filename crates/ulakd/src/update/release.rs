@@ -75,15 +75,29 @@ pub fn is_newer(cur: SemVer, rel: &Release) -> bool {
     rel.version > cur
 }
 
-/// `x86_64-unknown-linux-gnu` from the build's arch/os (Linux only).
+/// Release target triple from the build's arch/os: `x86_64-unknown-linux-gnu`,
+/// `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`.
 pub fn target(info: &VersionInfo) -> Result<String, UpdateError> {
-    if info.os() != "linux" {
-        return Err(UpdateError::Release(format!(
-            "self-update is not supported on {}",
-            info.os()
-        )));
+    let vendor_os = match info.os() {
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        "macos" => "apple-darwin",
+        os => {
+            return Err(UpdateError::Release(format!(
+                "self-update is not supported on {os}"
+            )))
+        }
+    };
+    Ok(format!("{}-{vendor_os}", info.arch()))
+}
+
+/// The binary inside `<product>-<target>.tar.gz`: `ulak.exe` on Windows, else the product name.
+pub fn binary_name(product: &str, target: &str) -> String {
+    if target.contains("windows") {
+        format!("{product}.exe")
+    } else {
+        product.to_owned()
     }
-    Ok(format!("{}-unknown-linux-gnu", info.arch()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,14 +109,19 @@ pub struct Picked<'a> {
     pub sums_sig: &'a Asset,
 }
 
-pub fn select<'a>(rel: &'a Release, target: &str) -> Result<Picked<'a>, UpdateError> {
+/// `product` is `ulakd` or `ulak`: the archive is `<product>-<target>.tar.gz`.
+pub fn select<'a>(
+    rel: &'a Release,
+    product: &str,
+    target: &str,
+) -> Result<Picked<'a>, UpdateError> {
     let find = |name: &str| {
         rel.assets
             .iter()
             .find(|a| a.name == name)
             .ok_or_else(|| UpdateError::NoAsset(name.to_owned()))
     };
-    let tarball_name = format!("ulakd-{target}.tar.gz");
+    let tarball_name = format!("{product}-{target}.tar.gz");
     Ok(Picked {
         tarball: find(&tarball_name)?,
         tarball_sig: find(&format!("{tarball_name}.sig"))?,
@@ -174,23 +193,28 @@ mod tests {
         let assets = names.iter().map(|n| a(n)).collect::<Vec<_>>().join(",");
         let json = format!(r#"{{"tag_name":"v1.0.0","assets":[{assets}]}}"#);
         let r = parse_release(&json).unwrap().unwrap();
-        let p = select(&r, "x86_64-unknown-linux-gnu").unwrap();
+        let p = select(&r, "ulakd", "x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(p.tarball.name, "ulakd-x86_64-unknown-linux-gnu.tar.gz");
         assert_eq!(p.sums_sig.name, "SHA256SUMS.sig");
         assert!(matches!(
-            select(&r, "aarch64-unknown-linux-gnu"),
+            select(&r, "ulakd", "aarch64-unknown-linux-gnu"),
             Err(UpdateError::NoAsset(n)) if n == "ulakd-aarch64-unknown-linux-gnu.tar.gz"
         ));
         let mut missing = r.clone();
         missing.assets.retain(|a| a.name != "SHA256SUMS.sig");
-        assert!(select(&missing, "x86_64-unknown-linux-gnu").is_err());
+        assert!(select(&missing, "ulakd", "x86_64-unknown-linux-gnu").is_err());
     }
 
     #[test]
-    fn target_is_linux_only() {
-        let l = VersionInfo::new("1.0.0", "g", 1, "linux", "x86_64").unwrap();
-        assert_eq!(target(&l).unwrap(), "x86_64-unknown-linux-gnu");
-        let m = VersionInfo::new("1.0.0", "g", 1, "macos", "aarch64").unwrap();
-        assert!(target(&m).is_err());
+    fn targets_and_binary_names() {
+        let t =
+            |os: &str, arch: &str| target(&VersionInfo::new("1.0.0", "g", 1, os, arch).unwrap());
+        assert_eq!(t("linux", "x86_64").unwrap(), "x86_64-unknown-linux-gnu");
+        assert_eq!(t("linux", "aarch64").unwrap(), "aarch64-unknown-linux-gnu");
+        assert_eq!(t("macos", "aarch64").unwrap(), "aarch64-apple-darwin");
+        assert_eq!(t("windows", "x86_64").unwrap(), "x86_64-pc-windows-msvc");
+        assert!(t("freebsd", "x86_64").is_err());
+        assert_eq!(binary_name("ulak", "x86_64-pc-windows-msvc"), "ulak.exe");
+        assert_eq!(binary_name("ulakd", "aarch64-unknown-linux-gnu"), "ulakd");
     }
 }

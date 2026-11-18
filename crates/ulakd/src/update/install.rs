@@ -1,7 +1,10 @@
 //! Atomic replacement of the running binary, the previous copy, and the rollback marker.
+//! Names follow the executable: `ulakd` → `ulakd.new`/`ulakd.prev`, `ulak.exe` → `ulak.new`/`ulak.prev`.
 //!
-//! Flow: `install` writes `ulakd.new`, copies the current binary to `ulakd.prev`, writes the
-//! marker `update-pending.json` (config dir) and renames the new file over the executable.
+//! Flow: `install` writes `<stem>.new`, copies the current binary to `<stem>.prev`, writes the
+//! marker (`update-pending.json` for ulakd, `<stem>-update-pending.json` otherwise, in the config
+//! dir) and renames the new file over the executable. Windows cannot rename over a running
+//! `.exe`, so there the running file is first moved aside to `<stem>.old`.
 //! First start afterwards (`startup`): marker gets `started_ms` (probation). If the process lives
 //! 30 s, `confirm` deletes the marker. If it dies sooner, the next start sees a marker with
 //! `started_ms` set, restores `ulakd.prev`, and records the bad version in `update-skip` so the
@@ -38,8 +41,47 @@ impl ModeExec for std::fs::OpenOptions {
 pub const CONFIRM_AFTER_SECS: u64 = 30;
 /// A marker whose first run is older than this is stale (reboot, long outage): do not roll back.
 const STALE_MS: u64 = 300_000;
-const MARKER: &str = "update-pending.json";
-const SKIP: &str = "update-skip";
+
+fn stem(exe: &Path) -> String {
+    exe.file_stem()
+        .map_or_else(|| "ulakd".into(), |s| s.to_string_lossy().into_owned())
+}
+
+fn sibling(exe: &Path, ext: &str) -> PathBuf {
+    exe.with_file_name(format!("{}.{ext}", stem(exe)))
+}
+
+/// ulakd keeps the original names so a marker written by an older ulakd is still honoured.
+fn marker(exe: &Path) -> String {
+    match stem(exe).as_str() {
+        "ulakd" => "update-pending.json".into(),
+        s => format!("{s}-update-pending.json"),
+    }
+}
+
+fn skip_file(exe: &Path) -> String {
+    match stem(exe).as_str() {
+        "ulakd" => "update-skip".into(),
+        s => format!("{s}-update-skip"),
+    }
+}
+
+/// Puts `src` at `exe`. Unix: one atomic rename. Windows: the running image can be renamed but not
+/// replaced, so it moves to `<stem>.old` first (deleted on the next install).
+fn swap_in(src: &Path, exe: &Path) -> std::io::Result<()> {
+    if cfg!(windows) {
+        let old = sibling(exe, "old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(exe, &old)?;
+        if let Err(e) = std::fs::rename(src, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(e);
+        }
+        Ok(())
+    } else {
+        std::fs::rename(src, exe)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Marker {
@@ -60,7 +102,7 @@ pub enum Startup {
 }
 
 pub fn prev_path(exe: &Path) -> PathBuf {
-    exe.with_file_name("ulakd.prev")
+    sibling(exe, "prev")
 }
 
 /// Replaces `exe` with `new_bin`. On any error before the final rename the old binary is untouched.
@@ -74,7 +116,7 @@ pub fn install(
     let dir = exe
         .parent()
         .ok_or_else(|| UpdateError::NotWritable(exe.display().to_string()))?;
-    let tmp = dir.join("ulakd.new");
+    let tmp = sibling(exe, "new");
     let _ = std::fs::remove_file(&tmp);
     let not_writable = |e: std::io::Error| match e.kind() {
         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
@@ -101,20 +143,20 @@ pub fn install(
             to: to.into(),
             started_ms: None,
         };
-        std::fs::write(conf_dir.join(MARKER), serde_json::to_string(&m)?)?;
-        std::fs::rename(&tmp, exe)?;
+        std::fs::write(conf_dir.join(marker(exe)), serde_json::to_string(&m)?)?;
+        swap_in(&tmp, exe)?;
         Ok(())
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        let _ = std::fs::remove_file(conf_dir.join(MARKER));
+        let _ = std::fs::remove_file(conf_dir.join(marker(exe)));
     }
     res
 }
 
 /// Call once at `ulakd run` start.
 pub fn startup(conf_dir: &Path, exe: &Path, now_ms: u64) -> Result<Startup, UpdateError> {
-    let path = conf_dir.join(MARKER);
+    let path = conf_dir.join(marker(exe));
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Startup::Normal),
@@ -137,12 +179,12 @@ pub fn startup(conf_dir: &Path, exe: &Path, now_ms: u64) -> Result<Startup, Upda
         Some(_) => {
             let prev = prev_path(exe);
             if prev.exists() {
-                let tmp = exe.with_file_name("ulakd.restore");
+                let tmp = sibling(exe, "restore");
                 std::fs::copy(&prev, &tmp)?;
                 make_exec(&tmp)?;
-                std::fs::rename(&tmp, exe)?;
+                swap_in(&tmp, exe)?;
             }
-            std::fs::write(conf_dir.join(SKIP), &m.to)?;
+            std::fs::write(conf_dir.join(skip_file(exe)), &m.to)?;
             std::fs::remove_file(&path)?;
             Ok(Startup::RolledBack { bad: m.to })
         }
@@ -150,13 +192,13 @@ pub fn startup(conf_dir: &Path, exe: &Path, now_ms: u64) -> Result<Startup, Upda
 }
 
 /// The new binary has proven itself.
-pub fn confirm(conf_dir: &Path) {
-    let _ = std::fs::remove_file(conf_dir.join(MARKER));
+pub fn confirm(conf_dir: &Path, exe: &Path) {
+    let _ = std::fs::remove_file(conf_dir.join(marker(exe)));
 }
 
 /// A version that was rolled back; the auto path must not fetch it again.
-pub fn skipped(conf_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(conf_dir.join(SKIP))
+pub fn skipped(conf_dir: &Path, exe: &Path) -> Option<String> {
+    std::fs::read_to_string(conf_dir.join(skip_file(exe)))
         .ok()
         .map(|s| s.trim().to_owned())
 }
@@ -187,7 +229,7 @@ mod tests {
             0o755
         );
         assert!(!exe.with_file_name("ulakd.new").exists());
-        assert!(conf.join(MARKER).exists());
+        assert!(conf.join(marker(&exe)).exists());
     }
 
     #[test]
@@ -202,7 +244,7 @@ mod tests {
         }
         assert!(matches!(r, Err(UpdateError::NotWritable(_))), "{r:?}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"OLD");
-        assert!(!conf.join(MARKER).exists());
+        assert!(!conf.join(marker(&exe)).exists());
     }
 
     fn unsafe_is_root() -> bool {
@@ -223,10 +265,10 @@ mod tests {
         let (_d, exe, conf) = setup();
         install(&exe, b"NEW", &conf, "0.1.0", "0.2.0").unwrap();
         assert_eq!(startup(&conf, &exe, 1_000).unwrap(), Startup::Probation);
-        confirm(&conf); // lived 30 s
+        confirm(&conf, &exe); // lived 30 s
         assert_eq!(startup(&conf, &exe, 40_000).unwrap(), Startup::Normal);
         assert_eq!(std::fs::read(&exe).unwrap(), b"NEW");
-        assert_eq!(skipped(&conf), None);
+        assert_eq!(skipped(&conf, &exe), None);
     }
 
     #[test]
@@ -246,7 +288,7 @@ mod tests {
             std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
             0o755
         );
-        assert_eq!(skipped(&conf).as_deref(), Some("0.2.0"));
+        assert_eq!(skipped(&conf, &exe).as_deref(), Some("0.2.0"));
         assert_eq!(startup(&conf, &exe, 5_000).unwrap(), Startup::Normal);
     }
 
@@ -263,11 +305,31 @@ mod tests {
     }
 
     #[test]
+    fn app_names_do_not_collide_with_ulakd() {
+        let (d, exe, conf) = setup();
+        let app = exe.with_file_name("ulak.exe");
+        std::fs::write(&app, "OLDAPP").unwrap();
+        install(&app, b"NEWAPP", &conf, "0.1.0", "0.2.0").unwrap();
+        assert_eq!(std::fs::read(&app).unwrap(), b"NEWAPP");
+        assert_eq!(std::fs::read(prev_path(&app)).unwrap(), b"OLDAPP");
+        assert!(prev_path(&app).ends_with("ulak.prev"));
+        assert!(conf.join("ulak-update-pending.json").exists());
+        assert_eq!(
+            startup(&conf, &exe, 1).unwrap(),
+            Startup::Normal,
+            "ulakd unaffected"
+        );
+        assert_eq!(startup(&conf, &app, 1).unwrap(), Startup::Probation);
+        assert_eq!(std::fs::read(&exe).unwrap(), b"OLD");
+        drop(d);
+    }
+
+    #[test]
     fn garbage_marker_is_ignored() {
         let (_d, exe, conf) = setup();
         std::fs::create_dir_all(&conf).unwrap();
-        std::fs::write(conf.join(MARKER), "{{").unwrap();
+        std::fs::write(conf.join(marker(&exe)), "{{").unwrap();
         assert_eq!(startup(&conf, &exe, 1).unwrap(), Startup::Normal);
-        assert!(!conf.join(MARKER).exists());
+        assert!(!conf.join(marker(&exe)).exists());
     }
 }

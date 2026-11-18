@@ -92,19 +92,15 @@ jobs:
         env:
           GIT_SHA: ${{ github.sha }}
         run: cargo build --release --locked -p ulak --target "${{ matrix.target }}"
-      - name: Package (zip on Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory dist | Out-Null
-          Compress-Archive -Path "target/${{ matrix.target }}/release/ulak.exe" -DestinationPath "dist/ulak-${{ matrix.target }}.zip"
-      - name: Package (tar.gz on macOS)
-        if: runner.os == 'macOS'
+      # tar.gz everywhere (Windows 10+ opens it natively): the app self-updates from this archive.
+      - name: Package
         shell: bash
         run: |
           set -euo pipefail
           mkdir dist
-          tar -C "target/${{ matrix.target }}/release" -czf "dist/ulak-${{ matrix.target }}.tar.gz" ulak
+          bin=ulak; [ "${{ runner.os }}" = Windows ] && bin=ulak.exe
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/ulak-${{ matrix.target }}.tar.gz" "$bin"
+          tar -tzvf "dist/ulak-${{ matrix.target }}.tar.gz"
       - uses: actions/upload-artifact@v4.6.2
         with:
           name: dist-${{ matrix.target }}
@@ -125,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          sha256sum -- *.tar.gz > SHA256SUMS
           cat SHA256SUMS
       - name: Sign (ed25519, detached raw signatures)
         env:
@@ -151,7 +147,7 @@ jobs:
             [ "$DRY_RUN" = true ] || exit 1
           fi
           cd dist
-          for f in ./*.tar.gz ./*.zip SHA256SUMS; do
+          for f in ./*.tar.gz SHA256SUMS; do
             openssl pkeyutl -sign -rawin -inkey "$key" -in "$f" -out "$f.sig"
             openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/pub.pem" -in "$f" -sigfile "$f.sig"
           done

@@ -141,6 +141,11 @@ pub struct App {
     pub update_armed: Option<Option<NodeId>>,
     /// Browser sign-in screen state (`web_login`); never visible in the native app.
     pub login: crate::web_login::Login,
+    /// This app's own updater (native only; `None` until an identity is found).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub self_update: Option<crate::selfupdate::SelfUpdate>,
+    /// "Update app" clicked once; the second click installs and restarts the app.
+    pub app_update_armed: bool,
 }
 
 impl App {
@@ -326,6 +331,9 @@ pub fn setup(app: &mut App, wake: Waker) {
             return;
         }
     };
+    app.self_update = crate::selfupdate::SelfUpdate::start(&dir)
+        .map_err(|e| eprintln!("ulak: self-update disabled: {e}"))
+        .ok();
     // The fallback dir is ulakd's: never renew into it (ulakd renews its own).
     let renew_dir = (src == IdentitySource::Own).then(|| dir.clone());
     match Identity::load(&dir)
@@ -346,7 +354,11 @@ pub fn setup(app: &mut App, wake: Waker) {
 pub fn poll(app: &mut App, t: f64, _tx: &mut Tx) -> bool {
     let pumped = app.pump();
     let login = app.login.drain();
-    app.tick(t) || pumped || login
+    #[cfg(not(target_arch = "wasm32"))]
+    let upd = app.self_update.as_mut().is_some_and(|u| u.changed());
+    #[cfg(target_arch = "wasm32")]
+    let upd = false;
+    app.tick(t) || pumped || login || upd
 }
 
 #[cfg(test)]

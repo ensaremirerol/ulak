@@ -64,6 +64,8 @@ pub struct Updater {
     info: VersionInfo,
     exe: PathBuf,
     dir: PathBuf,
+    /// Release archive prefix: `ulakd` (default) or `ulak` (the app).
+    product: &'static str,
     key: Option<VerifyingKey>,
     pub http: Arc<Http>,
     state: watch::Sender<Option<UpdateState>>,
@@ -94,6 +96,7 @@ impl Updater {
             info,
             exe,
             dir,
+            product: "ulakd",
             key: key.ok(),
             http: Arc::new(Http::new()),
             state: watch::channel(None).0,
@@ -102,6 +105,12 @@ impl Updater {
             restart_delay: Duration::from_secs(1),
             initial_delay: Duration::from_secs(10),
         }
+    }
+
+    /// Update another product from the same release (the `ulak` app uses `"ulak"`).
+    pub fn with_product(mut self, product: &'static str) -> Self {
+        self.product = product;
+        self
     }
 
     pub fn info(&self) -> &VersionInfo {
@@ -192,7 +201,8 @@ impl Updater {
 
     async fn download_verify_install(&self, rel: &Release) -> Result<(), UpdateError> {
         let key = self.key.as_ref().ok_or(UpdateError::NoKey)?;
-        let picked = release::select(rel, &release::target(&self.info)?)?;
+        let target = release::target(&self.info)?;
+        let picked = release::select(rel, self.product, &target)?;
         self.set(UpdateState::Downloading);
         let tarball = self.asset(picked.tarball, MAX_DOWNLOAD).await?;
         let tarball_sig = self.asset(picked.tarball_sig, MAX_SMALL).await?;
@@ -207,7 +217,7 @@ impl Updater {
             &sums,
             &sums_sig,
         )?;
-        let bin = verify::extract_binary(&tarball)?;
+        let bin = verify::extract_binary(&tarball, &release::binary_name(self.product, &target))?;
         self.set(UpdateState::Installing);
         let (exe, dir) = (self.exe.clone(), self.dir.clone());
         let (from, to) = (
@@ -236,7 +246,9 @@ impl Updater {
         self.set(UpdateState::Available {
             version: version.clone(),
         });
-        if !install || (honor_skip && install::skipped(&self.dir).as_deref() == Some(&version)) {
+        if !install
+            || (honor_skip && install::skipped(&self.dir, &self.exe).as_deref() == Some(&version))
+        {
             return Ok(Outcome::Available(version));
         }
         self.download_verify_install(&rel).await?;

@@ -55,6 +55,9 @@ fn main() {
         }
         return;
     }
+    if let Ok((dir, _)) = ulak::net::pick_identity(&config_dir(), &ulakd::config::default_dir()) {
+        ulak::selfupdate::on_start(&dir);
+    }
     rune::run(AppSpec::<App> {
         scenes: &[
             ("mux", scenes::mux),

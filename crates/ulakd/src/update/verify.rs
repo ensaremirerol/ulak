@@ -52,9 +52,10 @@ pub fn verify_release(
     }
 }
 
-/// The contents of the single regular file `ulakd` in the tarball. Any other entry (a second
-/// file, directory, symlink, hard link, `..` or absolute path, other name) rejects the archive.
-pub fn extract_binary(tar_gz: &[u8]) -> Result<Vec<u8>, UpdateError> {
+/// The contents of the single regular file `name` (e.g. `ulakd`, `ulak.exe`) in the tarball. Any
+/// other entry (a second file, directory, symlink, hard link, `..` or absolute path, other name)
+/// rejects the archive.
+pub fn extract_binary(tar_gz: &[u8], name: &str) -> Result<Vec<u8>, UpdateError> {
     let bad = |m: &str| UpdateError::Archive(m.to_owned());
     let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(tar_gz));
     let mut out = None;
@@ -64,7 +65,7 @@ pub fn extract_binary(tar_gz: &[u8]) -> Result<Vec<u8>, UpdateError> {
         if !e.header().entry_type().is_file() {
             return Err(bad("entry is not a regular file"));
         }
-        if path != std::path::Path::new("ulakd") || out.is_some() {
+        if path != std::path::Path::new(name) || out.is_some() {
             return Err(bad(&format!("unexpected entry {}", path.display())));
         }
         let mut buf = Vec::new();
@@ -78,7 +79,7 @@ pub fn extract_binary(tar_gz: &[u8]) -> Result<Vec<u8>, UpdateError> {
         out = Some(buf);
     }
     out.filter(|b| !b.is_empty())
-        .ok_or_else(|| bad("no ulakd file in the archive"))
+        .ok_or_else(|| bad(&format!("no {name} file in the archive")))
 }
 
 #[cfg(test)]
@@ -178,7 +179,7 @@ mod tests {
     #[test]
     fn extracts_only_the_single_expected_file() {
         assert_eq!(
-            extract_binary(&tarball(&[("ulakd", b"BIN")])).unwrap(),
+            extract_binary(&tarball(&[("ulakd", b"BIN")]), "ulakd").unwrap(),
             b"BIN"
         );
         for bad in [
@@ -190,7 +191,10 @@ mod tests {
             tarball(&[]),
             b"not gzip".to_vec(),
         ] {
-            assert!(matches!(extract_binary(&bad), Err(UpdateError::Archive(_))));
+            assert!(matches!(
+                extract_binary(&bad, "ulakd"),
+                Err(UpdateError::Archive(_))
+            ));
         }
     }
 
@@ -220,7 +224,10 @@ mod tests {
             raw(b"ulakd", b'1', b"/etc/passwd"), // hard link
             raw(b"ulakd", b'5', b""),            // directory
         ] {
-            assert!(matches!(extract_binary(&t), Err(UpdateError::Archive(_))));
+            assert!(matches!(
+                extract_binary(&t, "ulakd"),
+                Err(UpdateError::Archive(_))
+            ));
         }
     }
 }

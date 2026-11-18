@@ -142,10 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(RESTART_EXIT);
                 }
                 Ok(install::Startup::Probation) => {
-                    let d = dir.clone();
+                    let (d, exe2) = (dir.clone(), exe.clone());
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(install::CONFIRM_AFTER_SECS)).await;
-                        install::confirm(&d);
+                        install::confirm(&d, &exe2);
                     });
                 }
                 Ok(install::Startup::Normal) => {}

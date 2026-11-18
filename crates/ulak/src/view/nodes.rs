@@ -187,8 +187,92 @@ fn all_button(s: &App, k: &Kit) -> El {
     r
 }
 
+/// "This app": its version and self-update (native only).
+#[cfg(not(target_arch = "wasm32"))]
+fn app_row(s: &App, k: &Kit) -> Option<El> {
+    let u = s.self_update.as_ref()?;
+    let st = u.state();
+    let status = match &st {
+        Some(st) => pill(k, status_label(st), colors(k, st)).key("app-status"),
+        None => text("-").font(k.ty.small).color(k.c.text_faint),
+    };
+    let armed = s.app_update_armed;
+    let mut top = row()
+        .gap(12.0)
+        .center_y()
+        .w_full()
+        .child(cell(k, 130.0, "This app".into()))
+        .child(cell(k, 190.0, u.version()))
+        .child(row().grow(1.0).child(status))
+        .child(
+            Button::new("Check")
+                .variant(ButtonVariant::Outline)
+                .on_press(|s: &mut App| {
+                    if let Some(u) = &s.self_update {
+                        u.check();
+                    }
+                })
+                .build(k)
+                .key("app-check"),
+        )
+        .child(
+            Button::new(if armed {
+                "Click again: update and restart"
+            } else {
+                "Update app"
+            })
+            .variant(ButtonVariant::Danger)
+            .disabled(st.as_ref().and_then(available).is_none())
+            .on_press(|s: &mut App| {
+                if s.app_update_armed {
+                    s.app_update_armed = false;
+                    if let Some(u) = &s.self_update {
+                        u.apply();
+                    }
+                } else {
+                    s.app_update_armed = true;
+                }
+            })
+            .build(k)
+            .key("app-update"),
+        );
+    if armed {
+        top = top.child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut App| s.app_update_armed = false)
+                .build(k)
+                .key("app-update-cancel"),
+        );
+    }
+    let mut c = col()
+        .key("app-row")
+        .gap(4.0)
+        .px(10.0)
+        .py(6.0)
+        .w_full()
+        .radius(6.0)
+        .fill(k.c.layer_01)
+        .child(top);
+    if let Some(UpdateState::Failed { message }) = st {
+        c = c.child(
+            text(message)
+                .key("app-fail")
+                .wrap()
+                .font(k.ty.mono)
+                .color(k.c.danger.fg),
+        );
+    }
+    Some(c)
+}
+
 pub fn view(s: &App, k: &Kit) -> El {
-    let mut c = col().key("nodes").gap(8.0).w_full().child(
+    let mut c = col().key("nodes").gap(8.0).w_full();
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = app_row(s, k) {
+        c = c.child(r);
+    }
+    c = c.child(
         row()
             .gap(12.0)
             .center_y()
