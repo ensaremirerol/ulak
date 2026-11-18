@@ -1,3 +1,5 @@
+# Push to main: Linux tests + web, on `vars.LINUX_RUNNER` (see release.yml). The Windows/macOS
+# checks (2x/10x billed minutes) run only by hand.
 name: ci
 on:
   push:
@@ -9,38 +11,46 @@ env:
   CARGO_TERM_COLOR: always
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
+    container: ubuntu:22.04
     steps:
-      - uses: actions/checkout@v4
+      # Root inside the container: packages install without sudo, on hosted and self-hosted runners.
+      - name: Base packages
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates git jq build-essential pkg-config perl cmake procps tmux libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev
+      - uses: actions/checkout@v4.2.2
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y tmux libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (the PNG snapshot test needs a GPU, which the runner lacks)
         run: cargo test --workspace -- --skip snap_writes_a_png_per_scene
+      # Files written as root in the container would block the next checkout on a self-hosted runner.
+      - name: Hand the workspace back to the runner user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$RUNNER_TEMP")" "$GITHUB_WORKSPACE" || true
   web:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
+    container: node:22-bookworm
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Hand the workspace back to the runner user
+        if: always()
+        working-directory: .
+        run: chown -R "$(stat -c %u:%g "$RUNNER_TEMP")" "$GITHUB_WORKSPACE" || true
   # Portability guard for the native UI: compile + lib tests only (no GPU snapshot/e2e tests).
   ui-portability:
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:

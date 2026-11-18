@@ -1,4 +1,8 @@
 # Release pipeline.
+# Linux jobs run on `vars.LINUX_RUNNER` (JSON, e.g. '["self-hosted","linux","x64"]'; default
+# ubuntu-latest) inside an ubuntu:22.04 container (glibc 2.35 floor, no sudo needed). Set
+# `vars.DESKTOP_UI` to `off` to skip the Windows/macOS app builds (the release is then published
+# without those archives).
 # Build jobs only compile and upload artifacts; ONE job (sign) holds the secret, writes SHA256SUMS and signs everything.
 # Needs the repo secret ULAK_RELEASE_SIGNING_KEY (see scripts/gen-release-key.sh) and a real
 # crates/ulakd/release-key.pub committed. Docker images for the tag are built by the last job (docker.yml as a reusable workflow).
@@ -21,15 +25,18 @@ jobs:
   # Oldest supported runner on purpose: the binaries need the build host's glibc (22.04 = 2.35, so
   # Debian 12, Raspberry Pi OS bookworm and Ubuntu 22.04+ run them; ubuntu-latest needed 2.39).
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
+    container: ubuntu:22.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
+      # Root inside the container: packages install without sudo, on hosted and self-hosted runners.
+      - name: Base packages
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates git jq build-essential pkg-config perl cmake libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - uses: actions/checkout@v4.2.2
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2.7.8
-      - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: arm64 target (ulakd only, cross-compiled)
         run: rustup target add aarch64-unknown-linux-gnu
       - name: Tag must equal the workspace version
@@ -75,10 +82,18 @@ jobs:
           name: dist-linux
           path: dist/*
           if-no-files-found: error
+      - name: Free disk (release builds are large)
+        if: always()
+        run: rm -rf target dist
+      # Files written as root in the container would block the next checkout on a self-hosted runner.
+      - name: Hand the workspace back to the runner user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$RUNNER_TEMP")" "$GITHUB_WORKSPACE" || true
   # Native UI for Windows and macOS. The hub and daemon stay Linux-only (tmux, /proc, Docker).
   # Intel macOS is cross-compiled on the Apple Silicon runner: no dependency on a (retiring) Intel runner label.
   # No tests here (no GPU); ci.yml runs `cargo check` and the lib tests on both OSes.
   build-ui:
+    if: vars.DESKTOP_UI != 'off'
     strategy:
       fail-fast: false
       matrix:
@@ -117,9 +132,15 @@ jobs:
   # The only job that sees the signing secret.
   sign:
     needs: [build, build-ui]
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.build-ui.result == 'success' || needs.build-ui.result == 'skipped') }}
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
+    container: ubuntu:22.04
     steps:
+      # Root inside the container: packages install without sudo, on hosted and self-hosted runners.
+      - name: Base packages
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates git jq build-essential pkg-config perl cmake openssl xxd
       - uses: actions/checkout@v4.2.2
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/download-artifact@v4.3.0
         with:
           pattern: dist-*
@@ -166,10 +187,18 @@ jobs:
           name: release-dist
           path: dist/*
           if-no-files-found: error
+      - name: Clean up
+        if: always()
+        run: rm -rf dist
+      # Files written as root in the container would block the next checkout on a self-hosted runner.
+      - name: Hand the workspace back to the runner user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$RUNNER_TEMP")" "$GITHUB_WORKSPACE" || true
   publish:
     needs: sign
-    if: github.event_name == 'push' || !inputs.dry_run
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.sign.result == 'success' && (github.event_name == 'push' || !inputs.dry_run) }}
+    # Host, not a container: needs the gh CLI (preinstalled on hosted runners; install it on a self-hosted one).
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
     permissions:
       contents: write
     steps:
@@ -190,6 +219,7 @@ jobs:
   # Images for the tag are built only after the release exists: the hub image bundles its signed node archives.
   docker:
     needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     permissions:
       contents: read
       packages: write

@@ -1,8 +1,7 @@
 name: docker
 # Tags are built from release.yml (workflow_call) once the signed release is published.
+# Branch images only by hand (minutes); release.yml builds the tagged ones.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
   workflow_call:
 permissions:
@@ -10,7 +9,7 @@ permissions:
   packages: write
 jobs:
   image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
     strategy:
       fail-fast: false
       matrix:
