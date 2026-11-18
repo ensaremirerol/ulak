@@ -9,6 +9,10 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
+  # A full debug test build with debug info is ~14 GB; without it a few GB (self-hosted disk).
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 jobs:
   build:
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '"ubuntu-latest"') }}
@@ -27,6 +31,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (the PNG snapshot test needs a GPU, which the runner lacks)
         run: cargo test --workspace -- --skip snap_writes_a_png_per_scene
+      - name: Free disk
+        if: always()
+        run: rm -rf target
       # Files written as root in the container would block the next checkout on a self-hosted runner.
       - name: Hand the workspace back to the runner user
         if: always()
