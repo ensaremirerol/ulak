@@ -20,6 +20,7 @@ export function initialState(now = Date.now()): State {
     hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
     credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
     hubProfiles: [], nodeSettings: {}, stats: null,
+    acks: { config: 0, error: 0, lastError: '' },
   };
 }
 
@@ -207,13 +208,18 @@ function reduceHub(s: State, f: HubToUi): State {
     case 'node_repos':
       return { ...s, nodeRepos: { ...s.nodeRepos, [f.node]: f.repos } };
     case 'hub_config':
-      return { ...s, hubProfiles: f.profiles, nodeSettings: Object.fromEntries(f.settings.map((e) => [e.node, e.settings])) };
+      return {
+        ...s,
+        hubProfiles: f.profiles,
+        nodeSettings: Object.fromEntries(f.settings.map((e) => [e.node, e.settings])),
+        acks: { ...s.acks, config: s.acks.config + 1 },
+      };
     case 'node_stats':
       return s.stats?.node === f.node ? { ...s, stats: { node: f.node, connectedMs: f.connected_ms, samples: f.samples.slice(-STATS_CAP) } } : s;
     case 'clean_report':
       return { ...s, lastClean: { ...s.lastClean, [f.node]: { dryRun: f.dry_run, removed: f.removed, kept: f.kept } } };
     case 'error':
-      return addToast(s, 'error', f.message);
+      return { ...addToast(s, 'error', f.message), acks: { ...s.acks, error: s.acks.error + 1, lastError: f.message } };
   }
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'preact/hooks';
 import type { CleanItem, NodeInfo, NodeSettings, RepoEntry, Telemetry } from '../proto';
-import { agentStatusLabel, agentTone, availableVersion, settingsErrors, settingsToForm, store, type SettingsForm, type Tri } from '../state';
+import { agentStatusLabel, agentTone, availableVersion, settingsErrors, settingsToForm, store, useHubAck, type SettingsForm, type Tri } from '../state';
 import { Button, Card, EmptyState, Pill, ProgressBar, TextField } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { ageLabel, clock, day, nodeStateLabel, nodeStateTone } from '../ui/format';
@@ -134,26 +134,33 @@ function SettingsCard({ node, stored }: { node: string; stored: NodeSettings | u
   const set = <K extends keyof SettingsForm>(k: K) => (v: SettingsForm[K]) => setForm((f) => ({ ...f, [k]: v }));
   const e = settingsErrors(form);
   const hint = 'Empty: the node decides.';
+  const { ack, start, reset } = useHubAck();
+  const waiting = ack.kind === 'waiting';
+  const send = (f: SettingsForm) => { if (!waiting && store.intent({ kind: 'save_node_settings', node, form: f })) start(); };
+  const edit = <K extends keyof SettingsForm>(k: K) => (v: SettingsForm[K]) => { if (ack.kind !== 'waiting') reset(); set(k)(v); };
   return (
     <Card title="Settings">
-      <form class="stack" aria-label="Node settings" onSubmit={(ev) => { ev.preventDefault(); store.intent({ kind: 'save_node_settings', node, form }); }}>
+      <form class="stack" aria-label="Node settings" onSubmit={(ev) => { ev.preventDefault(); send(form); }}>
         <p class="muted small">Stored on the hub and applied live; they override the node's own files.</p>
         <div class="field">
           <label for={rootsId}>Repository folders</label>
-          <textarea id={rootsId} class="input mono" rows={3} placeholder="~/code" spellcheck={false} value={form.repoRoots} aria-invalid={e.repoRoots ? true : undefined} onInput={(ev) => set('repoRoots')(ev.currentTarget.value)} />
+          <textarea id={rootsId} class="input mono" rows={3} placeholder="~/code" spellcheck={false} value={form.repoRoots} aria-invalid={e.repoRoots ? true : undefined} onInput={(ev) => edit('repoRoots')(ev.currentTarget.value)} />
           {e.repoRoots ? <span class="err" role="alert">{e.repoRoots}</span> : <span class="hint">One per line, searched for existing clones. {hint}</span>}
         </div>
         <div class="grid">
-          <TextField label="Index every (minutes)" value={form.indexIntervalMins} placeholder="node default" error={e.indexIntervalMins} hint="1-1440" onValue={set('indexIntervalMins')} />
-          <TextField label="Clean after exit (hours)" value={form.cleanAfterExitHours} placeholder="node default" error={e.cleanAfterExitHours} hint="1-8760" onValue={set('cleanAfterExitHours')} />
-          <TextField label="Busy above CPU %" value={form.cpuBusyPct} placeholder="node default" error={e.cpuBusyPct} hint="1-100" onValue={set('cpuBusyPct')} />
-          <TextField label="Busy above GPU %" value={form.gpuBusyPct} placeholder="node default" error={e.gpuBusyPct} hint="1-100" onValue={set('gpuBusyPct')} />
+          <TextField label="Index every (minutes)" value={form.indexIntervalMins} placeholder="node default" error={e.indexIntervalMins} hint="1-1440" onValue={edit('indexIntervalMins')} />
+          <TextField label="Clean after exit (hours)" value={form.cleanAfterExitHours} placeholder="node default" error={e.cleanAfterExitHours} hint="1-8760" onValue={edit('cleanAfterExitHours')} />
+          <TextField label="Busy above CPU %" value={form.cpuBusyPct} placeholder="node default" error={e.cpuBusyPct} hint="1-100" onValue={edit('cpuBusyPct')} />
+          <TextField label="Busy above GPU %" value={form.gpuBusyPct} placeholder="node default" error={e.gpuBusyPct} hint="1-100" onValue={edit('gpuBusyPct')} />
         </div>
-        <TriField label="Clean up automatically" value={form.cleanAuto} onChange={set('cleanAuto')} />
-        <TriField label="Install updates automatically" value={form.autoUpdate} onChange={set('autoUpdate')} />
+        <TriField label="Clean up automatically" value={form.cleanAuto} onChange={edit('cleanAuto')} />
+        <TriField label="Install updates automatically" value={form.autoUpdate} onChange={edit('autoUpdate')} />
         <div class="row">
-          <Button type="submit" variant="primary" size="sm" disabled={Object.keys(e).length > 0}>Save settings</Button>
-          <ConfirmButton variant="ghost" label="Reset to node defaults" confirmLabel="Clears the hub settings: confirm" disabled={!stored} onConfirm={() => store.intent({ kind: 'save_node_settings', node, form: settingsToForm() })} />
+          <Button type="submit" variant="primary" size="sm" disabled={waiting || Object.keys(e).length > 0}>{waiting ? 'Saving…' : 'Save settings'}</Button>
+          <ConfirmButton variant="ghost" label="Reset to node defaults" confirmLabel="Clears the hub settings: confirm" disabled={waiting || !stored} onConfirm={() => send(settingsToForm())} />
+          <span role="status" class={ack.kind === 'error' ? 'err small' : 'muted small'}>
+            {ack.kind === 'ok' ? 'Saved; the node applies it now.' : ack.kind === 'error' ? `Not saved: ${ack.message}` : ''}
+          </span>
         </div>
       </form>
     </Card>

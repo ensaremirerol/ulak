@@ -59,6 +59,9 @@ export interface State {
   nodeSettings: Record<NodeId, NodeSettings>;
   /** Telemetry history of the node whose screen is open (oldest first, capped); null when none is. */
   stats: { node: NodeId; connectedMs: number | null; samples: Telemetry[] } | null;
+  /** Counts of `hub_config` and `error` frames, plus the last error text: a form that sent a
+   *  config change waits for one of them to move (see `useHubAck`). */
+  acks: { config: number; error: number; lastError: string };
 }
 
 export type Event =

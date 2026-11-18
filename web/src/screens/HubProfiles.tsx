@@ -1,6 +1,6 @@
-import { useId, useState } from 'preact/hooks';
+import { useEffect, useId, useState } from 'preact/hooks';
 import type { HubProfile } from '../proto';
-import { emptyProfileForm, profileErrors, profileToForm, store, type ProfileForm } from '../state';
+import { emptyProfileForm, profileErrors, profileToForm, store, useHubAck, type ProfileForm } from '../state';
 import { Button, TextField } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { Dialog } from '../ui/Dialog';
@@ -16,17 +16,22 @@ export function ProfileDialog({ node, editing, onClose }: { node: string | null;
   const envId = useId();
   const set = (k: keyof ProfileForm) => (v: string) => setForm((f) => ({ ...f, [k]: v }));
   const errors = tried ? profileErrors(form, keep) : {};
+  const { ack, start } = useHubAck();
+  // Close only once the hub has applied it; a refusal keeps the dialog (and the input) open.
+  useEffect(() => { if (ack.kind === 'ok') onClose(); }, [ack.kind]);
+  const waiting = ack.kind === 'waiting';
   const save = () => {
     setTried(true);
-    if (Object.keys(profileErrors(form, keep)).length > 0) return;
-    if (store.intent({ kind: 'save_profile', node, form, keepEnv: keep })) onClose();
+    if (waiting || Object.keys(profileErrors(form, keep)).length > 0) return;
+    if (store.intent({ kind: 'save_profile', node, form, keepEnv: keep })) start();
   };
   return (
     <Dialog
       title={editing ? `Edit profile ${editing.name}` : node ? 'Add a profile for this node' : 'Add a profile'}
       onClose={onClose}
-      actions={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" onClick={save}>Save</Button></>}
+      actions={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" disabled={waiting} onClick={save}>{waiting ? 'Saving…' : 'Save'}</Button></>}
     >
+      {ack.kind === 'error' && <p class="err" role="alert">Not saved: {ack.message}</p>}
       <TextField label="Name" required value={form.name} disabled={!!editing} mono autocapitalize="off" spellcheck={false} placeholder="claude-work" error={errors.name} hint="What a spawn picks; letters, digits, . _ -" onValue={set('name')} />
       <TextField label="Program" required value={form.binary} mono autocapitalize="off" spellcheck={false} placeholder="claude" error={errors.binary} onValue={set('binary')} />
       <TextField label="Arguments" value={form.args} mono autocapitalize="off" spellcheck={false} placeholder="--model opus" error={errors.args} hint="Separated by spaces, placed before the spawn's own." onValue={set('args')} />

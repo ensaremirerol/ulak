@@ -1,14 +1,19 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/preact';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UiToHub } from '../src/proto';
 import { linePath, NodeDetail } from '../src/screens/NodeDetail';
 import { Settings } from '../src/screens/Settings';
-import { store } from '../src/state';
+import { ACK_TIMEOUT_MS, store } from '../src/state';
 import { feed, freshStore, node } from './helpers';
 
 const tel = (at_ms: number, cpu_pct: number, gpu_pct: number | null = null) => ({ load1: 0.5, cpu_pct, gpu_pct, mem_used_pct: 40, at_ms });
 const type = (label: string, value: string) => fireEvent.input(screen.getByLabelText(label), { target: { value } });
 let sent: UiToHub[];
+type Scoped = Extract<UiToHub, { type: 'save_profile' }>;
+/** The hub applied the last save: it broadcasts the new config. */
+const applied = (profiles: { node: string | null; profile: Scoped['profile'] }[] = [], settings: { node: string; settings: object }[] = []) =>
+  act(() => feed({ type: 'hub_config', profiles, settings }));
+afterEach(() => vi.useRealTimers());
 
 beforeEach(() => {
   sent = freshStore();
@@ -65,8 +70,17 @@ describe('NodeDetail', () => {
     type('Environment', 'TOKEN=s3cret');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(sent).toEqual([{ type: 'save_profile', node: 'n1', profile: { name: 'solo', binary: 'claude', env: { TOKEN: 's3cret' } } }]);
+    // Open until the hub answers; a refusal keeps the input.
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Saving…' }) as HTMLButtonElement).disabled).toBe(true);
+    act(() => feed({ type: 'error', message: 'too many hub profiles' }));
+    expect(screen.getByText('Not saved: too many hub profiles')).toBeTruthy();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('solo');
+    sent.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(sent).toHaveLength(1);
+    applied([{ node: 'n1', profile: { name: 'solo', binary: 'claude', env: { TOKEN: 's3cret' } } }]);
     expect(screen.queryByRole('dialog')).toBeNull();
-    act(() => feed({ type: 'hub_config', profiles: [{ node: 'n1', profile: { name: 'solo', binary: 'claude', env: { TOKEN: 's3cret' } } }], settings: [] }));
     const list = within(screen.getByRole('list', { name: 'Hub profiles of alpha' }));
     expect(list.getByText('TOKEN=••••••')).toBeTruthy();
     expect(screen.queryByText(/s3cret/)).toBeNull();
@@ -78,11 +92,13 @@ describe('NodeDetail', () => {
     sent.length = 0;
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(sent).toEqual([{ type: 'save_profile', node: 'n1', profile: { name: 'solo', binary: 'claude', args: ['--x'], env: { TOKEN: 's3cret' } } }]);
+    applied([{ node: 'n1', profile: { name: 'solo', binary: 'claude', args: ['--x'], env: { TOKEN: 's3cret' } } }]);
     fireEvent.click(list.getByRole('button', { name: 'Edit solo' }));
     fireEvent.click(screen.getByRole('button', { name: 'Remove TOKEN' }));
     sent.length = 0;
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(sent).toEqual([{ type: 'save_profile', node: 'n1', profile: { name: 'solo', binary: 'claude' } }]);
+    expect(sent).toEqual([{ type: 'save_profile', node: 'n1', profile: { name: 'solo', binary: 'claude', args: ['--x'] } }]);
+    applied([{ node: 'n1', profile: { name: 'solo', binary: 'claude', args: ['--x'] } }]);
     sent.length = 0;
     fireEvent.click(list.getByRole('button', { name: 'Delete' }));
     fireEvent.click(list.getByRole('button', { name: 'Click again to delete' }));
@@ -101,10 +117,30 @@ describe('NodeDetail', () => {
     fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Install updates automatically' })).getByRole('radio', { name: 'Off' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(sent).toEqual([{ type: 'save_node_settings', node: 'n1', settings: { index_interval_mins: 30, clean_auto: true, auto_update: false } }]);
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeTruthy();
+    act(() => feed({ type: 'error', message: 'node n1 is not enrolled' }));
+    expect(screen.getByRole('status').textContent).toBe('Not saved: node n1 is not enrolled');
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    applied([], [{ node: 'n1', settings: { index_interval_mins: 30, clean_auto: true, auto_update: false } }]);
+    expect(screen.getByRole('status').textContent).toBe('Saved; the node applies it now.');
+    type('Index every (minutes)', '45');
+    expect(screen.getByRole('status').textContent).toBe('');
+    type('Index every (minutes)', '30');
     sent.length = 0;
     fireEvent.click(screen.getByRole('button', { name: 'Reset to node defaults' }));
     fireEvent.click(screen.getByRole('button', { name: 'Clears the hub settings: confirm' }));
     expect(sent).toEqual([{ type: 'save_node_settings', node: 'n1', settings: {} }]);
+  });
+
+  it('a save with no answer re-enables the form after the timeout', () => {
+    vi.useFakeTimers();
+    render(<NodeDetail id="n1" />);
+    type('Index every (minutes)', '20');
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeTruthy();
+    act(() => { vi.advanceTimersByTime(ACK_TIMEOUT_MS); });
+    expect(screen.getByRole('status').textContent).toMatch(/^Not saved: No answer from the hub yet/);
+    expect((screen.getByRole('button', { name: 'Save settings' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
