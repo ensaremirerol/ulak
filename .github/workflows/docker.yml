@@ -1,9 +1,10 @@
 name: docker
+# Tags are built from release.yml (workflow_call) once the signed release is published.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
   packages: write
@@ -20,6 +21,19 @@ jobs:
             file: Dockerfile.ulakd
     steps:
       - uses: actions/checkout@v4
+      # The hub serves these to nodes (ULAK_BUNDLED_RELEASES); the hub re-verifies them at start.
+      - name: Bundle the signed node release (tags only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          d="bundle/${TAG#v}"
+          gh release download "$TAG" -D "$d" -p 'ulakd-*' -p 'SHA256SUMS*'
+          gh release view "$TAG" --json publishedAt --jq '{published_at: .publishedAt}' > "$d/meta.json"
+          ls -l "$d"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

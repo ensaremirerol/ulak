@@ -1,7 +1,7 @@
-# Release pipeline. NEVER RUN YET: it has only been reviewed by eye (no actionlint available when written).
+# Release pipeline.
 # Build jobs only compile and upload artifacts; ONE job (sign) holds the secret, writes SHA256SUMS and signs everything.
 # Needs the repo secret ULAK_RELEASE_SIGNING_KEY (see scripts/gen-release-key.sh) and a real
-# crates/ulakd/release-key.pub committed. Docker images get the version tag from docker.yml (same tag trigger).
+# crates/ulakd/release-key.pub committed. Docker images for the tag are built by the last job (docker.yml as a reusable workflow).
 name: release
 on:
   push:
@@ -27,7 +27,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2.7.8
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: arm64 target (ulakd only, cross-compiled)
+        run: rustup target add aarch64-unknown-linux-gnu
       - name: Tag must equal the workspace version
         id: ver
         env:
@@ -46,7 +48,11 @@ jobs:
       - name: Build
         env:
           GIT_SHA: ${{ github.sha }}
-        run: cargo build --release --locked -p ulakd -p ulak-remote -p ulak --target "$TARGET"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --locked -p ulakd -p ulak-remote -p ulak --target "$TARGET"
+          cargo build --release --locked -p ulakd --target aarch64-unknown-linux-gnu
       - name: Package
         run: |
           set -euo pipefail
@@ -54,6 +60,7 @@ jobs:
           for bin in ulakd ulak-remote ulak; do
             tar -C "target/$TARGET/release" -czf "dist/$bin-$TARGET.tar.gz" "$bin"
           done
+          tar -C target/aarch64-unknown-linux-gnu/release -czf dist/ulakd-aarch64-unknown-linux-gnu.tar.gz ulakd
           ls -l dist
       - uses: actions/upload-artifact@v4.6.2
         with:
@@ -176,3 +183,10 @@ jobs:
           # workflow_dispatch from a branch has no tag to release.
           [ "${{ github.ref_type }}" = tag ] || { echo "publishing needs a v* tag ref" >&2; exit 1; }
           gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+  # Images for the tag are built only after the release exists: the hub image bundles its signed node archives.
+  docker:
+    needs: publish
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml

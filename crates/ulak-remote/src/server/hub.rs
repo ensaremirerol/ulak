@@ -85,6 +85,9 @@ pub struct HubConfig {
     pub queue_tick: Duration,
     /// Where verified release archives for nodes are cached; `None` = no release cache.
     pub release_dir: Option<PathBuf>,
+    /// Signed releases shipped inside the image (`<dir>/<version>/`); a version newer than the
+    /// cache is copied in at startup, so nodes can update with no GitHub access at all.
+    pub bundled_releases: Option<PathBuf>,
     /// `owner/name` whose latest release is cached (uses `github_api`).
     pub release_repo: String,
     /// Public half of the release signing key; archives that do not verify are never stored.
@@ -121,6 +124,7 @@ impl Default for HubConfig {
             github_api: "https://api.github.com".into(),
             queue_tick: Duration::from_secs(10),
             release_dir: None,
+            bundled_releases: None,
             release_repo: "ensaremirerol/ulak".into(),
             release_key: None,
             release_token: None,

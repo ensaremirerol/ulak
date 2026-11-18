@@ -158,9 +158,45 @@ pub(crate) fn scan_and_prune(dir: &Path, key: &VerifyingKey) -> Vec<Cached> {
     kept
 }
 
+/// Copies bundled versions newer than everything cached into `dir`; `scan_and_prune` verifies
+/// them afterwards like any other cache entry.
+fn seed(bundle: &Path, dir: &Path) {
+    let ver = |n: &str| SemVer::parse(n).filter(|_| !n.starts_with('v'));
+    let newest = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| ver(&e.file_name().to_string_lossy()))
+        .max();
+    for e in std::fs::read_dir(bundle).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if ver(&name).is_none_or(|v| newest.is_some_and(|n| v <= n)) {
+            continue;
+        }
+        let tmp = dir.join(format!(".tmp-{name}-{}", std::process::id()));
+        let copy = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&tmp)?;
+            for f in std::fs::read_dir(e.path())?.flatten() {
+                if f.file_type()?.is_file() {
+                    std::fs::copy(f.path(), tmp.join(f.file_name()))?;
+                }
+            }
+            std::fs::rename(&tmp, dir.join(&name))
+        };
+        if let Err(err) = copy() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            eprintln!("ulak-remote: cannot copy bundled release {name}: {err}");
+        }
+    }
+}
+
 /// Fetches the latest release and stores it if it is new and verifies. `Ok(false)` = already cached.
 fn fetch(h: &Hub, dir: &Path, key: &VerifyingKey, have: &[String]) -> Result<bool, String> {
     let token = h.release_token().map_err(|e| e.to_string())?;
+    // No token but an image bundle: the bundle is the source; a new image brings the next release.
+    if token.is_none() && h.cfg.bundled_releases.is_some() {
+        return Ok(false);
+    }
     let (gh, repo) = (&h.github, &h.cfg.release_repo);
     let json = gh
         .latest_release(repo, token.as_ref())
@@ -235,6 +271,9 @@ impl Hub {
             return;
         };
         let _ = std::fs::create_dir_all(dir);
+        if let Some(b) = &self.cfg.bundled_releases {
+            seed(b, dir);
+        }
         let mut st = self.release_state();
         match &self.cfg.release_key {
             Some(k) => st.versions = scan_and_prune(dir, k),

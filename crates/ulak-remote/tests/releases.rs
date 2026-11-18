@@ -613,3 +613,33 @@ async fn admin_releases_reports_and_refresh_fetches() {
     assert!(admin::render(&ask(AdminRequest::Releases).await, None).contains("0.3.0, 0.2.0"));
     sock.close();
 }
+
+#[tokio::test]
+async fn bundled_release_seeds_the_cache_without_github() {
+    let gh = fake().await;
+    gh.publish("v0.5.0");
+    *gh.fail.lock().unwrap() = true;
+    let base = std::env::temp_dir().join(format!("ulak-bundle-{}", uuid::Uuid::now_v7()));
+    let (bundle, rel) = (base.join("bundle"), base.join("rel"));
+    std::fs::create_dir_all(bundle.join("0.5.0")).unwrap();
+    for (n, b) in gh.files.lock().unwrap().iter() {
+        std::fs::write(bundle.join("0.5.0").join(n), b).unwrap();
+    }
+    std::fs::write(bundle.join("0.5.0").join("meta.json"), "{}").unwrap();
+    // a tampered bundled version never verifies, so it is dropped
+    std::fs::create_dir_all(bundle.join("0.6.0")).unwrap();
+    std::fs::write(bundle.join("0.6.0").join("meta.json"), "{}").unwrap();
+    std::fs::write(bundle.join("0.6.0").join(TARGET), b"evil").unwrap();
+    let fx = start(HubConfig {
+        bundled_releases: Some(bundle.clone()),
+        ..cfg(&gh, &rel, None)
+    })
+    .await;
+    let rep = fx.hub.release_report();
+    assert_eq!(rep.versions, vec!["0.5.0"], "{rep:?}");
+    assert!(!rel.join("0.6.0").exists());
+    // no token + bundle: GitHub is never asked, and no error is reported
+    fx.hub.refresh_releases(true).await;
+    assert_eq!(gh.latest_hits(), 0);
+    assert_eq!(fx.hub.release_report().error, None);
+}

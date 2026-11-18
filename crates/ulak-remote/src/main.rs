@@ -1,6 +1,6 @@
 //! `ulak-remote`: the hub binary. Config by env: ULAK_DIR (default ./ulak-data), ULAK_ADDR
 //! (default 0.0.0.0:8443), ULAK_SANS (comma list, default localhost,127.0.0.1),
-//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_GITHUB_API (GitHub REST base, default https://api.github.com; http only for loopback), ULAK_RELEASE_REPO (owner/name, default ensaremirerol/ulak), ULAK_RELEASE_INTERVAL_HOURS (default 6), ULAK_RELEASE_CREDENTIAL (stored credential id, preferred) or ULAK_RELEASE_TOKEN_FILE / ULAK_GH_TOKEN (kept in memory only) for the hub release cache that nodes update from, ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
+//! ULAK_MCP_URL, ULAK_RP_ID / ULAK_ORIGIN (passkey relying party; default first SAN), ULAK_WEB_DIR (web build served at /), ULAK_HTTP_ADDR (optional plain-HTTP listener for a reverse proxy, e.g. 0.0.0.0:8080), ULAK_TRUSTED_PROXIES (comma list of proxy IPs/CIDRs whose X-Forwarded-For is believed; default none), ULAK_MAX_CPU_PCT / ULAK_MAX_GPU_PCT (optional hub-side spawn caps, default 100 = off), ULAK_GITHUB_API (GitHub REST base, default https://api.github.com; http only for loopback), ULAK_BUNDLED_RELEASES (signed releases shipped in the image, copied into the cache at start), ULAK_RELEASE_REPO (owner/name, default ensaremirerol/ulak), ULAK_RELEASE_INTERVAL_HOURS (default 6), ULAK_RELEASE_CREDENTIAL (stored credential id, preferred) or ULAK_RELEASE_TOKEN_FILE / ULAK_GH_TOKEN (kept in memory only) for the hub release cache that nodes update from, ULAK_BOOTSTRAP_OTP=node|ui|browser to print a one-time code at start.
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncBufReadExt;
 use ulak_proto::{CredentialId, GitToken};
@@ -131,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         secrets_key_path: Some(dir.join("secrets.key")),
         github_api: env("ULAK_GITHUB_API").unwrap_or(d.github_api),
         release_dir: Some(dir.join("releases")),
+        bundled_releases: env("ULAK_BUNDLED_RELEASES").map(PathBuf::from),
         release_repo: env("ULAK_RELEASE_REPO").unwrap_or(d.release_repo),
         release_key: ulakd::update::trust::release_key().ok(),
         release_token,

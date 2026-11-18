@@ -34,7 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && mkdir /data && chown ulak /data
 COPY --from=hub-build /ulak-remote /usr/local/bin/ulak-remote
 COPY --from=web-build /web /app/web
-ENV ULAK_DIR=/data ULAK_WEB_DIR=/app/web ULAK_ADDR=0.0.0.0:8443
+# Signed node releases (filled by CI on tags; empty for branch builds).
+COPY bundle/ /app/releases/
+ENV ULAK_DIR=/data ULAK_WEB_DIR=/app/web ULAK_ADDR=0.0.0.0:8443 ULAK_BUNDLED_RELEASES=/app/releases
 USER ulak
 VOLUME /data
 # 8443: mTLS + web. 8080: plain HTTP for a reverse proxy, only when ULAK_HTTP_ADDR=0.0.0.0:8080 is set.
