@@ -590,6 +590,72 @@ pub struct ProfileInfo {
     pub installed: bool,
     /// An unresolved login blocker exists for this profile on this node.
     pub login_blocked: bool,
+    /// The profile comes from the hub (`HubToDaemon::Config`), not the node's `agents.json`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub from_hub: bool,
+}
+
+/// A profile defined on the hub. Never carries install or check commands: those stay in the
+/// node's local `agents.json`. A hub profile whose name matches a local entry keeps that entry's
+/// install/check/login/MCP fields and overrides `binary`, `args`, `config_dir` and `env`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubProfile {
+    /// `[A-Za-z0-9._-]{1,64}`; what a spawn uses as `profile.binary`.
+    pub name: String,
+    /// Executable (`~` expanded on the node); 1-256 printable chars.
+    pub binary: String,
+    /// Argv placed before the spawn's own args (at most 32, each 1-512 printable chars).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Config folder (`~` expanded); for claude binaries it becomes `CLAUDE_CONFIG_DIR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
+    /// Extra environment (at most 32; keys `[A-Za-z_][A-Za-z0-9_]*`, never `ULAK*`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+/// A hub profile and where it applies: `node: None` = every node; a node-scoped profile beats a
+/// global one of the same name on that node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedProfile {
+    pub node: Option<NodeId>,
+    pub profile: HubProfile,
+}
+
+/// Node settings stored on the hub. `None` = the node's local file (`ulakd.json`, `update.json`,
+/// `guard.json`) or its built-in default. Applied live by the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodeSettings {
+    /// Folders indexed for existing clones (`~` expanded); at most 16.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_roots: Option<Vec<String>>,
+    /// Minutes between repo index refreshes, 1-1440.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_interval_mins: Option<u64>,
+    /// Delete clean, fully pushed work-root clones automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clean_auto: Option<bool>,
+    /// Hours after the agent exits before a clone may be cleaned, 1-8760.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clean_after_exit_hours: Option<u64>,
+    /// Install updates automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
+    /// Node counts as busy above this CPU %, 1-100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_busy_pct: Option<f32>,
+    /// Node counts as busy above this GPU %, 1-100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_busy_pct: Option<f32>,
+}
+
+/// One node's hub-stored settings (an entry of `HubToUi::HubConfig`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeSettingsEntry {
+    pub node: NodeId,
+    pub settings: NodeSettings,
 }
 
 /// A git clone present on a node (see the node's repo index).

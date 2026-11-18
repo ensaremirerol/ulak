@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 22;
-const HUB_VARIANTS: usize = 29;
+const UI_VARIANTS: usize = 26;
+const HUB_VARIANTS: usize = 31;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -128,6 +128,10 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::ListQueue => "list_queue",
         UiToHub::CleanNode { .. } => "clean_node",
         UiToHub::CleanRepo { .. } => "clean_repo",
+        UiToHub::SaveProfile { .. } => "save_profile",
+        UiToHub::DeleteProfile { .. } => "delete_profile",
+        UiToHub::SaveNodeSettings { .. } => "save_node_settings",
+        UiToHub::NodeStats { .. } => "node_stats",
     }
 }
 
@@ -161,7 +165,31 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::NodeProfiles { .. } => "node_profiles",
         HubToUi::NodeRepos { .. } => "node_repos",
         HubToUi::CleanReport { .. } => "clean_report",
+        HubToUi::HubConfig { .. } => "hub_config",
+        HubToUi::NodeStats { .. } => "node_stats",
         HubToUi::Error { .. } => "error",
+    }
+}
+
+fn hub_profile() -> HubProfile {
+    HubProfile {
+        name: "claude-work".into(),
+        binary: "claude".into(),
+        args: vec!["--model".into(), "opus".into()],
+        config_dir: Some("~/.claude-work".into()),
+        env: BTreeMap::from([("HTTPS_PROXY".to_owned(), "http://proxy:3128".to_owned())]),
+    }
+}
+
+fn node_settings() -> NodeSettings {
+    NodeSettings {
+        repo_roots: Some(vec!["~/code".into()]),
+        index_interval_mins: Some(30),
+        clean_auto: Some(true),
+        clean_after_exit_hours: None,
+        auto_update: Some(false),
+        cpu_busy_pct: Some(85.0),
+        gpu_busy_pct: None,
     }
 }
 
@@ -275,6 +303,41 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
             },
         ),
         ("list_queue", UiToHub::ListQueue),
+        (
+            "save_profile_global",
+            UiToHub::SaveProfile {
+                node: None,
+                profile: hub_profile(),
+            },
+        ),
+        (
+            "save_profile_node",
+            UiToHub::SaveProfile {
+                node: Some(node()),
+                profile: HubProfile {
+                    name: "claude-personal".into(),
+                    binary: "claude".into(),
+                    args: vec![],
+                    config_dir: Some("~/.claude-personal".into()),
+                    env: BTreeMap::new(),
+                },
+            },
+        ),
+        (
+            "delete_profile",
+            UiToHub::DeleteProfile {
+                node: Some(node()),
+                name: "claude-personal".into(),
+            },
+        ),
+        (
+            "save_node_settings",
+            UiToHub::SaveNodeSettings {
+                node: node(),
+                settings: node_settings(),
+            },
+        ),
+        ("node_stats", UiToHub::NodeStats { node: node() }),
         (
             "clean_node_dry",
             UiToHub::CleanNode {
@@ -561,6 +624,7 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                         config_dir: Some("/home/u/.claude-work".into()),
                         installed: true,
                         login_blocked: false,
+                        from_hub: true,
                     },
                     ProfileInfo {
                         name: "antigravity".into(),
@@ -568,6 +632,7 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                         config_dir: None,
                         installed: false,
                         login_blocked: true,
+                        from_hub: false,
                     },
                 ],
             },
@@ -604,6 +669,42 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                     full_name: None,
                     reason: "not under the work root".into(),
                 }],
+            },
+        ),
+        (
+            "hub_config",
+            HubToUi::HubConfig {
+                profiles: vec![
+                    ScopedProfile {
+                        node: None,
+                        profile: hub_profile(),
+                    },
+                    ScopedProfile {
+                        node: Some(node()),
+                        profile: HubProfile {
+                            name: "claude-personal".into(),
+                            binary: "claude".into(),
+                            args: vec![],
+                            config_dir: Some("~/.claude-personal".into()),
+                            env: BTreeMap::new(),
+                        },
+                    },
+                ],
+                settings: vec![NodeSettingsEntry {
+                    node: node(),
+                    settings: node_settings(),
+                }],
+            },
+        ),
+        (
+            "node_stats",
+            HubToUi::NodeStats {
+                node: node(),
+                connected_ms: Some(1_700_000_000_000),
+                samples: vec![
+                    Telemetry::new(0.5, 12.5, Some(3.0), 40.0, 1_700_000_005_000).unwrap(),
+                    Telemetry::new(0.7, 20.0, None, 41.5, 1_700_000_010_000).unwrap(),
+                ],
             },
         ),
         (

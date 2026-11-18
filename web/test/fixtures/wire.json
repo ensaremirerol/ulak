@@ -161,6 +161,48 @@
       "message": "node vps-fra is offline",
       "type": "error"
     },
+    "hub_config": {
+      "profiles": [
+        {
+          "node": null,
+          "profile": {
+            "args": [
+              "--model",
+              "opus"
+            ],
+            "binary": "claude",
+            "config_dir": "~/.claude-work",
+            "env": {
+              "HTTPS_PROXY": "http://proxy:3128"
+            },
+            "name": "claude-work"
+          }
+        },
+        {
+          "node": "vps-fra",
+          "profile": {
+            "binary": "claude",
+            "config_dir": "~/.claude-personal",
+            "name": "claude-personal"
+          }
+        }
+      ],
+      "settings": [
+        {
+          "node": "vps-fra",
+          "settings": {
+            "auto_update": false,
+            "clean_auto": true,
+            "cpu_busy_pct": 85.0,
+            "index_interval_mins": 30,
+            "repo_roots": [
+              "~/code"
+            ]
+          }
+        }
+      ],
+      "type": "hub_config"
+    },
     "hub_version": {
       "arch": "x86_64",
       "git": "abc1234",
@@ -199,6 +241,7 @@
         {
           "binary": "claude",
           "config_dir": "/home/u/.claude-work",
+          "from_hub": true,
           "installed": true,
           "login_blocked": false,
           "name": "claude-work"
@@ -229,6 +272,27 @@
         }
       ],
       "type": "node_repos"
+    },
+    "node_stats": {
+      "connected_ms": 1700000000000,
+      "node": "vps-fra",
+      "samples": [
+        {
+          "at_ms": 1700000005000,
+          "cpu_pct": 12.5,
+          "gpu_pct": 3.0,
+          "load1": 0.5,
+          "mem_used_pct": 40.0
+        },
+        {
+          "at_ms": 1700000010000,
+          "cpu_pct": 20.0,
+          "gpu_pct": null,
+          "load1": 0.7,
+          "mem_used_pct": 41.5
+        }
+      ],
+      "type": "node_stats"
     },
     "node_update_busy_gaming": {
       "agents": [
@@ -550,6 +614,11 @@
       "id": "cred-1",
       "type": "delete_credential"
     },
+    "delete_profile": {
+      "name": "claude-personal",
+      "node": "vps-fra",
+      "type": "delete_profile"
+    },
     "detach": {
       "agent": "reviewer-2",
       "type": "detach"
@@ -594,6 +663,10 @@
       "thread": "t-1",
       "type": "mailbox_log"
     },
+    "node_stats": {
+      "node": "vps-fra",
+      "type": "node_stats"
+    },
     "pane_input": {
       "agent": "reviewer-2",
       "data": "AP8bW0EN",
@@ -606,6 +679,44 @@
     "revoke_device": {
       "id": "pk-1a2b3c4d",
       "type": "revoke_device"
+    },
+    "save_node_settings": {
+      "node": "vps-fra",
+      "settings": {
+        "auto_update": false,
+        "clean_auto": true,
+        "cpu_busy_pct": 85.0,
+        "index_interval_mins": 30,
+        "repo_roots": [
+          "~/code"
+        ]
+      },
+      "type": "save_node_settings"
+    },
+    "save_profile_global": {
+      "node": null,
+      "profile": {
+        "args": [
+          "--model",
+          "opus"
+        ],
+        "binary": "claude",
+        "config_dir": "~/.claude-work",
+        "env": {
+          "HTTPS_PROXY": "http://proxy:3128"
+        },
+        "name": "claude-work"
+      },
+      "type": "save_profile"
+    },
+    "save_profile_node": {
+      "node": "vps-fra",
+      "profile": {
+        "binary": "claude",
+        "config_dir": "~/.claude-personal",
+        "name": "claude-personal"
+      },
+      "type": "save_profile"
     },
     "spawn_auto": {
       "spec": {

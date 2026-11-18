@@ -559,6 +559,7 @@ impl AgentHost for IndexHost {
             config_dir: Some("/h/.claude-work".into()),
             installed: true,
             login_blocked: false,
+            from_hub: false,
         }])
     }
     async fn repo_index(&self) -> Option<Vec<RepoEntry>> {

@@ -1044,6 +1044,7 @@ fn prof(name: &str) -> ProfileInfo {
         config_dir: None,
         installed: false,
         login_blocked: false,
+        from_hub: false,
     }
 }
 

@@ -64,6 +64,13 @@ pub enum DaemonToHub {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToDaemon {
+    /// Hub-managed profiles (already merged for this node: node-scoped beats global) and
+    /// settings. Sent after the daemon's `Version` and whenever either changes; each one
+    /// replaces the previous. Not persisted by the daemon: a restart waits for the next one.
+    Config {
+        profiles: Vec<HubProfile>,
+        settings: NodeSettings,
+    },
     /// Delete every eligible clone under the daemon's work root; answered with `CleanReport`.
     CleanRepos {
         dry_run: bool,
@@ -179,6 +186,25 @@ pub enum UiToHub {
         id: QueueId,
     },
     ListQueue,
+    /// Create or replace a hub profile (`node: None` = global). Reply: `HubConfig` (broadcast).
+    SaveProfile {
+        node: Option<NodeId>,
+        profile: HubProfile,
+    },
+    /// Delete a hub profile. Reply: `HubConfig` (broadcast).
+    DeleteProfile {
+        node: Option<NodeId>,
+        name: String,
+    },
+    /// Replace a node's hub-stored settings (all `None` = delete them). Reply: `HubConfig`.
+    SaveNodeSettings {
+        node: NodeId,
+        settings: NodeSettings,
+    },
+    /// Telemetry history of a node. Reply: `NodeStats` (to the requester only).
+    NodeStats {
+        node: NodeId,
+    },
     /// Clean a node's work-root clones (`dry_run`: only report). Reply: `CleanReport`.
     CleanNode {
         node: NodeId,
@@ -299,6 +325,18 @@ pub enum HubToUi {
     NodeRepos {
         node: NodeId,
         repos: Vec<RepoEntry>,
+    },
+    /// All hub profiles and per-node settings; sent on connect and broadcast on every change.
+    HubConfig {
+        profiles: Vec<ScopedProfile>,
+        settings: Vec<NodeSettingsEntry>,
+    },
+    /// Reply to `UiToHub::NodeStats`: the hub's in-memory history (oldest first, at most one
+    /// hour), and when the node's current connection started (`None`: offline).
+    NodeStats {
+        node: NodeId,
+        connected_ms: Option<u64>,
+        samples: Vec<Telemetry>,
     },
     /// Relay of `DaemonToHub::CleanReport`.
     CleanReport {

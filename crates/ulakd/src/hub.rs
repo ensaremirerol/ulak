@@ -378,6 +378,8 @@ impl<'a, H: AgentHost> Session<'a, H> {
 
     async fn handle(&mut self, cmd: HubToDaemon, spawns: &mut Spawns<'a>) {
         match cmd {
+            // TODO(0.1.7): apply hub profiles and settings.
+            HubToDaemon::Config { .. } => {}
             HubToDaemon::Spawn(spec) => {
                 let id = spec.agent_id().clone();
                 self.status(&id, AgentStatus::Starting).await;

@@ -408,6 +408,13 @@ fn on_ui(
 ) -> Result<(), ServerError> {
     let now = now_ms();
     match m {
+        // TODO(0.1.7): hub profiles, node settings, node stats.
+        UiToHub::SaveProfile { .. }
+        | UiToHub::DeleteProfile { .. }
+        | UiToHub::SaveNodeSettings { .. }
+        | UiToHub::NodeStats { .. } => {
+            return Err(ServerError::BadArgs("not implemented yet".into()));
+        }
         UiToHub::Spawn { target, spec } => match h.place(&target, &spec, now, &HashSet::new()) {
             Ok(_) => {}
             // Nothing can take it now: wait for a node (pinned to the one asked for).

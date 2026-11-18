@@ -506,6 +506,7 @@ impl Tmux {
                     binary,
                     config_dir,
                     login_blocked,
+                    from_hub: false,
                 }
             }
         });
