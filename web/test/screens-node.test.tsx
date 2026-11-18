@@ -132,6 +132,29 @@ describe('NodeDetail', () => {
     expect(sent).toEqual([{ type: 'save_node_settings', node: 'n1', settings: {} }]);
   });
 
+  it('first save on a node without hub settings and the reset both report Saved', () => {
+    render(<NodeDetail id="n1" />);
+    type('Index every (minutes)', '5');
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    applied([], [{ node: 'n1', settings: { index_interval_mins: 5 } }]);
+    expect(screen.getByRole('status').textContent).toBe('Saved; the node applies it now.');
+    expect((screen.getByLabelText('Index every (minutes)') as HTMLInputElement).value).toBe('5');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to node defaults' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clears the hub settings: confirm' }));
+    applied();
+    expect(screen.getByRole('status').textContent).toBe('Saved; the node applies it now.');
+    expect((screen.getByLabelText('Index every (minutes)') as HTMLInputElement).value).toBe('');
+  });
+
+  it('settings arriving after the screen opened fill an untouched form, not an edited one', () => {
+    render(<NodeDetail id="n1" />);
+    applied([], [{ node: 'n1', settings: { cpu_busy_pct: 80 } }]);
+    expect((screen.getByLabelText('Busy above CPU %') as HTMLInputElement).value).toBe('80');
+    type('Busy above GPU %', '70');
+    applied([], [{ node: 'n1', settings: { cpu_busy_pct: 90 } }]);
+    expect((screen.getByLabelText('Busy above GPU %') as HTMLInputElement).value).toBe('70');
+  });
+
   it('a save with no answer re-enables the form after the timeout', () => {
     vi.useFakeTimers();
     render(<NodeDetail id="n1" />);

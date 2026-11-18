@@ -166,7 +166,7 @@ describe('Node screen: profiles, repositories, cleanup', () => {
     expect(profiles).toEqual(['claude-work/h/.cwInstalled', 'antigravitydefault configNot installedLogin required']);
     const rows = within(screen.getByRole('list', { name: 'Repositories of alpha' })).getAllByRole('listitem');
     expect(rows.map((li) => li.textContent)).toEqual([
-      'octocat/hello-worldmainCleanin syncfetched 2 min agomanagedRemove',
+      'octocat/hello-worldmainCleanin syncfetched 2 min agomanagedRemoveClick again to remove', // ConfirmButton keeps both labels (one hidden) for a stable width
       'octocat/dirtymainDirty1 ahead, 2 behindnever fetchedIn usemanaged',
       'me/extdetachedCleanno upstreamfetched 2 min agoexternal',
     ]);

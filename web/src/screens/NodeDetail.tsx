@@ -127,9 +127,12 @@ function TriField({ label, value, onChange }: { label: string; value: Tri; onCha
   return <div class="field"><span class="label">{label}</span><Segmented<Tri> label={label} value={value} options={TRI} onChange={onChange} /></div>;
 }
 
-/** Mount with `key` = node id (plus whether settings exist): edits survive unrelated config broadcasts. */
+/** Mount with `key` = node id. The form follows the hub's values while it has no unsaved edits;
+ *  unsaved edits survive unrelated config broadcasts. */
 function SettingsCard({ node, stored }: { node: string; stored: NodeSettings | undefined }) {
   const [form, setForm] = useState<SettingsForm>(() => settingsToForm(stored));
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => { if (!dirty) setForm(settingsToForm(stored)); }, [stored, dirty]);
   const rootsId = useId();
   const set = <K extends keyof SettingsForm>(k: K) => (v: SettingsForm[K]) => setForm((f) => ({ ...f, [k]: v }));
   const e = settingsErrors(form);
@@ -137,7 +140,9 @@ function SettingsCard({ node, stored }: { node: string; stored: NodeSettings | u
   const { ack, start, reset } = useHubAck();
   const waiting = ack.kind === 'waiting';
   const send = (f: SettingsForm) => { if (!waiting && store.intent({ kind: 'save_node_settings', node, form: f })) start(); };
-  const edit = <K extends keyof SettingsForm>(k: K) => (v: SettingsForm[K]) => { if (ack.kind !== 'waiting') reset(); set(k)(v); };
+  const edit = <K extends keyof SettingsForm>(k: K) => (v: SettingsForm[K]) => { if (ack.kind !== 'waiting') reset(); setDirty(true); set(k)(v); };
+  // Applied: show the hub's values again (a reset empties the fields).
+  useEffect(() => { if (ack.kind === 'ok') setDirty(false); }, [ack.kind]);
   return (
     <Card title="Settings">
       <form class="stack" aria-label="Node settings" onSubmit={(ev) => { ev.preventDefault(); send(form); }}>
@@ -254,7 +259,7 @@ export function NodeDetail({ id }: { id: string }) {
       </Card>
 
       <NodeRepos n={n} />
-      <SettingsCard key={`${id}:${stored ? 1 : 0}`} node={id} stored={stored} />
+      <SettingsCard key={id} node={id} stored={stored} />
     </>
   );
 }

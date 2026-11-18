@@ -52,6 +52,9 @@ h1, h2, h3, p { margin: 0; }
 .btn.danger { background: transparent; border-color: var(--bad-border); color: var(--bad); font-weight: 500; }
 .btn.sm { min-height: 36px; padding: 0 14px; border-radius: var(--radius-sm); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* ConfirmButton: both labels share one grid cell, so the button keeps the wider width armed or not. */
+.confirm-labels { display: inline-grid; } .confirm-labels > span { grid-area: 1 / 1; text-align: center; }
+.confirm-labels > .off { visibility: hidden; }
 .pill { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; min-width: 0; display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--surface-3); color: var(--muted); }
 .pill.ok { background: var(--ok-bg); color: var(--ok); } .pill.warn { background: var(--warn-bg); color: var(--warn); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); } .pill.info { background: var(--info-bg); color: var(--info); }
@@ -62,7 +65,7 @@ h1, h2, h3, p { margin: 0; }
 .bar { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
 .bar-label { width: 28px; }
 .bar-track { flex: 1 1 auto; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 3px; background: var(--ok); }
+.bar-fill { display: block; height: 100%; border-radius: 3px; background: var(--ok); }
 .bar-fill.warn { background: var(--warn); } .bar-fill.bad { background: var(--bad); }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-weight: 500; }

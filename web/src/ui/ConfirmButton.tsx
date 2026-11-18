@@ -30,7 +30,10 @@ export function ConfirmButton({ label, confirmLabel = 'Click again to confirm', 
         onConfirm();
       }}
     >
-      {armed ? confirmLabel : label}
+      <span class="confirm-labels">
+        <span class={armed ? 'off' : undefined} aria-hidden={armed ? true : undefined}>{label}</span>
+        <span class={armed ? undefined : 'off'} aria-hidden={armed ? undefined : true}>{confirmLabel}</span>
+      </span>
     </Button>
   );
 }
