@@ -643,3 +643,81 @@ async fn bundled_release_seeds_the_cache_without_github() {
     assert_eq!(gh.latest_hits(), 0);
     assert_eq!(fx.hub.release_report().error, None);
 }
+
+/// One release dir with a node and an app archive, signed like CI does.
+fn write_release(dir: &std::path::Path, version: &str, with_app: bool) {
+    const APP: &str = "ulak-x86_64-pc-windows-msvc.tar.gz";
+    let k = signer(1);
+    let node = format!("node {version}").into_bytes();
+    let app = format!("app {version}").into_bytes();
+    let sums = format!(
+        "{}  {TARGET}\n{}  {APP}\n",
+        hex(&Sha256::digest(&node)),
+        hex(&Sha256::digest(&app))
+    );
+    std::fs::create_dir_all(dir).unwrap();
+    let mut files = vec![
+        (TARGET.to_owned(), node),
+        ("SHA256SUMS".to_owned(), sums.into_bytes()),
+    ];
+    if with_app {
+        files.push((APP.to_owned(), app));
+    }
+    for (n, b) in files {
+        if n != "SHA256SUMS" {
+            std::fs::write(dir.join(format!("{n}.sig")), k.sign(&b).to_bytes()).unwrap();
+        } else {
+            std::fs::write(dir.join("SHA256SUMS.sig"), k.sign(&b).to_bytes()).unwrap();
+        }
+        std::fs::write(dir.join(n), b).unwrap();
+    }
+    std::fs::write(dir.join("meta.json"), "{}").unwrap();
+}
+
+#[tokio::test]
+async fn bundle_fills_in_app_archives_missing_from_the_same_cached_version() {
+    let gh = fake().await;
+    *gh.fail.lock().unwrap() = true;
+    let base = std::env::temp_dir().join(format!("ulak-bundle-{}", uuid::Uuid::now_v7()));
+    let (bundle, rel) = (base.join("bundle"), base.join("rel"));
+    write_release(&rel.join("0.5.0"), "0.5.0", false); // cached by an older hub: node only
+    write_release(&bundle.join("0.5.0"), "0.5.0", true);
+    let fx = start(HubConfig {
+        bundled_releases: Some(bundle),
+        ..cfg(&gh, &rel, None)
+    })
+    .await;
+    let names: Vec<String> = fx
+        .hub
+        .release_report()
+        .latest
+        .expect("0.5.0 still verifies")
+        .assets
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert!(
+        names.contains(&"ulak-x86_64-pc-windows-msvc.tar.gz".to_owned()),
+        "{names:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_bundle_does_not_silence_github() {
+    let gh = fake().await;
+    gh.publish("v0.5.0");
+    let base = std::env::temp_dir().join(format!("ulak-bundle-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(base.join("bundle")).unwrap();
+    std::fs::write(base.join("bundle").join("README"), "x").unwrap();
+    let fx = start(HubConfig {
+        bundled_releases: Some(base.join("bundle")),
+        ..cfg(&gh, &base.join("rel"), None)
+    })
+    .await;
+    fx.hub.refresh_releases(true).await;
+    assert!(
+        gh.latest_hits() >= 1,
+        "branch images still fetch from GitHub"
+    );
+    assert_eq!(fx.hub.release_report().versions, vec!["0.5.0"]);
+}

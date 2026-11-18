@@ -69,7 +69,11 @@ fn skip_file(exe: &Path) -> String {
 /// Puts `src` at `exe`. Unix: one atomic rename. Windows: the running image can be renamed but not
 /// replaced, so it moves to `<stem>.old` first (deleted on the next install).
 fn swap_in(src: &Path, exe: &Path) -> std::io::Result<()> {
-    if cfg!(windows) {
+    swap_in_with(src, exe, cfg!(windows))
+}
+
+fn swap_in_with(src: &Path, exe: &Path, move_aside: bool) -> std::io::Result<()> {
+    if move_aside {
         let old = sibling(exe, "old");
         let _ = std::fs::remove_file(&old);
         std::fs::rename(exe, &old)?;
@@ -322,6 +326,19 @@ mod tests {
         assert_eq!(startup(&conf, &app, 1).unwrap(), Startup::Probation);
         assert_eq!(std::fs::read(&exe).unwrap(), b"OLD");
         drop(d);
+    }
+
+    #[test]
+    fn windows_move_aside_swap_replaces_and_survives_a_missing_source() {
+        let (_d, exe, _conf) = setup();
+        let new = exe.with_file_name("ulakd.new");
+        std::fs::write(&new, "NEW").unwrap();
+        swap_in_with(&new, &exe, true).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"NEW");
+        assert_eq!(std::fs::read(sibling(&exe, "old")).unwrap(), b"OLD");
+        // second swap replaces the stale .old; a failed rename puts the running file back
+        assert!(swap_in_with(&new, &exe, true).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"NEW");
     }
 
     #[test]

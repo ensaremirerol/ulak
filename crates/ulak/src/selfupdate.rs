@@ -1,12 +1,16 @@
 //! The app updates itself from the hub (Windows, macOS, Linux): same signed release and the same
 //! `ulakd::update` code as the daemon, archive `ulak-<target>.tar.gz`. After an install the app
-//! starts the new binary with the same arguments and exits; a new binary that dies within
-//! `CONFIRM_AFTER_SECS` is replaced by the previous one on the next start.
+//! starts the new binary with the same arguments and exits. Unlike the daemon (30 s probation), the
+//! app counts as good once its window is up (`confirm_started`): a new binary that dies before
+//! that is replaced by the previous one on the next start, and closing it right away is fine.
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
+
+/// Set by `on_start` while a fresh install is on probation: (config dir, exe).
+static PROBATION: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
 use tokio::sync::watch;
 use ulak_proto::UpdateState;
 use ulakd::update::{
@@ -41,14 +45,19 @@ pub fn on_start(dir: &Path) {
             relaunch(&exe);
         }
         Ok(install::Startup::Probation) => {
-            let d = dir.to_owned();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(install::CONFIRM_AFTER_SECS));
-                install::confirm(&d, &exe);
-            });
+            if let Ok(mut p) = PROBATION.lock() {
+                *p = Some((dir.to_owned(), exe));
+            }
         }
         Ok(install::Startup::Normal) => {}
         Err(e) => eprintln!("ulak: update marker: {e}"),
+    }
+}
+
+/// The window is up: the freshly installed app is good (no rollback from here on).
+pub fn confirm_started() {
+    if let Some((dir, exe)) = PROBATION.lock().ok().and_then(|mut p| p.take()) {
+        install::confirm(&dir, &exe);
     }
 }
 

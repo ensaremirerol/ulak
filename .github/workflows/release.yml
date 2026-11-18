@@ -18,8 +18,10 @@ env:
   CARGO_TERM_COLOR: always
   TARGET: x86_64-unknown-linux-gnu
 jobs:
+  # Oldest supported runner on purpose: the binaries need the build host's glibc (22.04 = 2.35, so
+  # Debian 12, Raspberry Pi OS bookworm and Ubuntu 22.04+ run them; ubuntu-latest needed 2.39).
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -61,6 +63,12 @@ jobs:
             tar -C "target/$TARGET/release" -czf "dist/$bin-$TARGET.tar.gz" "$bin"
           done
           tar -C target/aarch64-unknown-linux-gnu/release -czf dist/ulakd-aarch64-unknown-linux-gnu.tar.gz ulakd
+          # Fail the release if a binary needs a newer glibc than the build host promises (readelf reads any arch).
+          for b in target/*/release/ulakd target/$TARGET/release/ulak-remote target/$TARGET/release/ulak; do
+            need=$(readelf -W --dyn-syms "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$b needs $need"
+            [ "$(printf '%s\n' "$need" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] || { echo "$b needs $need (> 2.35)" >&2; exit 1; }
+          done
           ls -l dist
       - uses: actions/upload-artifact@v4.6.2
         with:

@@ -160,10 +160,23 @@ pub(crate) fn scan_and_prune(dir: &Path, key: &VerifyingKey) -> Vec<Cached> {
     kept
 }
 
-/// Copies bundled versions newer than everything cached into `dir`; `scan_and_prune` verifies
-/// them afterwards like any other cache entry.
+fn ver(n: &str) -> Option<SemVer> {
+    SemVer::parse(n).filter(|_| !n.starts_with('v'))
+}
+
+/// True when the image ships at least one release (branch builds ship an empty bundle).
+fn bundle_has_release(bundle: &Path) -> bool {
+    std::fs::read_dir(bundle)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| ver(&e.file_name().to_string_lossy()).is_some())
+}
+
+/// Copies bundled versions newer than everything cached into `dir`, and fills in files missing
+/// from a cached copy of the same version (an older hub cached only `ulakd-*`).
+/// `scan_and_prune` verifies the result like any other cache entry.
 fn seed(bundle: &Path, dir: &Path) {
-    let ver = |n: &str| SemVer::parse(n).filter(|_| !n.starts_with('v'));
     let newest = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -172,7 +185,13 @@ fn seed(bundle: &Path, dir: &Path) {
         .max();
     for e in std::fs::read_dir(bundle).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if ver(&name).is_none_or(|v| newest.is_some_and(|n| v <= n)) {
+        let Some(v) = ver(&name) else { continue };
+        let cached = dir.join(&name);
+        if cached.is_dir() {
+            fill_missing(&e.path(), &cached);
+            continue;
+        }
+        if newest.is_some_and(|n| v <= n) {
             continue;
         }
         let tmp = dir.join(format!(".tmp-{name}-{}", std::process::id()));
@@ -192,11 +211,30 @@ fn seed(bundle: &Path, dir: &Path) {
     }
 }
 
+fn fill_missing(from: &Path, to: &Path) {
+    for f in std::fs::read_dir(from).into_iter().flatten().flatten() {
+        let dst = to.join(f.file_name());
+        if dst.exists() || !f.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let tmp = to.join(format!(".part-{}", f.file_name().to_string_lossy()));
+        if let Err(err) = std::fs::copy(f.path(), &tmp).and_then(|_| std::fs::rename(&tmp, &dst)) {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!("ulak-remote: cannot copy bundled {}: {err}", dst.display());
+        }
+    }
+}
+
 /// Fetches the latest release and stores it if it is new and verifies. `Ok(false)` = already cached.
 fn fetch(h: &Hub, dir: &Path, key: &VerifyingKey, have: &[String]) -> Result<bool, String> {
     let token = h.release_token().map_err(|e| e.to_string())?;
     // No token but an image bundle: the bundle is the source; a new image brings the next release.
-    if token.is_none() && h.cfg.bundled_releases.is_some() {
+    if token.is_none()
+        && h.cfg
+            .bundled_releases
+            .as_deref()
+            .is_some_and(bundle_has_release)
+    {
         return Ok(false);
     }
     let (gh, repo) = (&h.github, &h.cfg.release_repo);

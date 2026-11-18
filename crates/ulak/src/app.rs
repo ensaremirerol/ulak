@@ -324,6 +324,7 @@ pub fn setup(app: &mut App, wake: Waker) {
     if rune::tooling::headless_run().is_some() {
         return;
     }
+    crate::selfupdate::confirm_started();
     let (dir, src) = match pick_identity(&config_dir(), &ulakd::config::default_dir()) {
         Ok(p) => p,
         Err(e) => {
