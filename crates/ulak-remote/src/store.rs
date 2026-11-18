@@ -1,4 +1,6 @@
-use crate::{BlockerError, CredentialError, MailboxError, QuestionError, QueueError};
+use crate::{
+    BlockerError, CredentialError, HubProfileError, MailboxError, QuestionError, QueueError,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::{path::Path, sync::Mutex};
 use ulak_proto::*;
@@ -31,7 +33,10 @@ CREATE TABLE IF NOT EXISTS credentials(
   nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS queue(
   id TEXT PRIMARY KEY, agent TEXT NOT NULL, spec_json TEXT NOT NULL, target_json TEXT NOT NULL,
-  state TEXT NOT NULL, created_ms INTEGER NOT NULL, placed_ms INTEGER, error TEXT);";
+  state TEXT NOT NULL, created_ms INTEGER NOT NULL, placed_ms INTEGER, error TEXT);
+CREATE TABLE IF NOT EXISTS hub_profiles(
+  node TEXT NOT NULL, name TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(node, name));
+CREATE TABLE IF NOT EXISTS node_settings(node TEXT PRIMARY KEY, json TEXT NOT NULL);";
 
 pub struct Store(Mutex<Connection>);
 
@@ -731,5 +736,101 @@ impl Queue for Store {
         .pop()
         .map(|e| e.item)
         .ok_or_else(|| QueueError::NotFound(id.clone()))
+    }
+}
+
+/// Hub-managed profiles (`node` '' = global) and per-node settings, stored as JSON.
+pub trait HubProfiles {
+    /// Global first, then by node, then by name.
+    fn list_hub_profiles(&self) -> Result<Vec<ScopedProfile>, HubProfileError>;
+    /// Inserts or replaces; a new entry is refused once `max` profiles exist.
+    fn upsert_hub_profile(
+        &self,
+        node: Option<&NodeId>,
+        p: &HubProfile,
+        max: usize,
+    ) -> Result<(), HubProfileError>;
+    fn delete_hub_profile(&self, node: Option<&NodeId>, name: &str) -> Result<(), HubProfileError>;
+    fn list_node_settings(&self) -> Result<Vec<NodeSettingsEntry>, HubProfileError>;
+    /// All-`None` settings delete the row.
+    fn save_node_settings(&self, node: &NodeId, s: &NodeSettings) -> Result<(), HubProfileError>;
+}
+
+fn node_key(n: Option<&NodeId>) -> &str {
+    n.map_or("", NodeId::as_str)
+}
+
+impl HubProfiles for Store {
+    fn list_hub_profiles(&self) -> Result<Vec<ScopedProfile>, HubProfileError> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT node, json FROM hub_profiles ORDER BY node, name")?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(node, json)| {
+                Ok(ScopedProfile {
+                    node: (!node.is_empty()).then(|| NodeId::new(&node)).transpose()?,
+                    profile: serde_json::from_str(&json)?,
+                })
+            })
+            .collect()
+    }
+    fn upsert_hub_profile(
+        &self,
+        node: Option<&NodeId>,
+        p: &HubProfile,
+        max: usize,
+    ) -> Result<(), HubProfileError> {
+        let c = self.conn();
+        let (total, same): (i64, i64) = c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(node=?1 AND name=?2), 0) FROM hub_profiles",
+            params![node_key(node), p.name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if same == 0 && total as usize >= max {
+            return Err(HubProfileError::Full(max));
+        }
+        c.execute(
+            "INSERT OR REPLACE INTO hub_profiles(node,name,json) VALUES (?1,?2,?3)",
+            params![node_key(node), p.name, serde_json::to_string(p)?],
+        )?;
+        Ok(())
+    }
+    fn delete_hub_profile(&self, node: Option<&NodeId>, name: &str) -> Result<(), HubProfileError> {
+        match self.conn().execute(
+            "DELETE FROM hub_profiles WHERE node=?1 AND name=?2",
+            params![node_key(node), name],
+        )? {
+            0 => Err(HubProfileError::NotFound(name.to_owned())),
+            _ => Ok(()),
+        }
+    }
+    fn list_node_settings(&self) -> Result<Vec<NodeSettingsEntry>, HubProfileError> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT node, json FROM node_settings ORDER BY node")?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(node, json)| {
+                Ok(NodeSettingsEntry {
+                    node: NodeId::new(&node)?,
+                    settings: serde_json::from_str(&json)?,
+                })
+            })
+            .collect()
+    }
+    fn save_node_settings(&self, node: &NodeId, s: &NodeSettings) -> Result<(), HubProfileError> {
+        let c = self.conn();
+        if *s == NodeSettings::default() {
+            c.execute("DELETE FROM node_settings WHERE node=?1", [node.as_str()])?;
+        } else {
+            c.execute(
+                "INSERT OR REPLACE INTO node_settings(node,json) VALUES (?1,?2)",
+                params![node.as_str(), serde_json::to_string(s)?],
+            )?;
+        }
+        Ok(())
     }
 }

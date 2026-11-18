@@ -170,6 +170,10 @@ pub struct Hub {
     /// Held while a release fetch runs.
     pub(crate) release_busy: tokio::sync::Mutex<()>,
     pub(crate) release_hits: Mutex<HashMap<NodeId, Vec<u64>>>,
+    /// Serializes hub-config changes and pushes so daemons and UIs see them in order.
+    pub(crate) config_lock: Mutex<()>,
+    /// Per node: telemetry history and connection start (memory only).
+    pub(crate) stats: Mutex<HashMap<NodeId, super::config::StatsRing>>,
     // ponytail: in-memory per-IP window; resets on restart.
     enroll_hits: Mutex<HashMap<IpAddr, Vec<u64>>>,
 }
@@ -265,6 +269,8 @@ impl Hub {
             releases: Mutex::default(),
             release_busy: tokio::sync::Mutex::new(()),
             release_hits: Mutex::default(),
+            config_lock: Mutex::default(),
+            stats: Mutex::default(),
             enroll_hits: Mutex::default(),
             cfg,
         });

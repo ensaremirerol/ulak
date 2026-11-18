@@ -26,7 +26,9 @@ pub use registry::Registry;
 pub use scheduler::{pick_node, pick_node_ranked, pick_node_where, repo_rank, Thresholds};
 pub use secrets::Secrets;
 pub use server::{Hub, HubConfig, Running};
-pub use store::{Blockers, Credentials, Mailbox, Questions, Queue, QueueEntry, Store, QUEUE_CAP};
+pub use store::{
+    Blockers, Credentials, HubProfiles, Mailbox, Questions, Queue, QueueEntry, Store, QUEUE_CAP,
+};
 pub use tokens::AgentTokens;
 
 /// Version of this build: the package version plus the git sha embedded by build.rs.

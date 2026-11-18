@@ -130,7 +130,24 @@ pub enum QueueError {
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+pub enum HubProfileError {
+    #[error("at most {0} hub profiles; delete some first")]
+    Full(usize),
+    #[error("hub profile {0:?} not found")]
+    NotFound(String),
+    #[error(transparent)]
+    Invalid(#[from] ProtoError),
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+    #[error("stored hub config is unreadable: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServerError {
+    #[error(transparent)]
+    HubProfile(#[from] HubProfileError),
     #[error(transparent)]
     Credential(#[from] CredentialError),
     #[error(transparent)]
