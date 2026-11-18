@@ -83,6 +83,23 @@ impl GuardConfig {
             load_per_core,
         })
     }
+
+    /// This config with the hub's busy thresholds (each `None` or outside 1..=100 keeps ours).
+    pub fn with_busy_pct(&self, cpu: Option<f32>, gpu: Option<f32>) -> Self {
+        let pick = |v: Option<f32>, local: f32, what: &str| match v {
+            Some(v) if (1.0..=100.0).contains(&v) => v,
+            Some(_) => {
+                eprintln!("ulakd: ignoring hub setting {what}: out of range");
+                local
+            }
+            None => local,
+        };
+        Self {
+            cpu_threshold: pick(cpu, self.cpu_threshold, "cpu_busy_pct"),
+            gpu_threshold: pick(gpu, self.gpu_threshold, "gpu_busy_pct"),
+            ..self.clone()
+        }
+    }
 }
 
 /// Blocklisted process -> `Busy(Gaming)`; else high GPU/CPU/load -> `Busy(Load)`; else `Idle`.
@@ -181,6 +198,20 @@ mod tests {
             NodeState::Busy(BusyReason::Load)
         );
         assert_eq!(evaluate(&c, &[], &t(7.9, 0.0, None), 8), NodeState::Idle);
+    }
+
+    #[test]
+    fn hub_busy_thresholds_override_and_validate() {
+        let local = GuardConfig::default();
+        let c = local.with_busy_pct(Some(95.0), Some(20.0));
+        assert_eq!(evaluate(&c, &[], &t(0.0, 90.0, None), 8), NodeState::Idle);
+        assert_eq!(
+            evaluate(&c, &[], &t(0.0, 0.0, Some(30.0)), 8),
+            NodeState::Busy(BusyReason::Load)
+        );
+        assert_eq!(local.with_busy_pct(None, None), local);
+        assert_eq!(local.with_busy_pct(Some(0.0), Some(f32::NAN)), local);
+        assert_eq!(local.with_busy_pct(Some(101.0), None), local);
     }
 
     #[test]

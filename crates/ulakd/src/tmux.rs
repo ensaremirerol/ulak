@@ -9,20 +9,32 @@ use crate::{
     repos::{self, Cleaned, Settings},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
 use ulak_proto::{
-    AgentId, AgentStatus, BlockerKind, BranchName, CleanItem, GitToken, ProfileInfo, ProfileKey,
-    RepoEntry, RepoRef, Source, SpawnSpec,
+    AgentId, AgentStatus, BlockerKind, BranchName, CleanItem, GitToken, HubProfile, NodeSettings,
+    ProfileInfo, ProfileKey, RepoEntry, RepoRef, Source, SpawnSpec,
 };
 
 /// Session option that remembers the profile key, so a restarted daemon can re-adopt the agent.
 const PROFILE_OPT: &str = "@ulak_profile";
+
+/// The local config (`agents.json`, `ulakd.json`) and what is in effect: local overlaid with the
+/// hub's last `Config` (not persisted; a restart is local until the next one arrives).
+#[derive(Debug)]
+struct Live {
+    local_agents: Agents,
+    local_settings: Settings,
+    agents: Arc<Agents>,
+    /// Profile names that came from (or were overridden by) the hub.
+    hub_names: Arc<BTreeSet<String>>,
+    settings: Arc<Settings>,
+}
 
 /// Per profile: (blocked, generation bumped on every resolve).
 type Blocks = Arc<Mutex<HashMap<ProfileKey, (bool, u64)>>>;
@@ -214,7 +226,7 @@ fn paste_argv(id: &AgentId, bracketed: bool) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub struct Tmux {
     socket: Option<String>,
-    agents: Arc<Agents>,
+    live: Arc<RwLock<Live>>,
     installer: Arc<Installer>,
     blocks: Blocks,
     /// (runtime dir for per-agent MCP configs, hub CA file); `None`: agents get no MCP wiring.
@@ -231,7 +243,6 @@ pub struct Tmux {
     /// Agents whose prompt could not be typed; the hub session drains it.
     prompt_failed: mpsc::UnboundedSender<AgentId>,
     prompt_failures: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AgentId>>>,
-    settings: Arc<Settings>,
     claims: Claims,
     /// Held across scan+pick+claim (spawn) and scan+judge+delete (clean).
     repo_lock: Arc<tokio::sync::Mutex<()>>,
@@ -249,7 +260,13 @@ impl Tmux {
         let (events, event_rx) = mpsc::unbounded_channel();
         Self {
             socket,
-            agents: Arc::new(agents),
+            live: Arc::new(RwLock::new(Live {
+                local_agents: agents.clone(),
+                local_settings: Settings::default(),
+                agents: Arc::new(agents),
+                hub_names: Arc::default(),
+                settings: Arc::default(),
+            })),
             installer: Arc::default(),
             blocks: Arc::default(),
             mcp: None,
@@ -263,16 +280,39 @@ impl Tmux {
             submit_delay: Duration::from_millis(300),
             prompt_failed,
             prompt_failures: Arc::new(tokio::sync::Mutex::new(rx)),
-            settings: Arc::default(),
             claims: Claims::default(),
             repo_lock: Arc::default(),
         }
     }
 
     /// `ulakd.json`: repo roots, index interval, cleanup policy.
-    pub fn with_settings(mut self, settings: Settings) -> Self {
-        self.settings = Arc::new(settings);
+    pub fn with_settings(self, settings: Settings) -> Self {
+        {
+            let mut l = self.live.write().expect("live config lock");
+            l.settings = Arc::new(settings.clone());
+            l.local_settings = settings;
+        }
         self
+    }
+
+    /// Applies the hub's `Config`: profiles and settings overlay the local ones, replacing the
+    /// previous `Config`. Running agents are unaffected; new spawns use the new set.
+    pub fn apply_config(&self, profiles: &[HubProfile], settings: &NodeSettings) {
+        let mut l = self.live.write().expect("live config lock");
+        let (agents, names) = l.local_agents.with_hub(profiles);
+        l.agents = Arc::new(agents);
+        l.hub_names = Arc::new(names);
+        l.settings = Arc::new(l.local_settings.overlay(settings));
+    }
+
+    /// The profiles in effect (local plus hub).
+    pub fn agents(&self) -> Arc<Agents> {
+        Arc::clone(&self.live.read().expect("live config lock").agents)
+    }
+
+    /// The settings in effect (`ulakd.json` plus hub).
+    pub fn settings(&self) -> Arc<Settings> {
+        Arc::clone(&self.live.read().expect("live config lock").settings)
     }
 
     /// Wires spawned agents to the hub's MCP server (see [`mcp`]): configs live in `runtime_dir`,
@@ -322,7 +362,8 @@ impl Tmux {
             .git
             .as_ref()
             .ok_or_else(|| AgentError::Git("repo spawns are not enabled on this node".into()))?;
-        self.ensure_installed(spec).await?;
+        self.ensure_installed(spec, &self.agents().exec_spec(spec))
+            .await?;
         let reused = if fresh {
             None
         } else {
@@ -382,7 +423,7 @@ impl Tmux {
             program: cfg.program().to_owned(),
             host: cfg.host().to_owned(),
             work_root: cfg.work_root.clone(),
-            roots: self.settings.repo_roots.clone(),
+            roots: self.settings().repo_roots.clone(),
         }
     }
 
@@ -478,8 +519,12 @@ impl Tmux {
         Ok(Some((path, claim)))
     }
 
-    /// The node's named profiles (`agents.json` plus defaults).
+    /// The node's named profiles (`agents.json` plus defaults plus the hub's).
     pub async fn profiles(&self) -> Vec<ProfileInfo> {
+        let (agents, hub) = {
+            let l = self.live.read().expect("live config lock");
+            (Arc::clone(&l.agents), Arc::clone(&l.hub_names))
+        };
         let blocked: HashSet<String> = self
             .blocks
             .lock()
@@ -488,8 +533,8 @@ impl Tmux {
             .filter(|(_, b)| b.0)
             .map(|(k, _)| k.as_str().to_owned())
             .collect();
-        let infos = self.agents.names().map(|name| {
-            let r = self.agents.recipe(name);
+        let infos = agents.names().map(|name| {
+            let r = agents.recipe(name);
             let tilde = |p: &str| {
                 repos::expand_tilde(Path::new(p))
                     .to_string_lossy()
@@ -498,6 +543,7 @@ impl Tmux {
             let binary = r.binary.as_deref().map_or_else(|| name.to_owned(), tilde);
             let config_dir = r.config_dir.as_deref().map(tilde);
             let login_blocked = blocked.contains(name);
+            let from_hub = hub.contains(name);
             let name = name.to_owned();
             async move {
                 ProfileInfo {
@@ -506,7 +552,7 @@ impl Tmux {
                     binary,
                     config_dir,
                     login_blocked,
-                    from_hub: false,
+                    from_hub,
                 }
             }
         });
@@ -596,10 +642,11 @@ impl Tmux {
 
     /// Automatic cleanup (when `clean.auto`): clones idle for `after_exit_hours` at `now`.
     pub async fn maintain(&self, now: u64) -> Option<Cleaned> {
-        if !self.settings.clean.auto {
+        let settings = self.settings();
+        if !settings.clean.auto {
             return None;
         }
-        let hours = self.settings.clean.after_exit_hours;
+        let hours = settings.clean.after_exit_hours;
         self.clean_with(false, move |f| Ok(repos::auto_due(&f, now, hours)), now)
             .await
     }
@@ -686,8 +733,7 @@ impl Tmux {
     }
 
     /// Makes sure the agent binary exists, installing it from the local recipe if needed.
-    async fn ensure_installed(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
-        let exec = self.agents.exec_spec(spec);
+    async fn ensure_installed(&self, spec: &SpawnSpec, exec: &Exec) -> Result<(), AgentError> {
         let (binary, recipe, id) = (exec.binary.as_str(), &exec.recipe, spec.agent_id());
         if is_installed(recipe, binary).await {
             return Ok(());
@@ -731,13 +777,13 @@ impl Tmux {
     }
 
     async fn spawn_prepared(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
-        let exec = self.agents.exec_spec(spec);
+        let exec = self.agents().exec_spec(spec);
         let extra = match &self.mcp {
             Some((dir, ca)) => mcp::prepare(&exec.recipe, spec, ca, dir)?,
             None => Prepared::default(),
         };
         let argv = new_session_argv_exec(spec, &exec, &extra)?;
-        if let Err(e) = self.ensure_installed(spec).await {
+        if let Err(e) = self.ensure_installed(spec, &exec).await {
             self.drop_mcp_file(spec.agent_id());
             return Err(e);
         }
@@ -845,7 +891,7 @@ impl Tmux {
             login_patterns,
             login_scan_secs,
             ..
-        } = self.agents.recipe(&name);
+        } = self.agents().recipe(&name);
         if login_patterns.is_empty() {
             return;
         }
@@ -1016,7 +1062,10 @@ impl AgentHost for Tmux {
         }
     }
     fn maintenance_interval(&self) -> Duration {
-        Duration::from_secs(self.settings.index_interval_mins.max(1) * 60)
+        Duration::from_secs(self.settings().index_interval_mins.max(1) * 60)
+    }
+    fn apply_config(&self, profiles: &[HubProfile], settings: &NodeSettings) {
+        Tmux::apply_config(self, profiles, settings);
     }
     async fn maintain(&self) -> Option<Cleaned> {
         Tmux::maintain(self, repos::now_ms()).await

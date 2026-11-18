@@ -15,7 +15,7 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use ulak_proto::{BranchName, CleanItem, RepoEntry, RepoRef};
+use ulak_proto::{BranchName, CleanItem, NodeSettings, RepoEntry, RepoRef};
 
 /// At most this many entries are reported to the hub.
 pub const INDEX_CAP: usize = 200;
@@ -85,6 +85,32 @@ impl Settings {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// These (local) settings with the hub's overrides; an out-of-range value is ignored
+    /// (logged) and the local one kept.
+    pub fn overlay(&self, hub: &NodeSettings) -> Self {
+        let mut me = self.clone();
+        let ignore = |what: &str| eprintln!("ulakd: ignoring hub setting {what}: out of range");
+        match &hub.repo_roots {
+            Some(r) if r.len() > 16 || r.iter().any(|p| p.is_empty()) => ignore("repo_roots"),
+            Some(r) => me.repo_roots = r.iter().map(|p| expand_tilde(Path::new(p))).collect(),
+            None => {}
+        }
+        match hub.index_interval_mins {
+            Some(m) if (1..=1440).contains(&m) => me.index_interval_mins = m,
+            Some(_) => ignore("index_interval_mins"),
+            None => {}
+        }
+        if let Some(a) = hub.clean_auto {
+            me.clean.auto = a;
+        }
+        match hub.clean_after_exit_hours {
+            Some(h) if (1..=8760).contains(&h) => me.clean.after_exit_hours = h,
+            Some(_) => ignore("clean_after_exit_hours"),
+            None => {}
+        }
+        me
     }
 }
 
@@ -881,6 +907,43 @@ mod tests {
         assert!(!s.repo_roots[0].starts_with("~") && s.repo_roots[0].ends_with("code"));
         std::fs::write(t.path().join("ulakd.json"), r#"{"bogus":1}"#).unwrap();
         assert!(Settings::load(t.path()).is_err());
+    }
+
+    #[test]
+    fn hub_settings_overlay_validate_and_restore() {
+        let local = Settings::default();
+        let hub = NodeSettings {
+            repo_roots: Some(vec!["~/src".into()]),
+            index_interval_mins: Some(30),
+            clean_auto: Some(true),
+            clean_after_exit_hours: Some(2),
+            ..NodeSettings::default()
+        };
+        let s = local.overlay(&hub);
+        assert!(s.repo_roots.len() == 1 && !s.repo_roots[0].starts_with("~"));
+        assert!(s.repo_roots[0].ends_with("src"));
+        assert_eq!((s.index_interval_mins, s.clean.auto), (30, true));
+        assert_eq!(s.clean.after_exit_hours, 2);
+        // out of range: the local value stays
+        let bad = NodeSettings {
+            repo_roots: Some(vec!["/x".into(); 17]),
+            index_interval_mins: Some(0),
+            clean_after_exit_hours: Some(8761),
+            ..NodeSettings::default()
+        };
+        assert_eq!(local.overlay(&bad), local);
+        // all None: the local settings
+        assert_eq!(local.overlay(&NodeSettings::default()), local);
+        // an empty list is a valid override (no extra roots)
+        let mine = Settings {
+            repo_roots: vec!["/mine".into()],
+            ..Settings::default()
+        };
+        let none = NodeSettings {
+            repo_roots: Some(vec![]),
+            ..NodeSettings::default()
+        };
+        assert!(mine.overlay(&none).repo_roots.is_empty());
     }
 
     #[test]

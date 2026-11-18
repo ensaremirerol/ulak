@@ -28,8 +28,8 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, WebSocketStream,
 };
 use ulak_proto::{
-    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, GitToken, HubToDaemon, NodeId,
-    NodeInfo, ProfileInfo, ProfileKey, RepoEntry, SpawnSpec,
+    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, GitToken, HubProfile,
+    HubToDaemon, NodeId, NodeInfo, NodeSettings, ProfileInfo, ProfileKey, RepoEntry, SpawnSpec,
 };
 
 /// Something the host wants the hub to hear about, outside of a command's own reply.
@@ -96,6 +96,8 @@ pub trait AgentHost: Send + Sync + 'static {
     fn maintenance_interval(&self) -> Duration {
         Duration::from_secs(600)
     }
+    /// The hub's profiles and settings (replacing the previous ones); default: ignored.
+    fn apply_config(&self, _profiles: &[HubProfile], _settings: &NodeSettings) {}
     /// Periodic upkeep (rescan, automatic cleanup); returns what an automatic cleanup did.
     fn maintain(&self) -> impl Future<Output = Option<Cleaned>> + Send {
         std::future::ready(None)
@@ -212,6 +214,7 @@ const PENDING_RETRY: Duration = Duration::from_millis(500);
 struct Session<'a, H> {
     cfg: &'a SessionCfg,
     host: &'a H,
+    probe: &'a SharedProbe,
     last: Probed,
     known: HashSet<AgentId>,
     attached: HashMap<AgentId, JoinHandle<()>>,
@@ -376,10 +379,40 @@ impl<'a, H: AgentHost> Session<'a, H> {
         self.emit(self.hello()).await;
     }
 
+    /// Applies the hub's `Config` to the host, the probe and the updater, then re-sends what
+    /// changed. Never logs env values.
+    fn config(&mut self, profiles: &[HubProfile], settings: &NodeSettings) {
+        self.host.apply_config(profiles, settings);
+        self.probe
+            .lock()
+            .expect("probe lock is never held across a panic")
+            .set_busy_pct(settings.cpu_busy_pct, settings.gpu_busy_pct);
+        if let Some(u) = &self.updates {
+            u.set_auto(settings.auto_update);
+        }
+        let s = settings;
+        let overrides = [
+            s.repo_roots.is_some(),
+            s.index_interval_mins.is_some(),
+            s.clean_auto.is_some(),
+            s.clean_after_exit_hours.is_some(),
+            s.auto_update.is_some(),
+            s.cpu_busy_pct.is_some(),
+            s.gpu_busy_pct.is_some(),
+        ]
+        .into_iter()
+        .filter(|x| *x)
+        .count();
+        eprintln!(
+            "ulakd: hub config: {} profile(s), {overrides} setting override(s)",
+            profiles.len()
+        );
+        self.refresh();
+    }
+
     async fn handle(&mut self, cmd: HubToDaemon, spawns: &mut Spawns<'a>) {
         match cmd {
-            // TODO(0.1.7): apply hub profiles and settings.
-            HubToDaemon::Config { .. } => {}
+            HubToDaemon::Config { profiles, settings } => self.config(&profiles, &settings),
             HubToDaemon::Spawn(spec) => {
                 let id = spec.agent_id().clone();
                 self.status(&id, AgentStatus::Starting).await;
@@ -588,6 +621,7 @@ where
     let mut s = Session {
         cfg,
         host,
+        probe,
         last: sample(probe).await?,
         known,
         attached: HashMap::new(),
@@ -627,7 +661,14 @@ where
                 None | Some(Ok(Message::Close(_))) => break Ok(()),
                 Some(Err(e)) => break Err(e.into()),
                 Some(Ok(Message::Text(t))) => match decode::<HubToDaemon>(t.as_str()) {
-                    Ok(cmd) => s.handle(cmd, &mut spawns).await,
+                    Ok(cmd) => {
+                        s.handle(cmd, &mut spawns).await;
+                        // a hub Config may change the interval
+                        let d = host.maintenance_interval();
+                        if d != upkeep.period() {
+                            upkeep = tokio::time::interval_at(tokio::time::Instant::now() + d, d);
+                        }
+                    }
                     Err(e) => eprintln!("ulakd: bad hub frame: {e}"),
                 },
                 Some(Ok(_)) => {}

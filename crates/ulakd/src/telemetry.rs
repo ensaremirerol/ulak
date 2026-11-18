@@ -156,11 +156,15 @@ pub struct Probed {
 
 pub trait Probe: Send {
     fn sample(&mut self) -> Result<Probed, TelemetryError>;
+    /// The hub's busy thresholds (`None`: the local value). Default: ignored.
+    fn set_busy_pct(&mut self, _cpu: Option<f32>, _gpu: Option<f32>) {}
 }
 
 /// Reads the real system (`/proc`, nvidia-smi, sysfs).
 pub struct SystemProbe {
     prev: Option<CpuTimes>,
+    /// From `guard.json`; `guard` is it with the hub's thresholds applied.
+    local: GuardConfig,
     guard: GuardConfig,
     cores: u32,
 }
@@ -171,7 +175,12 @@ impl SystemProbe {
         let prev = read("stat", "/proc/stat")
             .and_then(|s| parse_cpu_stat(&s))
             .ok();
-        Self { prev, guard, cores }
+        Self {
+            prev,
+            local: guard.clone(),
+            guard,
+            cores,
+        }
     }
 }
 
@@ -189,6 +198,9 @@ impl Probe for SystemProbe {
         )?;
         let state = evaluate(&self.guard, &read_process_names(), &telemetry, self.cores);
         Ok(Probed { telemetry, state })
+    }
+    fn set_busy_pct(&mut self, cpu: Option<f32>, gpu: Option<f32>) {
+        self.guard = self.local.with_busy_pct(cpu, gpu);
     }
 }
 
@@ -231,7 +243,17 @@ mod tests {
 
     #[test]
     fn system_probe_reads_this_machine() {
-        let p = SystemProbe::new(GuardConfig::default()).sample().unwrap();
+        let mut probe = SystemProbe::new(GuardConfig::default());
+        let p = probe.sample().unwrap();
         assert!(p.telemetry.mem_used_pct() > 0.0);
+        // hub thresholds apply on top of guard.json and are undone by `None`
+        probe.set_busy_pct(Some(1.0), Some(2.0));
+        assert_eq!(
+            probe.guard,
+            GuardConfig::default().with_busy_pct(Some(1.0), Some(2.0))
+        );
+        assert_ne!(probe.guard, GuardConfig::default());
+        probe.set_busy_pct(None, None);
+        assert_eq!(probe.guard, GuardConfig::default());
     }
 }

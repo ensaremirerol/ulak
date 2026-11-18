@@ -18,7 +18,10 @@ use http::{origin, Http};
 use release::{Release, SemVer};
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{watch, Mutex};
@@ -59,7 +62,9 @@ pub enum Outcome {
 
 pub struct Updater {
     cfg: UpdateConfig,
-    auto: bool,
+    /// From `update.json`/env (container default included); `auto` is it or the hub's override.
+    local_auto: bool,
+    auto: AtomicBool,
     token: Option<String>,
     info: VersionInfo,
     exe: PathBuf,
@@ -91,7 +96,8 @@ impl Updater {
     ) -> Self {
         Self {
             cfg,
-            auto,
+            local_auto: auto,
+            auto: AtomicBool::new(auto),
             token,
             info,
             exe,
@@ -111,6 +117,17 @@ impl Updater {
     pub fn with_product(mut self, product: &'static str) -> Self {
         self.product = product;
         self
+    }
+
+    /// The hub's `auto_update` (`None`: the local setting). Read by the next automatic round.
+    pub fn set_auto(&self, hub: Option<bool>) {
+        self.auto
+            .store(hub.unwrap_or(self.local_auto), Ordering::Relaxed);
+    }
+
+    /// Does the automatic check install?
+    pub fn auto(&self) -> bool {
+        self.auto.load(Ordering::Relaxed)
     }
 
     pub fn info(&self) -> &VersionInfo {
@@ -294,7 +311,7 @@ impl Updater {
     pub async fn auto_loop(self: Arc<Self>) {
         tokio::time::sleep(self.initial_delay).await;
         loop {
-            if let Some(Ok(Outcome::Installed(_))) = self.run(self.auto, true).await {
+            if let Some(Ok(Outcome::Installed(_))) = self.run(self.auto(), true).await {
                 self.restart().await;
             }
             tokio::time::sleep(Duration::from_secs(self.cfg.interval_hours * 3600)).await;

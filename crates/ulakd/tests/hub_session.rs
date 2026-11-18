@@ -669,3 +669,237 @@ async fn profiles_repo_index_and_clean_reports() {
     );
     daemon.abort();
 }
+
+/// Records the busy thresholds the session hands it.
+struct ThresholdProbe(Arc<Mutex<(Option<f32>, Option<f32>)>>);
+impl Probe for ThresholdProbe {
+    fn sample(&mut self) -> Result<Probed, TelemetryError> {
+        Ok(Probed {
+            telemetry: Telemetry::new(0.1, 5.0, None, 20.0, 1)?,
+            state: NodeState::Idle,
+        })
+    }
+    fn set_busy_pct(&mut self, cpu: Option<f32>, gpu: Option<f32>) {
+        *self.0.lock().unwrap() = (cpu, gpu);
+    }
+}
+
+fn hub_profile(name: &str, binary: &str, cfg: Option<&str>) -> HubProfile {
+    HubProfile {
+        name: name.into(),
+        binary: binary.into(),
+        args: vec![],
+        config_dir: cfg.map(Into::into),
+        env: Default::default(),
+    }
+}
+
+/// The next `Profiles` frame that satisfies `ok`.
+async fn profiles_where<S>(ws: &mut S, ok: impl Fn(&[ProfileInfo]) -> bool) -> Vec<ProfileInfo>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        if let DaemonToHub::Profiles { profiles } = next_frame(ws).await {
+            if ok(&profiles) {
+                return profiles;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn hub_config_overlays_profiles_and_settings_and_restores_them() {
+    use ulakd::{
+        agents::Agents,
+        repos::Settings,
+        tmux::Tmux,
+        update::{config::UpdateConfig, Updater},
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws/daemon", listener.local_addr().unwrap());
+    let agents = Agents::from_json(
+        r#"{"claude":{"check":["true"],"install":["npm","install","-g","@anthropic-ai/claude-code"],"login_patterns":["run /login"]},
+            "tool":{"check":["true"],"install":["local-installer","--x"],"login_patterns":["tool login"]}}"#,
+    )
+    .unwrap();
+    let local = Settings {
+        repo_roots: vec!["/local-root".into()],
+        ..Settings::default()
+    };
+    // own socket: profiles() never talks to tmux, list() sees no server
+    let tm = Tmux::with_agents(Some(format!("ulakd-hubcfg-{}", std::process::id())), agents)
+        .with_settings(local.clone());
+    let seen = Arc::new(Mutex::new((None, None)));
+    let probe: SharedProbe = Arc::new(Mutex::new(Box::new(ThresholdProbe(Arc::clone(&seen)))));
+    let dir = tempfile::tempdir().unwrap();
+    let u = Arc::new(Updater::new(
+        UpdateConfig::default(),
+        false,
+        None,
+        VersionInfo::current("0.1.0", "abc").unwrap(),
+        dir.path().join("ulakd"),
+        dir.path().to_owned(),
+        Err(ulakd::errors::UpdateError::NoKey),
+    ));
+    let cfg = SessionCfg {
+        node_id: NodeId::new("node-1").unwrap(),
+        hostname: "box".into(),
+        heartbeat: Duration::from_millis(200),
+    };
+    let (h, uu) = (tm.clone(), Arc::clone(&u));
+    let daemon = tokio::spawn(async move {
+        let ws = connect(&url, None).await.unwrap();
+        ulakd::hub::run_session_with(ws, &cfg, &h, &probe, Some(uu)).await
+    });
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut hub = accept_async(tcp).await.unwrap();
+    let p = profiles_where(&mut hub, |_| true).await;
+    assert!(p.iter().all(|i| !i.from_hub) && p.iter().any(|i| i.name == "tool"));
+
+    let settings = NodeSettings {
+        repo_roots: Some(vec!["~/hub-root".into()]),
+        index_interval_mins: Some(3),
+        clean_auto: Some(true),
+        clean_after_exit_hours: Some(5),
+        auto_update: Some(true),
+        cpu_busy_pct: Some(90.0),
+        gpu_busy_pct: Some(500.0), // out of range: the probe ignores it (see guard tests)
+    };
+    hub.send(send(HubToDaemon::Config {
+        profiles: vec![
+            hub_profile("claude-work", "claude", Some("~/.claude-work")),
+            hub_profile("tool", "/opt/tool", None),
+            hub_profile("mystery", "unknown-bin", None),
+        ],
+        settings,
+    }))
+    .await
+    .unwrap();
+    let p = profiles_where(&mut hub, |p| p.iter().any(|i| i.name == "claude-work")).await;
+    let get = |n: &str| p.iter().find(|i| i.name == n).unwrap().clone();
+    let home = std::env::var("HOME").unwrap();
+    let w = get("claude-work");
+    assert!(w.from_hub && w.binary == "claude");
+    assert_eq!(w.config_dir, Some(format!("{home}/.claude-work")));
+    assert!(get("tool").from_hub && get("tool").binary == "/opt/tool");
+    assert!(get("mystery").from_hub && !get("claude").from_hub);
+    // hub profiles never bring commands: local install argv, inherited login patterns
+    let a = tm.agents();
+    let work = a.recipe("claude-work");
+    assert_eq!(work.install.unwrap()[0], "npm");
+    assert_eq!(work.login_patterns, ["run /login"]);
+    assert_eq!(
+        a.recipe("tool").install.unwrap(),
+        ["local-installer", "--x"]
+    );
+    assert_eq!(a.recipe("tool").login_patterns, ["tool login"]);
+    assert!(a.recipe("mystery").install.is_none() && a.recipe("mystery").check.is_none());
+    // settings
+    let s = tm.settings();
+    assert_eq!(
+        s.repo_roots,
+        [std::path::PathBuf::from(format!("{home}/hub-root"))]
+    );
+    assert_eq!(s.index_interval_mins, 3);
+    assert!(s.clean.auto && s.clean.after_exit_hours == 5);
+    assert_eq!(tm.maintenance_interval(), Duration::from_secs(180));
+    assert_eq!(*seen.lock().unwrap(), (Some(90.0), Some(500.0)));
+    assert!(u.auto());
+
+    // an empty Config: hub profiles disappear, every setting is local again
+    hub.send(send(HubToDaemon::Config {
+        profiles: vec![],
+        settings: NodeSettings::default(),
+    }))
+    .await
+    .unwrap();
+    let p = profiles_where(&mut hub, |p| !p.iter().any(|i| i.name == "claude-work")).await;
+    assert!(p.iter().all(|i| !i.from_hub));
+    assert_eq!(tm.agents().recipe("tool").binary, None);
+    assert_eq!(*tm.settings(), local);
+    assert_eq!(*seen.lock().unwrap(), (None, None));
+    assert!(!u.auto());
+    daemon.abort();
+}
+
+/// Its maintenance interval is `index_interval_mins` milliseconds (keeps the test fast).
+struct IntervalHost {
+    ms: std::sync::atomic::AtomicU64,
+    maintained: std::sync::atomic::AtomicUsize,
+}
+impl AgentHost for IntervalHost {
+    async fn spawn(&self, _: &SpawnSpec) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn kill(&self, _: &AgentId) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn nudge(&self, _: &AgentId, _: &str) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn input(&self, _: &AgentId, _: &[u8]) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn list(&self) -> Result<Vec<AgentId>, AgentError> {
+        Ok(vec![])
+    }
+    async fn attach(&self, _: &AgentId) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+        Err(AgentError::NotRunning("x".into()))
+    }
+    fn apply_config(&self, _: &[HubProfile], s: &NodeSettings) {
+        self.ms
+            .store(s.index_interval_mins.unwrap_or(3_600_000), Ordering::SeqCst);
+    }
+    fn maintenance_interval(&self) -> Duration {
+        Duration::from_millis(self.ms.load(Ordering::SeqCst))
+    }
+    async fn maintain(&self) -> Option<ulakd::repos::Cleaned> {
+        self.maintained.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+}
+
+#[tokio::test]
+async fn hub_config_changes_the_maintenance_interval_live() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws/daemon", listener.local_addr().unwrap());
+    let host = Arc::new(IntervalHost {
+        ms: 3_600_000.into(),
+        maintained: 0.into(),
+    });
+    let state = Arc::new(Mutex::new(NodeState::Idle));
+    let probe: SharedProbe = Arc::new(Mutex::new(Box::new(FakeProbe(state))));
+    let cfg = SessionCfg {
+        node_id: NodeId::new("node-1").unwrap(),
+        hostname: "box".into(),
+        heartbeat: Duration::from_secs(60),
+    };
+    let h = Arc::clone(&host);
+    let daemon = tokio::spawn(async move {
+        let ws = connect(&url, None).await.unwrap();
+        run_session(ws, &cfg, &*h, &probe).await
+    });
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut hub = accept_async(tcp).await.unwrap();
+    next_frame(&mut hub).await; // Hello
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(host.maintained.load(Ordering::SeqCst), 0);
+    hub.send(send(HubToDaemon::Config {
+        profiles: vec![],
+        settings: NodeSettings {
+            index_interval_mins: Some(50),
+            ..NodeSettings::default()
+        },
+    }))
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.maintained.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance runs at the new interval");
+    daemon.abort();
+}

@@ -4,6 +4,10 @@
 //! `claude-personal`), and then inherits whatever it leaves out from that binary's entry.
 //! Install recipes come ONLY from this local file (and the built-in defaults); the hub never
 //! supplies a command. Recipes are argv vectors, run without a shell.
+//!
+//! Hub profiles ([`Agents::with_hub`]) only set `binary`, `args`, `config_dir` and `env`; a hub
+//! profile of a local name keeps that entry's check/install/login/MCP fields, a new name gets
+//! none of its own (so it inherits them from its binary's local entry, if any).
 use crate::{errors::ConfigError, repos::expand_tilde};
 use futures_util::{
     future::{BoxFuture, Shared},
@@ -11,14 +15,14 @@ use futures_util::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     process::Stdio,
     sync::Mutex,
     time::Duration,
 };
 use tokio::process::Command;
-use ulak_proto::SpawnSpec;
+use ulak_proto::{HubProfile, SpawnSpec};
 
 const DETAIL_MAX: usize = 400;
 
@@ -237,10 +241,73 @@ impl Agents {
         e
     }
 
+    /// These (local) profiles overlaid with the hub's: returns the merged set and the names that
+    /// came from the hub. Invalid hub profiles are skipped with a log line.
+    pub fn with_hub(&self, hub: &[HubProfile]) -> (Self, BTreeSet<String>) {
+        let mut me = self.clone();
+        let mut names = BTreeSet::new();
+        for p in hub {
+            if let Err(e) = check_hub_profile(p) {
+                eprintln!("ulakd: ignoring hub profile: {e}");
+                continue;
+            }
+            // Only these four fields come from the hub; never check/install/login/MCP.
+            let base = self.0.get(&p.name).cloned().unwrap_or_default();
+            let r = Recipe {
+                binary: Some(p.binary.clone()),
+                args: p.args.clone(),
+                config_dir: p.config_dir.clone(),
+                env: p.env.clone(),
+                ..base
+            };
+            me.0.insert(p.name.clone(), r);
+            names.insert(p.name.clone());
+        }
+        (me, names)
+    }
+
     /// Every named profile (defaults plus `agents.json`), sorted by name.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(String::as_str)
     }
+}
+
+fn printable(s: &str, max: usize) -> bool {
+    (1..=max).contains(&s.chars().count()) && !s.chars().any(char::is_control)
+}
+
+/// The limits documented on [`HubProfile`]. The error never echoes env values.
+pub fn check_hub_profile(p: &HubProfile) -> Result<(), String> {
+    let name_ok = (1..=64).contains(&p.name.len())
+        && p.name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && p.name != "."
+        && p.name != "..";
+    if !name_ok {
+        return Err("bad name".into());
+    }
+    let n = &p.name;
+    if !printable(&p.binary, 256) {
+        return Err(format!("{n}: bad binary"));
+    }
+    if p.args.len() > 32 || !p.args.iter().all(|a| printable(a, 512)) {
+        return Err(format!("{n}: bad args"));
+    }
+    if p.config_dir.as_deref().is_some_and(|d| !printable(d, 512)) {
+        return Err(format!("{n}: bad config_dir"));
+    }
+    let key_ok = |k: &str| {
+        let mut c = k.chars();
+        c.next()
+            .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+            && c.all(|f| f.is_ascii_alphanumeric() || f == '_')
+            && !k.starts_with("ULAK")
+    };
+    if p.env.len() > 32 || !p.env.keys().all(|k| key_ok(k)) {
+        return Err(format!("{n}: bad env"));
+    }
+    Ok(())
 }
 
 /// `/usr/bin/claude` -> `claude`.
@@ -527,6 +594,93 @@ pub(crate) mod tests {
             .unwrap()
             .find("binary")
             .is_none());
+    }
+
+    pub(crate) fn hub(name: &str, binary: &str, cfg: Option<&str>) -> HubProfile {
+        HubProfile {
+            name: name.into(),
+            binary: binary.into(),
+            args: vec![],
+            config_dir: cfg.map(Into::into),
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn hub_profiles_overlay_but_never_bring_commands() {
+        let local = Agents::from_json(
+            r#"{"tool":{"install":["local-installer"],"login_patterns":["log in"],"binary":"tool-bin","args":["--old"]}}"#,
+        )
+        .unwrap();
+        let base = Agents::default().recipe("claude");
+        let over = HubProfile {
+            args: vec!["--new".into()],
+            env: BTreeMap::from([("A".to_owned(), "1".to_owned())]),
+            ..hub("tool", "/opt/tool", Some("~/.tool"))
+        };
+        let (a, names) = local.with_hub(&[
+            hub("claude-work", "claude", Some("~/.claude-work")),
+            over,
+            hub("mystery", "unknown-bin", None),
+            hub("bad/name", "claude", None),
+            HubProfile {
+                env: BTreeMap::from([("ULAK_X".to_owned(), "v".to_owned())]),
+                ..hub("sneaky", "claude", None)
+            },
+        ]);
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            ["claude-work", "mystery", "tool"]
+        );
+        // a new name inherits install and login from its binary's local entry
+        let w = a.recipe("claude-work");
+        assert_eq!(w.install, base.install);
+        assert_eq!(w.login_patterns, base.login_patterns);
+        assert_eq!(w.mcp, Some(Mcp::Claude));
+        // an override keeps the local commands, takes the hub's binary/args/config_dir/env
+        let t = a.recipe("tool");
+        assert_eq!(t.install.unwrap(), ["local-installer"]);
+        assert_eq!(t.login_patterns, ["log in"]);
+        assert_eq!(t.binary.as_deref(), Some("/opt/tool"));
+        assert_eq!(t.args, ["--new"]);
+        assert_eq!(t.config_dir.as_deref(), Some("~/.tool"));
+        assert_eq!(t.env["A"], "1");
+        // an unknown binary gets no commands
+        let m = a.recipe("mystery");
+        assert!(m.install.is_none() && m.check.is_none());
+        assert!(!a.names().any(|n| n == "sneaky" || n == "bad/name"));
+        // an empty hub list is the local set
+        assert_eq!(local.with_hub(&[]).0, local);
+    }
+
+    #[test]
+    fn hub_profile_limits() {
+        let ok = hub("a.b_c-1", "claude", None);
+        assert!(check_hub_profile(&ok).is_ok());
+        let bad = [
+            hub("", "claude", None),
+            hub(&"x".repeat(65), "claude", None),
+            hub("..", "claude", None),
+            hub("a", "", None),
+            hub("a", "cl\nx", None),
+            hub("a", &"x".repeat(257), None),
+            hub("a", "x", Some("/c\u{7}")),
+            HubProfile {
+                args: vec!["a".into(); 33],
+                ..ok.clone()
+            },
+            HubProfile {
+                args: vec![String::new()],
+                ..ok.clone()
+            },
+            HubProfile {
+                env: BTreeMap::from([("1A".into(), "v".into())]),
+                ..ok.clone()
+            },
+        ];
+        for b in &bad {
+            assert!(check_hub_profile(b).is_err(), "{b:?}");
+        }
     }
 
     #[test]
