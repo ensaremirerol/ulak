@@ -1,5 +1,7 @@
 use ulak_proto::*;
-use ulak_remote::{pick_node, pick_node_where, Registry, ScheduleError, Thresholds};
+use ulak_remote::{
+    pick_node, pick_node_ranked, pick_node_where, repo_rank, Registry, ScheduleError, Thresholds,
+};
 
 fn node(id: &str, state: NodeState, cpu: f32, gpu: Option<f32>, at: u64) -> NodeInfo {
     node_load(id, state, 0.1, cpu, gpu, at)
@@ -155,5 +157,81 @@ fn auto_skips_blocked_nodes() {
     assert_eq!(
         pick_node_where(&nodes, &SpawnTarget::Node(nid("a")), &limits(), blocked),
         Err(ScheduleError::NodeNotEligible(nid("a")))
+    );
+}
+
+fn entry(name: &str, path: &str, clean: bool, in_use: bool, managed: bool) -> RepoEntry {
+    RepoEntry {
+        full_name: RepoRef::new(name).unwrap(),
+        path: path.into(),
+        branch: Some("main".into()),
+        clean,
+        ahead: Some(0),
+        behind: Some(0),
+        last_fetch_ms: None,
+        in_use,
+        managed,
+    }
+}
+
+#[test]
+fn repo_rank_prefers_an_unused_clean_managed_clone() {
+    let r = RepoRef::new("o/n").unwrap();
+    assert_eq!(repo_rank(&[], &r), 2);
+    assert_eq!(
+        repo_rank(&[entry("o/other", "/a", true, false, true)], &r),
+        2
+    );
+    assert_eq!(repo_rank(&[entry("o/n", "/a", true, false, true)], &r), 0);
+    for (clean, in_use, managed) in [
+        (false, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
+        assert_eq!(
+            repo_rank(&[entry("o/n", "/a", clean, in_use, managed)], &r),
+            1
+        );
+    }
+    let two = [
+        entry("o/n", "/a", true, true, true),
+        entry("o/n", "/b", true, false, true),
+    ];
+    assert_eq!(repo_rank(&two, &r), 0);
+}
+
+#[test]
+fn auto_prefers_lower_rank_then_lower_cpu_and_explicit_ignores_rank() {
+    let nodes = [
+        node("a", NodeState::Idle, 10.0, None, 0),
+        node("b", NodeState::Idle, 50.0, None, 0),
+        node("c", NodeState::Idle, 30.0, None, 0),
+        node(
+            "busy",
+            NodeState::Busy(BusyReason::Gaming {
+                process: "g".into(),
+            }),
+            1.0,
+            None,
+            0,
+        ),
+    ];
+    let rank = |n: &NodeId| match n.as_str() {
+        "b" | "c" | "busy" => 0,
+        _ => 2,
+    };
+    let pick = |t: &SpawnTarget| pick_node_ranked(&nodes, t, &limits(), |_| false, rank);
+    assert_eq!(pick(&SpawnTarget::Auto).unwrap(), nid("c"));
+    assert_eq!(pick(&SpawnTarget::Node(nid("a"))).unwrap(), nid("a"));
+    // Same rank everywhere: the existing order (lowest CPU).
+    assert_eq!(
+        pick_node_ranked(&nodes, &SpawnTarget::Auto, &limits(), |_| false, |_| 1).unwrap(),
+        nid("a")
+    );
+    // A preferred node that is blocked is skipped.
+    let blocked = |n: &NodeId| n.as_str() == "c";
+    assert_eq!(
+        pick_node_ranked(&nodes, &SpawnTarget::Auto, &limits(), blocked, rank).unwrap(),
+        nid("b")
     );
 }

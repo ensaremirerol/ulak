@@ -1,6 +1,7 @@
 import type {
   AgentId, AgentStatus, Blocker, DeviceInfo, DeviceKind, HubToUi, Message, NodeId, NodeInfo,
   OtpOffer, Question, CredentialInfo, RepoInfo, QueuedSpawn, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
+  ProfileInfo, RepoEntry, CleanItem,
 } from '../proto';
 import type { ConnState } from '../net';
 
@@ -48,6 +49,10 @@ export interface State {
   /** Branches by `credential\0repo`. */
   branches: Record<string, { branches: string[]; defaultBranch: string }>;
   queue: QueuedSpawn[];
+  nodeProfiles: Record<NodeId, ProfileInfo[]>;
+  nodeRepos: Record<NodeId, RepoEntry[]>;
+  /** The latest clean report per node. */
+  lastClean: Record<NodeId, { dryRun: boolean; removed: CleanItem[]; kept: CleanItem[] }>;
 }
 
 export type Event =
@@ -71,7 +76,7 @@ export interface SpawnForm {
   /** Optional profile directory (CLAUDE_CONFIG_DIR style); empty = none. */
   configDir: string;
   /** Present = repo spawn (workdir is then sent as ''); absent = folder spawn at `workdir`. */
-  repo?: { credential: string; repo: string; branch: string; allowPush: boolean };
+  repo?: { credential: string; repo: string; branch: string; allowPush: boolean; fresh?: boolean };
 }
 
 export type Intent =
@@ -96,4 +101,6 @@ export type Intent =
   | { kind: 'resolve_blocker'; id: BlockerId }
   /** `node` omitted = every connected node. */
   | { kind: 'check_update'; node?: NodeId }
-  | { kind: 'update_node'; node?: NodeId };
+  | { kind: 'update_node'; node?: NodeId }
+  | { kind: 'clean_node'; node: NodeId; dryRun: boolean }
+  | { kind: 'clean_repo'; node: NodeId; path: string };

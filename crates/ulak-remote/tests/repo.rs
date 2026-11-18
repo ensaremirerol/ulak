@@ -457,6 +457,7 @@ fn repo_spec(a: &str, cred: &CredentialId) -> SpawnSpec {
         branch: None,
         credential: cred.clone(),
         allow_push: false,
+        fresh: false,
     };
     SpawnSpec::new_repo(agent(a), p, src, "go".into(), Default::default()).unwrap()
 }
@@ -1032,4 +1033,382 @@ async fn agent_failed_is_relayed_with_the_daemons_node_replayed_and_not_forgeabl
     assert!(!seen
         .iter()
         .any(|m| matches!(m, HubToUi::AgentFailed { .. })));
+}
+
+// ---- profiles, repo index, cleanup ----
+
+fn prof(name: &str) -> ProfileInfo {
+    ProfileInfo {
+        name: name.into(),
+        binary: "claude".into(),
+        config_dir: None,
+        installed: false,
+        login_blocked: false,
+    }
+}
+
+fn entry(name: &str, path: &str, clean: bool, in_use: bool, managed: bool) -> RepoEntry {
+    RepoEntry {
+        full_name: RepoRef::new(name).unwrap(),
+        path: path.into(),
+        branch: Some("main".into()),
+        clean,
+        ahead: Some(0),
+        behind: Some(0),
+        last_fetch_ms: Some(1),
+        in_use,
+        managed,
+    }
+}
+
+fn named_spec(a: &str, profile: &str) -> SpawnSpec {
+    let p = AgentProfile::new(profile, vec![], None).unwrap();
+    SpawnSpec::new(agent(a), p, "/tmp".into(), "go".into(), Default::default()).unwrap()
+}
+
+/// Daemon-side frames that arrive within `ms`.
+async fn drain_d(d: &mut Ws, ms: u64) -> Vec<HubToDaemon> {
+    let mut out = vec![];
+    while let Ok(m) = tokio::time::timeout(Duration::from_millis(ms), async {
+        recv::<HubToDaemon>(d).await
+    })
+    .await
+    {
+        out.push(m);
+    }
+    out
+}
+
+/// Sends the daemon's profiles and waits until the UI saw them (so placement uses them).
+async fn report_profiles(d: &mut Ws, u: &mut Ws, names: &[&str]) {
+    let profiles: Vec<_> = names.iter().map(|n| prof(n)).collect();
+    send(
+        d,
+        &DaemonToHub::Profiles {
+            profiles: profiles.clone(),
+        },
+    )
+    .await;
+    until(u, |m| match m {
+        HubToUi::NodeProfiles { profiles: p, .. } if p == profiles => Some(()),
+        _ => None,
+    })
+    .await;
+}
+
+async fn report_repos(d: &mut Ws, u: &mut Ws, repos: Vec<RepoEntry>) {
+    send(
+        d,
+        &DaemonToHub::RepoIndex {
+            repos: repos.clone(),
+        },
+    )
+    .await;
+    until(u, |m| match m {
+        HubToUi::NodeRepos { repos: r, .. } if r == repos => Some(()),
+        _ => None,
+    })
+    .await;
+}
+
+async fn spawn_auto(u: &mut Ws, spec: SpawnSpec) {
+    send(
+        u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Auto,
+            spec,
+        },
+    )
+    .await;
+}
+
+async fn spawned_on(d: &mut Ws) -> AgentId {
+    loop {
+        if let HubToDaemon::Spawn(s) = recv::<HubToDaemon>(d).await {
+            return s.agent_id().clone();
+        }
+    }
+}
+
+#[tokio::test]
+async fn reports_are_relayed_as_the_connection_replayed_capped_and_cleared() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let (id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    // A node id inside the payload is ignored: the frame belongs to the connection.
+    let forged = r#"{"type":"profiles","node":"evil","profiles":[{"name":"p","binary":"claude","config_dir":null,"installed":true,"login_blocked":false}]}"#;
+    d.send(Message::Text(forged.into())).await.unwrap();
+    let node = until(&mut u, |m| match m {
+        HubToUi::NodeProfiles { node, profiles } if profiles[0].name == "p" => Some(node),
+        _ => None,
+    })
+    .await;
+    assert_eq!(node, id.id);
+    let repos = vec![entry("o/n", "/w/a/n", true, false, true)];
+    report_repos(&mut d, &mut u, repos.clone()).await;
+    // Oversize reports are dropped whole; the last good one stays.
+    let many: Vec<_> = (0..65).map(|i| prof(&format!("p{i}"))).collect();
+    send(&mut d, &DaemonToHub::Profiles { profiles: many }).await;
+    let long = vec![entry("o/n", &"x".repeat(5000), true, false, true)];
+    send(&mut d, &DaemonToHub::RepoIndex { repos: long }).await;
+    let big: Vec<_> = (0..201)
+        .map(|i| entry("o/n", &format!("/w/{i}"), true, false, true))
+        .collect();
+    send(&mut d, &DaemonToHub::RepoIndex { repos: big }).await;
+    let frames = drain(&mut u, 300).await;
+    assert!(
+        !frames
+            .iter()
+            .any(|m| matches!(m, HubToUi::NodeProfiles { .. } | HubToUi::NodeRepos { .. })),
+        "{frames:?}"
+    );
+    // Replayed to a new UI after the usual frames.
+    let mut u2 = ui(&fx).await;
+    let replay: Vec<_> = drain(&mut u2, 300)
+        .await
+        .into_iter()
+        .filter(|m| matches!(m, HubToUi::NodeProfiles { .. } | HubToUi::NodeRepos { .. }))
+        .collect();
+    assert_eq!(
+        replay,
+        vec![
+            HubToUi::NodeProfiles {
+                node: id.id.clone(),
+                profiles: vec![ProfileInfo {
+                    installed: true,
+                    ..prof("p")
+                }],
+            },
+            HubToUi::NodeRepos {
+                node: id.id.clone(),
+                repos,
+            },
+        ]
+    );
+    // Offline: both cleared and no longer replayed.
+    d.close(None).await.unwrap();
+    let cleared = drain(&mut u, 500).await;
+    assert!(cleared.contains(&HubToUi::NodeProfiles {
+        node: id.id.clone(),
+        profiles: vec![]
+    }));
+    assert!(cleared.contains(&HubToUi::NodeRepos {
+        node: id.id.clone(),
+        repos: vec![]
+    }));
+    let mut u3 = ui(&fx).await;
+    assert!(!drain(&mut u3, 300)
+        .await
+        .iter()
+        .any(|m| matches!(m, HubToUi::NodeProfiles { .. } | HubToUi::NodeRepos { .. })));
+}
+
+#[tokio::test]
+async fn clean_requests_reach_only_the_named_node_and_reports_come_back() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let (a, mut da) = daemon(&fx, "node-a", NodeState::Idle, vec![]).await;
+    let (_b, mut db) = daemon(&fx, "node-b", NodeState::Idle, vec![]).await;
+    let managed = "/w/r-1/n";
+    report_repos(
+        &mut da,
+        &mut u,
+        vec![
+            entry("o/n", managed, true, false, true),
+            entry("o/n", "/code/n", true, false, false),
+        ],
+    )
+    .await;
+    send(
+        &mut u,
+        &UiToHub::CleanNode {
+            node: a.id.clone(),
+            dry_run: true,
+        },
+    )
+    .await;
+    assert_eq!(
+        drain_d(&mut da, 300).await,
+        vec![HubToDaemon::CleanRepos { dry_run: true }]
+    );
+    let clean_repo = |path: &str| UiToHub::CleanRepo {
+        node: a.id.clone(),
+        path: path.into(),
+    };
+    for bad in ["/code/n", "/w/r-1/other", "/w/r-1/n/../n"] {
+        send(&mut u, &clean_repo(bad)).await;
+        assert!(
+            next_error(&mut u).await.contains("not a managed clone"),
+            "{bad}"
+        );
+    }
+    send(&mut u, &clean_repo(managed)).await;
+    assert_eq!(
+        drain_d(&mut da, 300).await,
+        vec![HubToDaemon::CleanRepo {
+            path: managed.into()
+        }]
+    );
+    assert!(drain_d(&mut db, 100).await.is_empty());
+    send(
+        &mut u,
+        &UiToHub::CleanNode {
+            node: NodeId::new("ghost").unwrap(),
+            dry_run: false,
+        },
+    )
+    .await;
+    assert!(!next_error(&mut u).await.is_empty());
+    let item = CleanItem {
+        path: managed.into(),
+        full_name: Some(RepoRef::new("o/n").unwrap()),
+        reason: "up to date".into(),
+    };
+    send(
+        &mut da,
+        &DaemonToHub::CleanReport {
+            dry_run: false,
+            removed: vec![item.clone()],
+            kept: vec![],
+        },
+    )
+    .await;
+    let r = until(&mut u, |m| match m {
+        m @ HubToUi::CleanReport { .. } => Some(m),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        r,
+        HubToUi::CleanReport {
+            node: a.id,
+            dry_run: false,
+            removed: vec![item],
+            kept: vec![]
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_goes_only_to_nodes_with_its_profile() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let (id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    report_profiles(&mut d, &mut u, &["claude-work", "claude-personal"]).await;
+    let (_o, mut other) = daemon(&fx, "other", busy(), vec![]).await;
+    report_profiles(&mut other, &mut u, &["claude"]).await;
+    // "claude" is a profile, but only on a busy node: queued, not refused.
+    spawn_auto(&mut u, named_spec("p-1", "claude")).await;
+    until(&mut u, |m| match m {
+        HubToUi::QueueChanged { item } if item.state == QueueState::Queued => Some(()),
+        _ => None,
+    })
+    .await;
+    // Pinned to a node lacking it: queued too.
+    send(
+        &mut u,
+        &UiToHub::Spawn {
+            target: SpawnTarget::Node(id.id.clone()),
+            spec: named_spec("p-2", "claude"),
+        },
+    )
+    .await;
+    until(&mut u, |m| match m {
+        HubToUi::QueueChanged { item } if item.state == QueueState::Queued => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(drain_d(&mut d, 200).await.is_empty());
+    // A login blocker on one profile leaves the other usable on the same node.
+    send(
+        &mut d,
+        &DaemonToHub::AgentBlocked {
+            agent: agent("old"),
+            profile: ProfileKey::new("claude-work").unwrap(),
+            kind: BlockerKind::Login,
+            detail: "login".into(),
+        },
+    )
+    .await;
+    until(&mut u, |m| match m {
+        HubToUi::BlockerOpened(_) => Some(()),
+        _ => None,
+    })
+    .await;
+    spawn_auto(&mut u, named_spec("p-3", "claude-work")).await;
+    assert!(next_error(&mut u).await.contains("blocked"));
+    spawn_auto(&mut u, named_spec("p-4", "claude-personal")).await;
+    assert_eq!(spawned_on(&mut d).await, agent("p-4"));
+    // A binary no node reports as a profile is a custom one: placed as before.
+    spawn_auto(&mut u, named_spec("p-5", "/opt/bin/agent")).await;
+    assert_eq!(spawned_on(&mut d).await, agent("p-5"));
+    spawn_auto(&mut u, named_spec("p-6", "sh")).await;
+    assert_eq!(spawned_on(&mut d).await, agent("p-6"));
+    // The node now offers "claude": the queued spawns are placed.
+    report_profiles(&mut d, &mut u, &["claude", "claude-personal"]).await;
+    let mut placed = vec![spawned_on(&mut d).await];
+    // At most one queued item per node per pass.
+    placed.push(spawned_on(&mut d).await);
+    placed.sort();
+    assert_eq!(placed, vec![agent("p-1"), agent("p-2")]);
+}
+
+#[tokio::test]
+async fn a_daemon_without_profiles_takes_any_binary() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let (_id, mut d) = daemon(&fx, "old", NodeState::Idle, vec![]).await;
+    spawn_auto(&mut u, named_spec("l-1", "antigravity")).await;
+    assert_eq!(spawned_on(&mut d).await, agent("l-1"));
+    // An empty list is treated the same.
+    send(&mut d, &DaemonToHub::Profiles { profiles: vec![] }).await;
+    until(&mut u, |m| match m {
+        HubToUi::NodeProfiles { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    spawn_auto(&mut u, named_spec("l-2", "/opt/bin/agent")).await;
+    assert_eq!(spawned_on(&mut d).await, agent("l-2"));
+}
+
+#[tokio::test]
+async fn repo_spawns_prefer_a_node_with_a_reusable_clone() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let c = add_cred(&mut u).await;
+    let (_a, mut da) = daemon(&fx, "node-a", NodeState::Idle, vec![]).await;
+    let (_b, mut db) = daemon(&fx, "node-b", NodeState::Idle, vec![]).await;
+    let (_c, mut dc) = daemon(&fx, "node-c", NodeState::Idle, vec![]).await;
+    report_repos(
+        &mut db,
+        &mut u,
+        vec![entry("o/n", "/w/x/n", true, true, true)],
+    )
+    .await;
+    report_repos(
+        &mut dc,
+        &mut u,
+        vec![entry("o/n", "/w/y/n", true, false, true)],
+    )
+    .await;
+    spawn_auto(&mut u, repo_spec("r-1", &c)).await;
+    assert_eq!(spawned_on(&mut dc).await, agent("r-1"));
+    // Without the reusable clone, a node that has the repo at all wins.
+    report_repos(
+        &mut dc,
+        &mut u,
+        vec![entry("o/n", "/w/y/n", false, false, true)],
+    )
+    .await;
+    report_repos(&mut db, &mut u, vec![]).await;
+    report_repos(
+        &mut da,
+        &mut u,
+        vec![entry("o/other", "/w/z/o", true, false, true)],
+    )
+    .await;
+    spawn_auto(&mut u, repo_spec("r-2", &c)).await;
+    assert_eq!(spawned_on(&mut dc).await, agent("r-2"));
+    assert!(drain_d(&mut da, 100).await.is_empty());
+    assert!(drain_d(&mut db, 100).await.is_empty());
 }

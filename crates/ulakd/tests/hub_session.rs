@@ -503,3 +503,168 @@ async fn attach_for_an_unknown_agent_is_not_retried() {
     host.no_session.store(false, Ordering::SeqCst);
     pane_stays_unset(&host).await;
 }
+
+/// A host with profiles, a repo index and cleanup (the other calls are inert).
+#[derive(Default)]
+struct IndexHost {
+    repos: Mutex<Vec<RepoEntry>>,
+    maintained: std::sync::atomic::AtomicUsize,
+}
+
+fn entry(path: &str) -> RepoEntry {
+    RepoEntry {
+        full_name: RepoRef::new("octo/a").unwrap(),
+        path: path.into(),
+        branch: Some("main".into()),
+        clean: true,
+        ahead: Some(0),
+        behind: Some(0),
+        last_fetch_ms: None,
+        in_use: false,
+        managed: true,
+    }
+}
+
+fn item(path: &str, reason: &str) -> CleanItem {
+    CleanItem {
+        path: path.into(),
+        full_name: None,
+        reason: reason.into(),
+    }
+}
+
+impl AgentHost for IndexHost {
+    async fn spawn(&self, _: &SpawnSpec) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn kill(&self, _: &AgentId) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn nudge(&self, _: &AgentId, _: &str) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn input(&self, _: &AgentId, _: &[u8]) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn list(&self) -> Result<Vec<AgentId>, AgentError> {
+        Ok(vec![])
+    }
+    async fn attach(&self, _: &AgentId) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+        Err(AgentError::NotRunning("x".into()))
+    }
+    async fn profiles(&self) -> Option<Vec<ProfileInfo>> {
+        Some(vec![ProfileInfo {
+            name: "claude-work".into(),
+            binary: "claude".into(),
+            config_dir: Some("/h/.claude-work".into()),
+            installed: true,
+            login_blocked: false,
+        }])
+    }
+    async fn repo_index(&self) -> Option<Vec<RepoEntry>> {
+        Some(self.repos.lock().unwrap().clone())
+    }
+    async fn clean(&self, req: ulakd::hub::CleanReq) -> Option<ulakd::repos::Cleaned> {
+        use ulakd::hub::CleanReq;
+        Some(match req {
+            CleanReq::All { .. } => {
+                self.repos.lock().unwrap().retain(|e| e.path != "/w/a/a");
+                ulakd::repos::Cleaned {
+                    removed: vec![item("/w/a/a", "up to date")],
+                    kept: vec![item("/w/b/a", "has a stash")],
+                }
+            }
+            CleanReq::One { path } => ulakd::repos::Cleaned {
+                removed: vec![],
+                kept: vec![item(&path, "not an indexed clone of this node")],
+            },
+        })
+    }
+    fn maintenance_interval(&self) -> Duration {
+        Duration::from_millis(1500)
+    }
+    async fn maintain(&self) -> Option<ulakd::repos::Cleaned> {
+        let first = self.maintained.fetch_add(1, Ordering::SeqCst) == 0;
+        Some(ulakd::repos::Cleaned {
+            removed: if first {
+                vec![item("/w/old/a", "idle")]
+            } else {
+                vec![]
+            },
+            kept: vec![],
+        })
+    }
+}
+
+/// The next frame that is not a Heartbeat or Hello.
+async fn skip_beats<S>(ws: &mut S) -> DaemonToHub
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        match next_frame(ws).await {
+            DaemonToHub::Heartbeat(_) | DaemonToHub::Hello { .. } => {}
+            f => return f,
+        }
+    }
+}
+
+#[tokio::test]
+async fn profiles_repo_index_and_clean_reports() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws/daemon", listener.local_addr().unwrap());
+    let host = Arc::new(IndexHost::default());
+    *host.repos.lock().unwrap() = vec![entry("/w/a/a"), entry("/w/b/a")];
+    let state = Arc::new(Mutex::new(NodeState::Idle));
+    let probe: SharedProbe = Arc::new(Mutex::new(Box::new(FakeProbe(state))));
+    let cfg = SessionCfg {
+        node_id: NodeId::new("node-1").unwrap(),
+        hostname: "box".into(),
+        heartbeat: Duration::from_millis(50),
+    };
+    let h = Arc::clone(&host);
+    let daemon = tokio::spawn(async move {
+        let ws = connect(&url, None).await.unwrap();
+        run_session(ws, &cfg, &*h, &probe).await
+    });
+    let (tcp, _) = listener.accept().await.unwrap();
+    let mut hub = accept_async(tcp).await.unwrap();
+    assert!(
+        matches!(skip_beats(&mut hub).await, DaemonToHub::Profiles { profiles } if profiles[0].name == "claude-work")
+    );
+    assert!(
+        matches!(skip_beats(&mut hub).await, DaemonToHub::RepoIndex { repos } if repos.len() == 2)
+    );
+    let send = |m: HubToDaemon| Message::text(encode(&m).unwrap());
+
+    // dry run report, then the changed index (profiles unchanged: not resent)
+    hub.send(send(HubToDaemon::CleanRepos { dry_run: true }))
+        .await
+        .unwrap();
+    assert_eq!(
+        skip_beats(&mut hub).await,
+        DaemonToHub::CleanReport {
+            dry_run: true,
+            removed: vec![item("/w/a/a", "up to date")],
+            kept: vec![item("/w/b/a", "has a stash")],
+        }
+    );
+    assert!(
+        matches!(skip_beats(&mut hub).await, DaemonToHub::RepoIndex { repos } if repos == [entry("/w/b/a")])
+    );
+    // one path; the unchanged index is not resent, so the next frame is the automatic cleanup
+    hub.send(send(HubToDaemon::CleanRepo {
+        path: "/etc".into(),
+    }))
+    .await
+    .unwrap();
+    assert!(
+        matches!(skip_beats(&mut hub).await, DaemonToHub::CleanReport { dry_run: false, removed, kept }
+        if removed.is_empty() && kept[0].path == "/etc")
+    );
+    assert!(
+        matches!(skip_beats(&mut hub).await, DaemonToHub::CleanReport { dry_run: false, removed, .. }
+        if removed[0].path == "/w/old/a")
+    );
+    daemon.abort();
+}

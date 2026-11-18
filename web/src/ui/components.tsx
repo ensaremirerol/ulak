@@ -46,6 +46,8 @@ export interface TextFieldProps {
   autocapitalize?: 'off' | 'characters';
   spellcheck?: boolean;
   disabled?: boolean;
+  /** Marks the label (" *" via CSS) and sets aria-required. */
+  required?: boolean;
   hint?: string;
   error?: string | null;
   mono?: boolean;
@@ -58,8 +60,8 @@ export function TextField({ label, hint, error, mono, onValue, ...rest }: TextFi
   const note = error ? `${id}-e` : hint ? `${id}-h` : undefined;
   return (
     <div class="field">
-      <label for={id}>{label}</label>
-      <input {...rest} type="text" id={id} class={`input${mono ? ' mono' : ''}`} aria-invalid={error ? true : undefined} aria-describedby={note} onInput={(e) => onValue(e.currentTarget.value)} />
+      <label for={id} class={rest.required ? 'req' : undefined}>{label}</label>
+      <input {...rest} aria-required={rest.required ? true : undefined} type="text" id={id} class={`input${mono ? ' mono' : ''}`} aria-invalid={error ? true : undefined} aria-describedby={note} onInput={(e) => onValue(e.currentTarget.value)} />
       {error ? <span id={note} class="err" role="alert">{error}</span> : hint ? <span id={note} class="hint">{hint}</span> : null}
     </div>
   );

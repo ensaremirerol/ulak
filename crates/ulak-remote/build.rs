@@ -17,7 +17,7 @@ fn main() {
         .or_else(|| {
             std::env::var("GIT_SHA")
                 .ok()
-                .map(|s| s.chars().take(12).collect())
+                .map(|s| s.chars().take(7).collect())
         })
         .filter(|s: &String| !s.is_empty())
         .unwrap_or_else(|| "unknown".into());

@@ -1,27 +1,54 @@
 //! tmux agent manager. Every command is an argv vector handed to `tmux`; no shell is involved
 //! (the agent binary is started through `env`, not `sh -c`).
 use crate::{
-    agents::{binary_name, is_installed, match_login, Agents, Installer, Recipe},
+    agents::{binary_name, is_installed, match_login, Agents, Exec, Installer, Recipe},
     errors::AgentError,
     git::{self, GitCfg, GitStore},
-    hub::{AgentHost, HostEvent},
+    hub::{AgentHost, CleanReq, HostEvent},
     mcp::{self, Prepared},
+    repos::{self, Cleaned, Settings},
 };
 use std::{
-    collections::HashMap,
-    path::PathBuf,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
-use ulak_proto::{AgentId, AgentStatus, BlockerKind, GitToken, ProfileKey, Source, SpawnSpec};
+use ulak_proto::{
+    AgentId, AgentStatus, BlockerKind, BranchName, CleanItem, GitToken, ProfileInfo, ProfileKey,
+    RepoEntry, RepoRef, Source, SpawnSpec,
+};
 
 /// Session option that remembers the profile key, so a restarted daemon can re-adopt the agent.
 const PROFILE_OPT: &str = "@ulak_profile";
 
 /// Per profile: (blocked, generation bumped on every resolve).
 type Blocks = Arc<Mutex<HashMap<ProfileKey, (bool, u64)>>>;
+/// Clone paths an agent is starting in (canonical), before its tmux session exists.
+type Claims = Arc<Mutex<HashMap<PathBuf, AgentId>>>;
+
+/// A claimed clone path; released on drop (also when the spawn future is dropped).
+struct Claim {
+    claims: Claims,
+    path: PathBuf,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.claims.lock().expect("claims lock").remove(&self.path);
+    }
+}
+
+/// The tmux server is not running (or exited while we asked, which it does after its last
+/// session): no sessions.
+fn no_server(e: &AgentError) -> bool {
+    matches!(e, AgentError::Tmux { stderr, .. }
+        if stderr.contains("no server running")
+            || stderr.contains("No such file")
+            || stderr.contains("server exited unexpectedly"))
+}
 
 fn s(x: &str) -> String {
     x.to_owned()
@@ -46,13 +73,19 @@ pub fn new_session_argv_with(
     spec: &SpawnSpec,
     extra: &Prepared,
 ) -> Result<Vec<String>, AgentError> {
+    new_session_argv_exec(spec, &Exec::plain(spec), extra)
+}
+
+/// [`new_session_argv_with`] for a resolved profile: env precedence is spec, then MCP, then
+/// the profile's own (`agents.json`) env.
+pub fn new_session_argv_exec(
+    spec: &SpawnSpec,
+    exec: &Exec,
+    extra: &Prepared,
+) -> Result<Vec<String>, AgentError> {
     let mut env = spec.env().clone();
-    for (k, v) in &extra.env {
+    for (k, v) in extra.env.iter().chain(&exec.env) {
         env.entry(k.clone()).or_insert_with(|| v.clone());
-    }
-    if let Some(dir) = spec.profile().config_dir() {
-        env.entry("CLAUDE_CONFIG_DIR".into())
-            .or_insert_with(|| dir.to_string_lossy().into_owned());
     }
     if let Some(bad) = env.keys().find(|k| !valid_env_name(k)) {
         return Err(AgentError::BadEnvName(bad.clone()));
@@ -72,8 +105,8 @@ pub fn new_session_argv_with(
         s("env"),
     ];
     a.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
-    a.push(spec.profile().binary().to_owned());
-    a.extend(spec.profile().args().iter().cloned());
+    a.push(exec.binary.clone());
+    a.extend(exec.args.iter().cloned());
     a.extend(extra.args.iter().cloned());
     Ok(a)
 }
@@ -198,6 +231,10 @@ pub struct Tmux {
     /// Agents whose prompt could not be typed; the hub session drains it.
     prompt_failed: mpsc::UnboundedSender<AgentId>,
     prompt_failures: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AgentId>>>,
+    settings: Arc<Settings>,
+    claims: Claims,
+    /// Held across scan+pick+claim (spawn) and scan+judge+delete (clean).
+    repo_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Tmux {
@@ -226,7 +263,16 @@ impl Tmux {
             submit_delay: Duration::from_millis(300),
             prompt_failed,
             prompt_failures: Arc::new(tokio::sync::Mutex::new(rx)),
+            settings: Arc::default(),
+            claims: Claims::default(),
+            repo_lock: Arc::default(),
         }
+    }
+
+    /// `ulakd.json`: repo roots, index interval, cleanup policy.
+    pub fn with_settings(mut self, settings: Settings) -> Self {
+        self.settings = Arc::new(settings);
+        self
     }
 
     /// Wires spawned agents to the hub's MCP server (see [`mcp`]): configs live in `runtime_dir`,
@@ -254,15 +300,19 @@ impl Tmux {
 
     /// Clones the repo of a `Source::Repo` spec and returns the spec that starts in the clone.
     /// The token is taken out of the store first (an install may outlast its expiry).
-    async fn prepare_repo(&self, spec: &SpawnSpec) -> Result<SpawnSpec, AgentError> {
+    async fn prepare_repo(
+        &self,
+        spec: &SpawnSpec,
+    ) -> Result<(SpawnSpec, Option<Claim>), AgentError> {
         let Source::Repo {
             repo,
             branch,
             allow_push,
+            fresh,
             ..
         } = spec.source()
         else {
-            return Ok(spec.clone());
+            return Ok((spec.clone(), None));
         };
         let id = spec.agent_id();
         let token: GitToken = self.tokens.take(id).ok_or_else(|| {
@@ -273,7 +323,28 @@ impl Tmux {
             .as_ref()
             .ok_or_else(|| AgentError::Git("repo spawns are not enabled on this node".into()))?;
         self.ensure_installed(spec).await?;
-        let dir = git::clone_repo(cfg, id, &repo, branch.as_ref(), &token, allow_push).await?;
+        let reused = if fresh {
+            None
+        } else {
+            self.reuse_clone(cfg, id, &repo, branch.as_ref(), &token, allow_push)
+                .await?
+        };
+        let (dir, claim) = match reused {
+            Some(r) => r,
+            None => {
+                let work = cfg
+                    .work_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| cfg.work_root.clone());
+                let claim = {
+                    let _g = self.repo_lock.lock().await;
+                    self.claim(work.join(id.as_str()).join(repo.name()), id)
+                };
+                let dir =
+                    git::clone_repo(cfg, id, &repo, branch.as_ref(), &token, allow_push).await?;
+                (dir, claim)
+            }
+        };
         let mut env = spec.env().clone();
         env.remove(git::TOKEN_ENV);
         if allow_push {
@@ -285,13 +356,251 @@ impl Tmux {
             env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
             std::mem::forget(h); // lives until the agent ends (drop_mcp_file / adopt sweep)
         }
-        Ok(SpawnSpec::new(
+        let spec = SpawnSpec::new(
             id.clone(),
             spec.profile().clone(),
             dir,
             spec.prompt().to_owned(),
             env,
-        )?)
+        )?;
+        Ok((spec, Some(claim)))
+    }
+
+    fn claim(&self, path: PathBuf, id: &AgentId) -> Claim {
+        self.claims
+            .lock()
+            .expect("claims lock")
+            .insert(path.clone(), id.clone());
+        Claim {
+            claims: Arc::clone(&self.claims),
+            path,
+        }
+    }
+
+    fn ctx(&self, cfg: &GitCfg) -> repos::Ctx {
+        repos::Ctx {
+            program: cfg.program().to_owned(),
+            host: cfg.host().to_owned(),
+            work_root: cfg.work_root.clone(),
+            roots: self.settings.repo_roots.clone(),
+        }
+    }
+
+    /// Canonical paths in use: claims plus the start folders of the `ulak-*` sessions. An error
+    /// means "unknown": callers must not delete anything then.
+    async fn busy(&self) -> Result<HashSet<PathBuf>, AgentError> {
+        let argv = vec![
+            s("list-sessions"),
+            s("-F"),
+            s("#{session_name} #{session_path}"),
+        ];
+        let out = match self.run("list-sessions", argv, None).await {
+            Ok(o) => o,
+            Err(e) if no_server(&e) => String::new(),
+            Err(e) => return Err(e),
+        };
+        let mut b: Vec<PathBuf> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("ulak-")?.split_once(' '))
+            .map(|(_, p)| PathBuf::from(p))
+            .collect();
+        b.extend(self.claims.lock().expect("claims lock").keys().cloned());
+        Ok(b.into_iter()
+            .map(|p| p.canonicalize().unwrap_or(p))
+            .collect())
+    }
+
+    /// Scan under the repo lock (the caller holds it).
+    async fn scan_locked(&self, ctx: &repos::Ctx, busy: &HashSet<PathBuf>) -> Vec<repos::Found> {
+        let (ctx, busy) = (ctx.clone(), busy.clone());
+        tokio::task::spawn_blocking(move || repos::scan(&ctx, &busy, repos::now_ms()))
+            .await
+            .expect("scan task does not panic")
+    }
+
+    /// Reuses an unused work-root clone of `repo`: claims it, fetches, checks out `branch`.
+    /// `Ok(None)`: none to reuse (or in-use state unknown), clone anew. A dirty clone is an error.
+    async fn reuse_clone(
+        &self,
+        cfg: &GitCfg,
+        id: &AgentId,
+        repo: &RepoRef,
+        branch: Option<&BranchName>,
+        token: &GitToken,
+        allow_push: bool,
+    ) -> Result<Option<(PathBuf, Claim)>, AgentError> {
+        let ctx = self.ctx(cfg);
+        let (path, claim) = {
+            let _g = self.repo_lock.lock().await;
+            let Ok(busy) = self.busy().await else {
+                return Ok(None);
+            };
+            // ponytail: a full scan per spawn; index by full_name if roots get large
+            let mut found = self.scan_locked(&ctx, &busy).await;
+            // only the daemon's own clones: a user's checkout is never switched under them
+            found.retain(|f| f.entry.managed);
+            let Some(f) = repos::pick(&found, repo, &busy) else {
+                return Ok(None);
+            };
+            let p = PathBuf::from(&f.entry.path);
+            (p.clone(), self.claim(p, id))
+        };
+        let helper = git::Helper::create(cfg.work_root.join(format!(".askpass-{}", id.as_str())))?;
+        let env = git::clone_env(cfg.host(), &helper.script, token);
+        let (repo, branch, p, timeout) = (repo.clone(), branch.cloned(), path.clone(), cfg.timeout);
+        tokio::task::spawn_blocking(move || -> Result<(), AgentError> {
+            repos::reuse(&ctx, &repo, branch.as_ref(), &p, &env, timeout)?;
+            // same push guard rail as a fresh clone
+            let args: &[&str] = if allow_push {
+                &["config", "--local", "--unset-all", "remote.origin.pushurl"]
+            } else {
+                &["config", "--local", "remote.origin.pushurl", "no-push-here"]
+            };
+            let o = repos::git(
+                &ctx.program,
+                &p,
+                args,
+                &(vec![], vec![]),
+                Duration::from_secs(30),
+            )
+            .map_err(AgentError::Git)?;
+            // exit 5: nothing to unset
+            if !o.ok && !allow_push {
+                return Err(AgentError::Git(
+                    "cannot set the push guard on the clone".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .expect("reuse task does not panic")?;
+        drop(helper);
+        Ok(Some((path, claim)))
+    }
+
+    /// The node's named profiles (`agents.json` plus defaults).
+    pub async fn profiles(&self) -> Vec<ProfileInfo> {
+        let blocked: HashSet<String> = self
+            .blocks
+            .lock()
+            .expect("blocks lock")
+            .iter()
+            .filter(|(_, b)| b.0)
+            .map(|(k, _)| k.as_str().to_owned())
+            .collect();
+        let infos = self.agents.names().map(|name| {
+            let r = self.agents.recipe(name);
+            let tilde = |p: &str| {
+                repos::expand_tilde(Path::new(p))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let binary = r.binary.as_deref().map_or_else(|| name.to_owned(), tilde);
+            let config_dir = r.config_dir.as_deref().map(tilde);
+            let login_blocked = blocked.contains(name);
+            let name = name.to_owned();
+            async move {
+                ProfileInfo {
+                    installed: is_installed(&r, &binary).await,
+                    name,
+                    binary,
+                    config_dir,
+                    login_blocked,
+                }
+            }
+        });
+        futures_util::future::join_all(infos).await
+    }
+
+    /// The repo index; `None` when repo spawns are off on this node.
+    pub async fn repo_index(&self) -> Option<Vec<RepoEntry>> {
+        let ctx = self.ctx(self.git.as_ref()?);
+        let _g = self.repo_lock.lock().await;
+        let busy = match self.busy().await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ulakd: repo index: cannot list sessions: {e}");
+                return None;
+            }
+        };
+        Some(repos::entries(&self.scan_locked(&ctx, &busy).await))
+    }
+
+    /// Judges and (unless `dry_run`) deletes the given index entries, all under the repo lock.
+    async fn clean_with(
+        &self,
+        dry_run: bool,
+        select: impl FnOnce(Vec<repos::Found>) -> Result<Vec<repos::Found>, CleanItem> + Send + 'static,
+        now: u64,
+    ) -> Option<Cleaned> {
+        let cfg = self.git.as_ref()?;
+        let ctx = self.ctx(cfg);
+        let _g = self.repo_lock.lock().await;
+        let busy = match self.busy().await {
+            Ok(b) => b,
+            Err(e) => {
+                return Some(Cleaned {
+                    removed: Vec::new(),
+                    kept: vec![CleanItem {
+                        path: cfg.work_root.to_string_lossy().into_owned(),
+                        full_name: None,
+                        reason: format!("cannot tell which clones are in use: {e}"),
+                    }],
+                })
+            }
+        };
+        let found = self.scan_locked(&ctx, &busy).await;
+        let c = tokio::task::spawn_blocking(move || match select(found) {
+            Ok(t) => repos::clean(&ctx, &t, &busy, dry_run, &|_| None, now),
+            Err(item) => Cleaned {
+                removed: Vec::new(),
+                kept: vec![item],
+            },
+        })
+        .await
+        .expect("clean task does not panic");
+        Some(c)
+    }
+
+    /// Every eligible work-root clone. `None`: repo spawns are off.
+    pub async fn clean_repos(&self, dry_run: bool) -> Option<Cleaned> {
+        self.clean_with(
+            dry_run,
+            |f| Ok(f.into_iter().filter(|f| f.entry.managed).collect()),
+            repos::now_ms(),
+        )
+        .await
+    }
+
+    /// One clone; `path` must equal the path of an indexed entry (compared as a string).
+    pub async fn clean_repo(&self, path: String) -> Option<Cleaned> {
+        self.clean_with(
+            false,
+            move |f| {
+                let t: Vec<_> = f.into_iter().filter(|f| f.entry.path == path).collect();
+                if t.is_empty() {
+                    Err(CleanItem {
+                        path,
+                        full_name: None,
+                        reason: "not an indexed clone of this node".into(),
+                    })
+                } else {
+                    Ok(t)
+                }
+            },
+            repos::now_ms(),
+        )
+        .await
+    }
+
+    /// Automatic cleanup (when `clean.auto`): clones idle for `after_exit_hours` at `now`.
+    pub async fn maintain(&self, now: u64) -> Option<Cleaned> {
+        if !self.settings.clean.auto {
+            return None;
+        }
+        let hours = self.settings.clean.after_exit_hours;
+        self.clean_with(false, move |f| Ok(repos::auto_due(&f, now, hours)), now)
+            .await
     }
 
     /// Waits before typing the prompt (the agent TUI must be up) and before pressing Enter.
@@ -370,27 +679,23 @@ impl Tmux {
                 .filter_map(|id| AgentId::new(id).ok())
                 .collect()),
             // no server running == no sessions
-            Err(AgentError::Tmux { stderr, .. })
-                if stderr.contains("no server running") || stderr.contains("No such file") =>
-            {
-                Ok(Vec::new())
-            }
+            Err(e) if no_server(&e) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
 
     /// Makes sure the agent binary exists, installing it from the local recipe if needed.
     async fn ensure_installed(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
-        let (binary, id) = (spec.profile().binary(), spec.agent_id());
-        let recipe = self.agents.recipe(binary);
-        if is_installed(&recipe, binary).await {
+        let exec = self.agents.exec_spec(spec);
+        let (binary, recipe, id) = (exec.binary.as_str(), &exec.recipe, spec.agent_id());
+        if is_installed(recipe, binary).await {
             return Ok(());
         }
         self.emit(HostEvent::Status {
             agent: id.clone(),
             status: AgentStatus::Installing,
         });
-        let Err(detail) = self.installer.ensure(binary, &recipe).await else {
+        let Err(detail) = self.installer.ensure(binary, recipe).await else {
             return Ok(());
         };
         let profile = spec.profile().key()?;
@@ -405,8 +710,9 @@ impl Tmux {
 
     pub async fn spawn_agent(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
         let owned;
+        let _claim; // released once the session (and its start folder) exists or the spawn failed
         let spec = if matches!(spec.source(), Source::Repo { .. }) {
-            owned = self.prepare_repo(spec).await?;
+            (owned, _claim) = self.prepare_repo(spec).await?;
             &owned
         } else {
             spec
@@ -424,13 +730,12 @@ impl Tmux {
     }
 
     async fn spawn_prepared(&self, spec: &SpawnSpec) -> Result<(), AgentError> {
+        let exec = self.agents.exec_spec(spec);
         let extra = match &self.mcp {
-            Some((dir, ca)) => {
-                mcp::prepare(&self.agents.recipe(spec.profile().binary()), spec, ca, dir)?
-            }
+            Some((dir, ca)) => mcp::prepare(&exec.recipe, spec, ca, dir)?,
             None => Prepared::default(),
         };
-        let argv = new_session_argv_with(spec, &extra)?;
+        let argv = new_session_argv_exec(spec, &exec, &extra)?;
         if let Err(e) = self.ensure_installed(spec).await {
             self.drop_mcp_file(spec.agent_id());
             return Err(e);
@@ -697,6 +1002,24 @@ impl AgentHost for Tmux {
         let e = b.entry(profile.clone()).or_default();
         *e = (false, e.1 + 1);
     }
+    async fn profiles(&self) -> Option<Vec<ProfileInfo>> {
+        Some(Tmux::profiles(self).await)
+    }
+    async fn repo_index(&self) -> Option<Vec<RepoEntry>> {
+        Tmux::repo_index(self).await
+    }
+    async fn clean(&self, req: CleanReq) -> Option<Cleaned> {
+        match req {
+            CleanReq::All { dry_run } => self.clean_repos(dry_run).await,
+            CleanReq::One { path } => self.clean_repo(path).await,
+        }
+    }
+    fn maintenance_interval(&self) -> Duration {
+        Duration::from_secs(self.settings.index_interval_mins.max(1) * 60)
+    }
+    async fn maintain(&self) -> Option<Cleaned> {
+        Tmux::maintain(self, repos::now_ms()).await
+    }
 }
 
 #[cfg(test)]
@@ -813,6 +1136,40 @@ mod tests {
         let a = new_session_argv(&spec(Some("/cfg"), &[("CLAUDE_CONFIG_DIR", "/mine")])).unwrap();
         assert!(a.contains(&"CLAUDE_CONFIG_DIR=/mine".to_string()));
         assert!(!a.contains(&"CLAUDE_CONFIG_DIR=/cfg".to_string()));
+    }
+
+    #[tokio::test]
+    async fn two_claude_profiles_run_claude_and_block_independently() {
+        use crate::agents::tests::{spec_for, TWO_CLAUDES};
+        let agents = Agents::from_json(TWO_CLAUDES).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let sp = spec_for("claude-work", None, &[("A", "x")]);
+        let a = new_session_argv_exec(&sp, &agents.exec_spec(&sp), &Prepared::default()).unwrap();
+        assert_eq!(
+            a[12..],
+            [
+                "A=x".to_string(),
+                format!("CLAUDE_CONFIG_DIR={home}/.claude-work"),
+                "claude".into(),
+                "--y".into()
+            ]
+        );
+        let tm = Tmux::with_agents(Some(format!("ulakd-unit-{}", std::process::id())), agents);
+        let work = sp.profile().key().unwrap();
+        tm.blocks.lock().unwrap().insert(work.clone(), (true, 0));
+        let blocked =
+            |p: &[ProfileInfo], n: &str| p.iter().find(|i| i.name == n).unwrap().login_blocked;
+        let p = tm.profiles().await;
+        assert!(
+            blocked(&p, "claude-work") && !blocked(&p, "claude-personal") && !blocked(&p, "claude")
+        );
+        let i = p.iter().find(|i| i.name == "claude-personal").unwrap();
+        assert_eq!(
+            (i.binary.as_str(), i.config_dir.clone()),
+            ("claude", Some(format!("{home}/.claude-personal")))
+        );
+        tm.blocker_resolved(&work);
+        assert!(!blocked(&tm.profiles().await, "claude-work"));
     }
 
     #[test]

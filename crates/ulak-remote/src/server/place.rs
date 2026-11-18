@@ -39,20 +39,37 @@ impl Hub {
             Source::Folder { .. } => None,
         };
         let profile = spec.profile().key()?;
+        let name = spec.profile().binary();
         let nodes = self.registry.snapshot();
+        // A name some node reports as a profile must be one of the node's profiles (installed
+        // or installable). Any other binary (custom, or an older daemon that reports none) is
+        // placed as before.
+        let named = self.profile_known(name);
+        let unfit = |n: &NodeId| {
+            exclude.contains(n)
+                || (named
+                    && self
+                        .profile_names(n)
+                        .is_some_and(|p| !p.iter().any(|x| x == name)))
+        };
         // Fail closed: a store error counts as blocked.
         let blocked = |n: &NodeId| {
-            exclude.contains(n)
-                || !matches!(Blockers::is_blocked(&*self.store, n, &profile), Ok(None))
+            unfit(n) || !matches!(Blockers::is_blocked(&*self.store, n, &profile), Ok(None))
         };
-        let node = match pick_node_where(&nodes, target, &self.cfg.thresholds, blocked) {
+        let repo = match spec.source() {
+            Source::Repo { repo, .. } => Some(repo),
+            Source::Folder { .. } => None,
+        };
+        let rank = |n: &NodeId| repo.as_ref().map_or(0, |r| self.repo_rank(n, r));
+        let limits = &self.cfg.thresholds;
+        let node = match pick_node_ranked(&nodes, target, limits, blocked, rank) {
             Ok(n) => n,
             Err(e) => {
                 if let SpawnTarget::Node(n) = target {
                     if let Some(b) = Blockers::is_blocked(&*self.store, n, &profile)? {
                         return Err(blocked_err(&b));
                     }
-                } else if pick_node(&nodes, target, &self.cfg.thresholds).is_ok() {
+                } else if pick_node_where(&nodes, target, limits, unfit).is_ok() {
                     return Err(ServerError::Blocked(format!(
                         "every eligible node is blocked for {}; resolve the blockers first",
                         profile.as_str()

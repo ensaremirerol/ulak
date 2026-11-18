@@ -1,7 +1,7 @@
 import { b64ToBytes, bytesToB64 } from './bytes';
 import type {
-  AgentStatus, Blocker, CredentialInfo, DeviceInfo, HubToUi, HubToUiType, Message, NodeInfo, NodeState,
-  OtpOffer, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
+  AgentStatus, Blocker, CleanItem, CredentialInfo, DeviceInfo, HubToUi, HubToUiType, Message, NodeInfo, NodeState,
+  OtpOffer, ProfileInfo, RepoEntry, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
   VersionInfo,
 } from './types';
 
@@ -147,6 +147,7 @@ export function source(v: unknown): Source {
     branch: opt(o.branch, (x) => str(x, 'branch')),
     credential: str(o.credential, 'credential'),
     allow_push: bool(o.allow_push, 'allow_push'),
+    ...(o.fresh === undefined ? {} : bool(o.fresh, 'fresh') ? { fresh: true } : {}),
   };
 }
 
@@ -172,6 +173,39 @@ function repoInfo(v: unknown): RepoInfo {
     pushed_at_ms: num(o.pushed_at_ms, 'pushed_at_ms'),
     ...(typeof o.description === 'string' ? { description: o.description } : {}),
   };
+}
+
+function profileInfo(v: unknown): ProfileInfo {
+  const o = obj(v, 'profile');
+  return {
+    name: str(o.name, 'name'),
+    binary: str(o.binary, 'binary'),
+    config_dir: optStr(o.config_dir, 'config_dir'),
+    installed: bool(o.installed, 'installed'),
+    login_blocked: bool(o.login_blocked, 'login_blocked'),
+  };
+}
+
+const optNum = (v: unknown, w: string) => opt(v, (x) => num(x, w));
+
+function repoEntry(v: unknown): RepoEntry {
+  const o = obj(v, 'repo entry');
+  return {
+    full_name: str(o.full_name, 'full_name'),
+    path: str(o.path, 'path'),
+    branch: optStr(o.branch, 'branch'),
+    clean: bool(o.clean, 'clean'),
+    ahead: optNum(o.ahead, 'ahead'),
+    behind: optNum(o.behind, 'behind'),
+    last_fetch_ms: optNum(o.last_fetch_ms, 'last_fetch_ms'),
+    in_use: bool(o.in_use, 'in_use'),
+    managed: bool(o.managed, 'managed'),
+  };
+}
+
+function cleanItem(v: unknown): CleanItem {
+  const o = obj(v, 'clean item');
+  return { path: str(o.path, 'path'), full_name: optStr(o.full_name, 'full_name'), reason: str(o.reason, 'reason') };
 }
 
 function queueState(v: unknown): QueueState {
@@ -239,6 +273,15 @@ const hubDecoders = {
   queue: (o) => ({ type: 'queue', items: arr(o.items, 'items', queuedSpawn) }),
   queue_changed: (o) => ({ type: 'queue_changed', item: queuedSpawn(o.item) }),
   queue_removed: (o) => ({ type: 'queue_removed', id: s(o.id, 'id') }),
+  node_profiles: (o) => ({ type: 'node_profiles', node: s(o.node, 'node'), profiles: arr(o.profiles, 'profiles', profileInfo) }),
+  node_repos: (o) => ({ type: 'node_repos', node: s(o.node, 'node'), repos: arr(o.repos, 'repos', repoEntry) }),
+  clean_report: (o) => ({
+    type: 'clean_report',
+    node: s(o.node, 'node'),
+    dry_run: bool(o.dry_run, 'dry_run'),
+    removed: arr(o.removed, 'removed', cleanItem),
+    kept: arr(o.kept, 'kept', cleanItem),
+  }),
   error: (o) => ({ type: 'error', message: s(o.message, 'message') }),
 } satisfies { [K in HubToUiType]: Decoder<Extract<HubToUi, { type: K }>> };
 
@@ -331,6 +374,8 @@ const uiDecoders = {
   list_branches: (o) => ({ type: 'list_branches', credential: s(o.credential, 'credential'), repo: s(o.repo, 'repo') }),
   cancel_queued: (o) => ({ type: 'cancel_queued', id: s(o.id, 'id') }),
   list_queue: () => ({ type: 'list_queue' }),
+  clean_node: (o) => ({ type: 'clean_node', node: s(o.node, 'node'), dry_run: bool(o.dry_run, 'dry_run') }),
+  clean_repo: (o) => ({ type: 'clean_repo', node: s(o.node, 'node'), path: s(o.path, 'path') }),
 } satisfies { [K in UiToHubType]: Decoder<Extract<UiToHub, { type: K }>> };
 
 export const UI_TO_HUB_TYPES = Object.keys(uiDecoders) as UiToHubType[];

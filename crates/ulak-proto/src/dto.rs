@@ -567,7 +567,57 @@ pub enum Source {
         /// May the agent push? The daemon enforces it (the token itself is not scoped).
         #[serde(default)]
         allow_push: bool,
+        /// `true`: always clone anew. Default `false`: the daemon reuses a clone it already has
+        /// of this repository when that clone is not used by another agent.
+        #[serde(default, skip_serializing_if = "is_false")]
+        fresh: bool,
     },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One named agent profile of a node (from its `agents.json`), as the daemon reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    /// The name a spawn uses as `profile.binary` (the key of the `agents.json` entry).
+    pub name: String,
+    /// The executable the profile runs.
+    pub binary: String,
+    /// The profile's own config folder with `~` already expanded on the node, if it fixes one.
+    pub config_dir: Option<String>,
+    pub installed: bool,
+    /// An unresolved login blocker exists for this profile on this node.
+    pub login_blocked: bool,
+}
+
+/// A git clone present on a node (see the node's repo index).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoEntry {
+    pub full_name: RepoRef,
+    pub path: String,
+    /// `None`: detached HEAD.
+    pub branch: Option<String>,
+    /// No modified, staged or untracked (non-ignored) files.
+    pub clean: bool,
+    /// Commits vs the remote tracking branch as of the last fetch; `None`: no upstream.
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    /// Time of the last fetch (clone time when never fetched); `None`: unknown.
+    pub last_fetch_ms: Option<u64>,
+    /// An agent currently runs in (or is starting in) this clone.
+    pub in_use: bool,
+    /// Lives under the daemon's work root, so `CleanRepo` may delete it.
+    pub managed: bool,
+}
+
+/// One line of a clean report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanItem {
+    pub path: String,
+    pub full_name: Option<RepoRef>,
+    pub reason: String,
 }
 
 /// A GitHub token. `Debug` never prints it; it is serialised as a plain string, but only the

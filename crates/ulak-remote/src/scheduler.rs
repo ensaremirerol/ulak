@@ -1,5 +1,5 @@
 use crate::ScheduleError;
-use ulak_proto::{NodeId, NodeInfo, SpawnTarget};
+use ulak_proto::{NodeId, NodeInfo, RepoEntry, RepoRef, SpawnTarget};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Thresholds {
@@ -49,11 +49,27 @@ pub fn pick_node_where(
     limits: &Thresholds,
     blocked: impl Fn(&NodeId) -> bool,
 ) -> Result<NodeId, ScheduleError> {
+    pick_node_ranked(nodes, target, limits, blocked, |_| 0)
+}
+
+/// Like `pick_node_where`, but `Auto` prefers the lowest `rank`, then the lowest CPU use.
+/// Explicit targets ignore `rank`.
+pub fn pick_node_ranked(
+    nodes: &[NodeInfo],
+    target: &SpawnTarget,
+    limits: &Thresholds,
+    blocked: impl Fn(&NodeId) -> bool,
+    rank: impl Fn(&NodeId) -> u8,
+) -> Result<NodeId, ScheduleError> {
     match target {
         SpawnTarget::Auto => nodes
             .iter()
             .filter(|n| limits.allows(n) && !blocked(&n.id))
-            .min_by(|a, b| a.telemetry.cpu_pct().total_cmp(&b.telemetry.cpu_pct()))
+            .min_by(|a, b| {
+                rank(&a.id)
+                    .cmp(&rank(&b.id))
+                    .then(a.telemetry.cpu_pct().total_cmp(&b.telemetry.cpu_pct()))
+            })
             .map(|n| n.id.clone())
             .ok_or(ScheduleError::NoEligibleNode),
         SpawnTarget::Node(id) => match nodes.iter().find(|n| &n.id == id) {
@@ -61,5 +77,18 @@ pub fn pick_node_where(
             Some(n) if limits.allows(n) && !blocked(&n.id) => Ok(id.clone()),
             Some(_) => Err(ScheduleError::NodeNotEligible(id.clone())),
         },
+    }
+}
+
+/// How well a node's repo index suits a spawn of `repo`: 0 an unused, clean managed clone (the
+/// daemon reuses it), 1 any clone of it, 2 none.
+pub fn repo_rank(repos: &[RepoEntry], repo: &RepoRef) -> u8 {
+    let mut of = repos.iter().filter(|r| &r.full_name == repo).peekable();
+    if of.peek().is_none() {
+        2
+    } else if of.any(|r| r.managed && r.clean && !r.in_use) {
+        0
+    } else {
+        1
     }
 }

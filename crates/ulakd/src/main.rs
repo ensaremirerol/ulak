@@ -167,7 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let agents = Agents::load_or_init(&dir)?;
             let host = Tmux::with_agents(std::env::var("ULAKD_TMUX_SOCKET").ok(), agents)
                 .with_mcp(dir.join("run"), dir.join("ca.pem"))
-                .with_git(git_cfg(&dir));
+                .with_git(git_cfg(&dir))
+                .with_settings(ulakd::repos::Settings::load(&dir)?);
             host.adopt().await?; // agents of a previous run keep being watched for login prompts
             tokio::select! {
                 r = run_forever_in(&id, Some(&dir), hostname(), Duration::from_secs(5), &host, probe, updates) => { r?; }

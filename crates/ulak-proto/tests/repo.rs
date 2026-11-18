@@ -24,6 +24,7 @@ fn repo_source() -> Source {
         branch: Some(BranchName::new("feature/x").unwrap()),
         credential: cred(),
         allow_push: true,
+        fresh: false,
     }
 }
 
@@ -157,6 +158,7 @@ fn repo_spec_roundtrips_and_has_no_workdir() {
         Source::Repo {
             branch: None,
             allow_push: false,
+            fresh: false,
             ..
         }
     ));

@@ -50,7 +50,15 @@ export interface AgentProfile {
 /** Where an agent's files come from. */
 export type Source =
   | { kind: 'folder'; path: string }
-  | { kind: 'repo'; repo: RepoRef; branch: string | null; credential: CredentialId; allow_push: boolean };
+  | {
+      kind: 'repo';
+      repo: RepoRef;
+      branch: string | null;
+      credential: CredentialId;
+      allow_push: boolean;
+      /** Always clone anew. On the wire only when true; absent means reuse a free clone. */
+      fresh?: boolean;
+    };
 
 export interface SpawnSpec {
   agent_id: AgentId;
@@ -156,6 +164,35 @@ export interface QueuedSpawn {
   state: QueueState;
 }
 
+/** An agent profile as a node sees it. */
+export interface ProfileInfo {
+  name: ProfileKey;
+  binary: string;
+  config_dir: string | null;
+  installed: boolean;
+  login_blocked: boolean;
+}
+
+/** A git checkout on a node. */
+export interface RepoEntry {
+  full_name: RepoRef;
+  path: string;
+  branch: string | null;
+  clean: boolean;
+  ahead: number | null;
+  behind: number | null;
+  last_fetch_ms: number | null;
+  in_use: boolean;
+  managed: boolean;
+}
+
+/** One checkout a clean removed or kept, with why. */
+export interface CleanItem {
+  path: string;
+  full_name: RepoRef | null;
+  reason: string;
+}
+
 /** What the hub tells a one-time-code holder (device enrolment). */
 export interface OtpOffer {
   kind: DeviceKind;
@@ -186,7 +223,9 @@ export type UiToHub =
   | { type: 'list_repos'; credential: CredentialId; query: string | null; page: number }
   | { type: 'list_branches'; credential: CredentialId; repo: RepoRef }
   | { type: 'cancel_queued'; id: QueueId }
-  | { type: 'list_queue' };
+  | { type: 'list_queue' }
+  | { type: 'clean_node'; node: NodeId; dry_run: boolean }
+  | { type: 'clean_repo'; node: NodeId; path: string };
 
 export type HubToUi =
   | { type: 'snapshot'; nodes: NodeInfo[]; questions: Question[] }
@@ -214,6 +253,9 @@ export type HubToUi =
   | { type: 'queue'; items: QueuedSpawn[] }
   | { type: 'queue_changed'; item: QueuedSpawn }
   | { type: 'queue_removed'; id: QueueId }
+  | { type: 'node_profiles'; node: NodeId; profiles: ProfileInfo[] }
+  | { type: 'node_repos'; node: NodeId; repos: RepoEntry[] }
+  | { type: 'clean_report'; node: NodeId; dry_run: boolean; removed: CleanItem[]; kept: CleanItem[] }
   | { type: 'error'; message: string };
 
 /** A frame this build does not know (newer hub) or could not parse. Never fatal. */

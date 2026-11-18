@@ -360,3 +360,28 @@ describe('store', () => {
     expect(n.value).toBe(1);
   });
 });
+
+describe('versionFlag git prefix', () => {
+  it('treats a 7 char sha and its 12 char form as the same build', () => {
+    const v = { version: '0.1.4', git: 'db27234', proto: 1, os: 'linux', arch: 'x86_64' };
+    expect(versionFlag({ ...v, git: 'db27234a1b2c' }, v)).toBeNull();
+    expect(versionFlag({ ...v, git: 'ffffffff' }, v)).toBe('differs from hub');
+  });
+});
+
+describe('node profiles, repos and clean reports', () => {
+  it('stores the latest of each per node', () => {
+    const p = { name: 'claude', binary: 'claude', config_dir: null, installed: true, login_blocked: false };
+    const r = { full_name: 'o/r', path: '/w/r', branch: 'main', clean: true, ahead: 0, behind: null, last_fetch_ms: null, in_use: false, managed: true };
+    const item = { path: '/w/r', full_name: 'o/r', reason: 'clean' };
+    const s = apply(fresh(),
+      { type: 'node_profiles', node: 'n1', profiles: [p] },
+      { type: 'node_profiles', node: 'n2', profiles: [] },
+      { type: 'node_repos', node: 'n1', repos: [r] },
+      { type: 'clean_report', node: 'n1', dry_run: true, removed: [item], kept: [] },
+      { type: 'clean_report', node: 'n1', dry_run: false, removed: [], kept: [item] });
+    expect(s.nodeProfiles).toEqual({ n1: [p], n2: [] });
+    expect(s.nodeRepos).toEqual({ n1: [r] });
+    expect(s.lastClean).toEqual({ n1: { dryRun: false, removed: [], kept: [item] } });
+  });
+});

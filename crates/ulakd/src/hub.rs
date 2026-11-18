@@ -3,6 +3,7 @@ use crate::{
     config::{daemon_ws_url, Identity},
     errors::{AgentError, HubError},
     renew,
+    repos::Cleaned,
     telemetry::{Probe, Probed},
     update::Updater,
 };
@@ -28,7 +29,7 @@ use tokio_tungstenite::{
 };
 use ulak_proto::{
     decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, GitToken, HubToDaemon, NodeId,
-    NodeInfo, ProfileKey, SpawnSpec,
+    NodeInfo, ProfileInfo, ProfileKey, RepoEntry, SpawnSpec,
 };
 
 /// Something the host wants the hub to hear about, outside of a command's own reply.
@@ -79,6 +80,46 @@ pub trait AgentHost: Send + Sync + 'static {
         &self,
         id: &AgentId,
     ) -> impl Future<Output = Result<mpsc::Receiver<Vec<u8>>, AgentError>> + Send;
+    /// The node's named profiles; `None` (default): this host reports none.
+    fn profiles(&self) -> impl Future<Output = Option<Vec<ProfileInfo>>> + Send {
+        std::future::ready(None)
+    }
+    /// The node's repo index; `None` (default): this host reports none.
+    fn repo_index(&self) -> impl Future<Output = Option<Vec<RepoEntry>>> + Send {
+        std::future::ready(None)
+    }
+    /// Runs a clean request; `None` (default): this host cannot clean.
+    fn clean(&self, _req: CleanReq) -> impl Future<Output = Option<Cleaned>> + Send {
+        std::future::ready(None)
+    }
+    /// How often [`AgentHost::maintain`] runs.
+    fn maintenance_interval(&self) -> Duration {
+        Duration::from_secs(600)
+    }
+    /// Periodic upkeep (rescan, automatic cleanup); returns what an automatic cleanup did.
+    fn maintain(&self) -> impl Future<Output = Option<Cleaned>> + Send {
+        std::future::ready(None)
+    }
+}
+
+/// A clean request from the hub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanReq {
+    All { dry_run: bool },
+    One { path: String },
+}
+
+impl CleanReq {
+    fn dry_run(&self) -> bool {
+        matches!(self, Self::All { dry_run: true })
+    }
+}
+
+/// A background job's result (scans and cleans never block the session loop).
+enum Done {
+    Indexed(Option<Vec<ProfileInfo>>, Option<Vec<RepoEntry>>),
+    Cleaned(bool, Option<Cleaned>),
+    Maintained(Option<Cleaned>),
 }
 
 pub type SharedProbe = Arc<Mutex<Box<dyn Probe>>>;
@@ -180,10 +221,19 @@ struct Session<'a, H> {
     pending: HashMap<AgentId, Instant>,
     out: mpsc::UnboundedSender<DaemonToHub>,
     updates: Option<Arc<Updater>>,
+    /// Background jobs (index refresh, clean, maintenance). The mutex is never locked (only
+    /// `get_mut`): it makes the session `Sync`, which its `&self` awaits need.
+    jobs: Mutex<Jobs<'a>>,
+    /// An index refresh is in flight / another one was asked for meanwhile.
+    indexing: bool,
+    reindex: bool,
+    sent_profiles: Option<Vec<ProfileInfo>>,
+    sent_repos: Option<Vec<RepoEntry>>,
 }
 
 /// Spawns in flight (an install can take minutes; the loop must keep serving meanwhile).
 type Spawns<'a> = FuturesUnordered<BoxFuture<'a, (AgentId, Result<(), AgentError>)>>;
+type Jobs<'a> = FuturesUnordered<BoxFuture<'a, Done>>;
 
 impl<'a, H: AgentHost> Session<'a, H> {
     fn hello(&self) -> DaemonToHub {
@@ -220,6 +270,88 @@ impl<'a, H: AgentHost> Session<'a, H> {
             reason: ulak_proto::sanitize_reason(reason),
         })
         .await;
+    }
+
+    /// Re-reads profiles and the repo index in the background; at most one refresh runs, and a
+    /// request during it schedules exactly one more.
+    fn refresh(&mut self) {
+        if self.indexing {
+            self.reindex = true;
+            return;
+        }
+        self.indexing = true;
+        let host = self.host;
+        self.jobs().push(
+            async move { Done::Indexed(host.profiles().await, host.repo_index().await) }.boxed(),
+        );
+    }
+
+    fn jobs(&mut self) -> &mut Jobs<'a> {
+        self.jobs
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn report(&self, dry_run: bool, c: Cleaned) {
+        let _ = self.out.send(DaemonToHub::CleanReport {
+            dry_run,
+            removed: c.removed,
+            kept: c.kept,
+        });
+    }
+
+    /// A background job finished: send what changed.
+    fn done(&mut self, d: Done) {
+        match d {
+            Done::Indexed(profiles, repos) => {
+                self.indexing = false;
+                if profiles.is_some() && profiles != self.sent_profiles {
+                    let _ = self.out.send(DaemonToHub::Profiles {
+                        profiles: profiles.clone().unwrap_or_default(),
+                    });
+                    self.sent_profiles = profiles;
+                }
+                if repos.is_some() && repos != self.sent_repos {
+                    let _ = self.out.send(DaemonToHub::RepoIndex {
+                        repos: repos.clone().unwrap_or_default(),
+                    });
+                    self.sent_repos = repos;
+                }
+                if std::mem::take(&mut self.reindex) {
+                    self.refresh();
+                }
+            }
+            Done::Cleaned(dry_run, c) => {
+                match c {
+                    Some(c) => self.report(dry_run, c),
+                    None => eprintln!("ulakd: clean requested but this node cannot clean"),
+                }
+                self.refresh();
+            }
+            Done::Maintained(c) => {
+                if let Some(c) = c.filter(|c| !c.removed.is_empty()) {
+                    self.report(false, c);
+                }
+                self.refresh();
+            }
+        }
+    }
+
+    fn clean(&mut self, req: CleanReq) {
+        let host = self.host;
+        self.jobs().push(
+            async move {
+                let dry = req.dry_run();
+                Done::Cleaned(dry, host.clean(req).await)
+            }
+            .boxed(),
+        );
+    }
+
+    fn maintain(&mut self) {
+        let host = self.host;
+        self.jobs()
+            .push(async move { Done::Maintained(host.maintain().await) }.boxed());
     }
 
     fn forget(&mut self, id: &AgentId) {
@@ -260,12 +392,16 @@ impl<'a, H: AgentHost> Session<'a, H> {
                 );
             }
             HubToDaemon::GitAccess { agent, token } => self.host.git_access(agent, token),
-            HubToDaemon::BlockerResolved { profile } => self.host.blocker_resolved(&profile),
+            HubToDaemon::BlockerResolved { profile } => {
+                self.host.blocker_resolved(&profile);
+                self.refresh();
+            }
             HubToDaemon::Kill { agent } => match self.host.kill(&agent).await {
                 Ok(()) => {
                     self.forget(&agent);
                     self.status(&agent, AgentStatus::Exited(None)).await;
                     self.emit(self.hello()).await;
+                    self.refresh();
                 }
                 Err(e) => eprintln!("ulakd: kill {agent:?} failed: {e}"),
             },
@@ -296,6 +432,8 @@ impl<'a, H: AgentHost> Session<'a, H> {
                     tokio::spawn(async move { u.on_update_now().await });
                 }
             }
+            HubToDaemon::CleanRepos { dry_run } => self.clean(CleanReq::All { dry_run }),
+            HubToDaemon::CleanRepo { path } => self.clean(CleanReq::One { path }),
         }
     }
 
@@ -342,6 +480,7 @@ impl<'a, H: AgentHost> Session<'a, H> {
 
     async fn spawned(&mut self, id: AgentId, r: Result<(), AgentError>) {
         self.starting.remove(&id);
+        self.refresh();
         match r {
             Ok(()) => {
                 self.known.insert(id.clone());
@@ -361,7 +500,7 @@ impl<'a, H: AgentHost> Session<'a, H> {
         }
     }
 
-    async fn host_event(&self, e: HostEvent) {
+    async fn host_event(&mut self, e: HostEvent) {
         match e {
             HostEvent::Status { agent, status } => self.status(&agent, status).await,
             HostEvent::Blocked {
@@ -376,7 +515,8 @@ impl<'a, H: AgentHost> Session<'a, H> {
                     kind,
                     detail,
                 })
-                .await
+                .await;
+                self.refresh();
             }
         }
     }
@@ -395,6 +535,9 @@ impl<'a, H: AgentHost> Session<'a, H> {
             let now: HashSet<AgentId> = now.into_iter().collect();
             let mut gone: Vec<AgentId> = self.known.difference(&now).cloned().collect();
             gone.sort();
+            if !gone.is_empty() {
+                self.refresh();
+            }
             for id in gone {
                 self.forget(&id);
                 self.status(&id, AgentStatus::Exited(None)).await;
@@ -450,6 +593,11 @@ where
         pending: HashMap::new(),
         out,
         updates: updates.clone(),
+        jobs: Mutex::new(Jobs::new()),
+        indexing: false,
+        reindex: false,
+        sent_profiles: None,
+        sent_repos: None,
     };
     let mut spawns = Spawns::new();
     sink.send(Message::text(encode(&s.hello())?)).await?;
@@ -464,6 +612,9 @@ where
         sink.send(Message::text(encode(&DaemonToHub::UpdateStatus(st))?))
             .await?;
     }
+    s.refresh(); // its frames follow Hello, Version and UpdateStatus
+    let mut upkeep = tokio::time::interval(host.maintenance_interval());
+    upkeep.tick().await; // the first tick fires immediately; the refresh above covers it
     let mut tick = tokio::time::interval(cfg.heartbeat);
     let mut retry = tokio::time::interval(PENDING_RETRY);
     retry.tick().await;
@@ -484,6 +635,8 @@ where
             Some(id) = host.next_prompt_failure() => s.prompt_failed(&id).await,
             Some(e) = host.next_event() => s.host_event(e).await,
             Some((id, r)) = spawns.next() => s.spawned(id, r).await,
+            Some(d) = s.jobs.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).next() => s.done(d),
+            _ = upkeep.tick() => s.maintain(),
             Some(()) = async {
                 match status_rx.as_mut() {
                     Some(r) => r.changed().await.ok(),

@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 20;
-const HUB_VARIANTS: usize = 26;
+const UI_VARIANTS: usize = 22;
+const HUB_VARIANTS: usize = 29;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -78,6 +78,7 @@ fn repo_spec() -> SpawnSpec {
             branch: Some(BranchName::new("main").unwrap()),
             credential: CredentialId::new("cred-1").unwrap(),
             allow_push: false,
+            fresh: false,
         },
         "fix the bug".into(),
         BTreeMap::new(),
@@ -125,6 +126,8 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::ListBranches { .. } => "list_branches",
         UiToHub::CancelQueued { .. } => "cancel_queued",
         UiToHub::ListQueue => "list_queue",
+        UiToHub::CleanNode { .. } => "clean_node",
+        UiToHub::CleanRepo { .. } => "clean_repo",
     }
 }
 
@@ -155,6 +158,9 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::Queue { .. } => "queue",
         HubToUi::QueueChanged { .. } => "queue_changed",
         HubToUi::QueueRemoved { .. } => "queue_removed",
+        HubToUi::NodeProfiles { .. } => "node_profiles",
+        HubToUi::NodeRepos { .. } => "node_repos",
+        HubToUi::CleanReport { .. } => "clean_report",
         HubToUi::Error { .. } => "error",
     }
 }
@@ -269,6 +275,20 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
             },
         ),
         ("list_queue", UiToHub::ListQueue),
+        (
+            "clean_node_dry",
+            UiToHub::CleanNode {
+                node: node(),
+                dry_run: true,
+            },
+        ),
+        (
+            "clean_repo",
+            UiToHub::CleanRepo {
+                node: node(),
+                path: "/home/u/.config/ulakd/work/reviewer-2/hello-world".into(),
+            },
+        ),
         ("check_update_all", UiToHub::CheckUpdate { node: None }),
         (
             "check_update_node",
@@ -528,6 +548,62 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
             "queue_removed",
             HubToUi::QueueRemoved {
                 id: QueueId::new("q-1").unwrap(),
+            },
+        ),
+        (
+            "node_profiles",
+            HubToUi::NodeProfiles {
+                node: node(),
+                profiles: vec![
+                    ProfileInfo {
+                        name: "claude-work".into(),
+                        binary: "claude".into(),
+                        config_dir: Some("/home/u/.claude-work".into()),
+                        installed: true,
+                        login_blocked: false,
+                    },
+                    ProfileInfo {
+                        name: "antigravity".into(),
+                        binary: "antigravity".into(),
+                        config_dir: None,
+                        installed: false,
+                        login_blocked: true,
+                    },
+                ],
+            },
+        ),
+        (
+            "node_repos",
+            HubToUi::NodeRepos {
+                node: node(),
+                repos: vec![RepoEntry {
+                    full_name: RepoRef::new("octocat/hello-world").unwrap(),
+                    path: "/home/u/.config/ulakd/work/reviewer-2/hello-world".into(),
+                    branch: Some("main".into()),
+                    clean: true,
+                    ahead: Some(0),
+                    behind: Some(2),
+                    last_fetch_ms: Some(1_700_000_007_000),
+                    in_use: false,
+                    managed: true,
+                }],
+            },
+        ),
+        (
+            "clean_report",
+            HubToUi::CleanReport {
+                node: node(),
+                dry_run: true,
+                removed: vec![CleanItem {
+                    path: "/home/u/.config/ulakd/work/reviewer-2/hello-world".into(),
+                    full_name: Some(RepoRef::new("octocat/hello-world").unwrap()),
+                    reason: "up to date with the remote (last fetch)".into(),
+                }],
+                kept: vec![CleanItem {
+                    path: "/home/u/code/other".into(),
+                    full_name: None,
+                    reason: "not under the work root".into(),
+                }],
             },
         ),
         (

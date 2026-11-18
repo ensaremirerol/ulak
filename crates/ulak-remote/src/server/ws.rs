@@ -106,17 +106,77 @@ async fn daemon_loop(h: Arc<Hub>, id: NodeId, mut s: WebSocket) {
     if daemons.get(&id).is_some_and(|t| t.same_channel(&tx)) {
         daemons.remove(&id);
         drop(daemons);
-        h.versions
+        let meta = h
+            .versions
             .lock()
             .expect("versions lock is never held across a panic")
             .remove(&id);
         h.registry.set_offline(&id);
         h.node_update(&id);
+        // Only what was reported is cleared, so older daemons cause no extra frames.
+        if let Some(m) = meta {
+            if m.profiles.is_some_and(|p| !p.is_empty()) {
+                h.ui_send(HubToUi::NodeProfiles {
+                    node: id.clone(),
+                    profiles: vec![],
+                });
+            }
+            if m.repos.is_some_and(|r| !r.is_empty()) {
+                h.ui_send(HubToUi::NodeRepos {
+                    node: id.clone(),
+                    repos: vec![],
+                });
+            }
+        }
     }
 }
 
 fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
     match m {
+        // The node is always the authenticated daemon; oversize reports are dropped whole.
+        DaemonToHub::Profiles { profiles } => {
+            if profiles.len() > MAX_PROFILES || !profiles.iter().all(profile_fits) {
+                return Err(ServerError::BadArgs(
+                    "oversize profiles report dropped".into(),
+                ));
+            }
+            h.meta(id, |m| m.profiles = Some(profiles.clone()));
+            h.ui_send(HubToUi::NodeProfiles {
+                node: id.clone(),
+                profiles,
+            });
+            h.queue_kick.notify_one();
+        }
+        DaemonToHub::RepoIndex { repos } => {
+            if repos.len() > MAX_REPOS || !repos.iter().all(repo_fits) {
+                return Err(ServerError::BadArgs("oversize repo index dropped".into()));
+            }
+            h.meta(id, |m| m.repos = Some(repos.clone()));
+            h.ui_send(HubToUi::NodeRepos {
+                node: id.clone(),
+                repos,
+            });
+        }
+        DaemonToHub::CleanReport {
+            dry_run,
+            removed,
+            kept,
+        } => {
+            if removed.len() + kept.len() > MAX_CLEAN_ITEMS
+                || !removed
+                    .iter()
+                    .chain(&kept)
+                    .all(|c| short(&c.path) && short(&c.reason))
+            {
+                return Err(ServerError::BadArgs("oversize clean report dropped".into()));
+            }
+            h.ui_send(HubToUi::CleanReport {
+                node: id.clone(),
+                dry_run,
+                removed,
+                kept,
+            });
+        }
         DaemonToHub::Hello { node } => {
             if &node.id != id {
                 return Err(ServerError::SpoofedHello);
@@ -160,24 +220,14 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
                     min: MIN_DAEMON_PROTO,
                 });
             }
-            h.versions
-                .lock()
-                .expect("versions lock is never held across a panic")
-                .entry(id.clone())
-                .or_default()
-                .version = Some(info.clone());
+            h.meta(id, |m| m.version = Some(info.clone()));
             h.ui_send(HubToUi::NodeVersion {
                 node: id.clone(),
                 info,
             });
         }
         DaemonToHub::UpdateStatus(status) => {
-            h.versions
-                .lock()
-                .expect("versions lock is never held across a panic")
-                .entry(id.clone())
-                .or_default()
-                .update = Some(status.clone());
+            h.meta(id, |m| m.update = Some(status.clone()));
             h.ui_send(HubToUi::UpdateStatus {
                 node: id.clone(),
                 status,
@@ -276,6 +326,26 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
             }
         }
         _ => {}
+    }
+    let reports: Vec<_> = h
+        .versions
+        .lock()
+        .expect("versions lock is never held across a panic")
+        .iter()
+        .map(|(n, m)| (n.clone(), m.profiles.clone(), m.repos.clone()))
+        .collect();
+    for (node, profiles, repos) in reports {
+        if let Some(profiles) = profiles.filter(|p| !p.is_empty()) {
+            let node = node.clone();
+            if !send(&mut s, &HubToUi::NodeProfiles { node, profiles }).await {
+                return;
+            }
+        }
+        if let Some(repos) = repos.filter(|r| !r.is_empty()) {
+            if !send(&mut s, &HubToUi::NodeRepos { node, repos }).await {
+                return;
+            }
+        }
     }
     loop {
         tokio::select! {
@@ -419,6 +489,26 @@ fn on_ui(
             });
         }
         UiToHub::UpdateNode { node } => update_route(h, node, || HubToDaemon::UpdateNow)?,
+        UiToHub::CleanNode { node, dry_run } => {
+            h.to_daemon(&node, HubToDaemon::CleanRepos { dry_run })?;
+        }
+        UiToHub::CleanRepo { node, path } => {
+            // Only a managed clone the node itself indexed; the daemon checks again.
+            let indexed = h
+                .versions
+                .lock()
+                .expect("versions lock is never held across a panic")
+                .get(&node)
+                .and_then(|m| m.repos.as_ref())
+                .is_some_and(|r| r.iter().any(|e| e.managed && e.path == path));
+            if !indexed {
+                return Err(ServerError::BadArgs(format!(
+                    "{path:?} is not a managed clone indexed on {}",
+                    node.as_str()
+                )));
+            }
+            h.to_daemon(&node, HubToDaemon::CleanRepo { path })?;
+        }
         UiToHub::AddDevice { kind } => {
             let o = h.enroller().begin(kind, now);
             // Secrets go to the asking UI only, never the broadcast.
@@ -539,6 +629,20 @@ fn update_route(
             Ok(())
         }
     }
+}
+
+const MAX_PROFILES: usize = 64;
+const MAX_REPOS: usize = 200;
+const MAX_CLEAN_ITEMS: usize = 400;
+
+fn short(s: &str) -> bool {
+    s.len() <= 1024
+}
+fn profile_fits(p: &ProfileInfo) -> bool {
+    short(&p.name) && short(&p.binary) && p.config_dir.as_deref().is_none_or(short)
+}
+fn repo_fits(r: &RepoEntry) -> bool {
+    short(&r.path) && r.branch.as_deref().is_none_or(short)
 }
 
 const RESOLVED_NUDGE: &str = "Login finished. Please continue.";

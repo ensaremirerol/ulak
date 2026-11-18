@@ -21,6 +21,7 @@ fn spec(id: &str) -> SpawnSpec {
             branch: None,
             credential: CredentialId::new("c1").unwrap(),
             allow_push: true,
+            fresh: false,
         },
         "go".into(),
         BTreeMap::new(),

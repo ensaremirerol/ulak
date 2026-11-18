@@ -9,6 +9,7 @@ pub mod hub;
 pub mod join;
 pub mod mcp;
 pub mod renew;
+pub mod repos;
 pub mod telemetry;
 pub mod tmux;
 pub mod update;

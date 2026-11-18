@@ -107,6 +107,25 @@
       "repo": "octocat/hello-world",
       "type": "branches"
     },
+    "clean_report": {
+      "dry_run": true,
+      "kept": [
+        {
+          "full_name": null,
+          "path": "/home/u/code/other",
+          "reason": "not under the work root"
+        }
+      ],
+      "node": "vps-fra",
+      "removed": [
+        {
+          "full_name": "octocat/hello-world",
+          "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world",
+          "reason": "up to date with the remote (last fetch)"
+        }
+      ],
+      "type": "clean_report"
+    },
     "credentials": {
       "credentials": [
         {
@@ -173,6 +192,43 @@
       "thread": "t-1",
       "to": "planner",
       "type": "message_logged"
+    },
+    "node_profiles": {
+      "node": "vps-fra",
+      "profiles": [
+        {
+          "binary": "claude",
+          "config_dir": "/home/u/.claude-work",
+          "installed": true,
+          "login_blocked": false,
+          "name": "claude-work"
+        },
+        {
+          "binary": "antigravity",
+          "config_dir": null,
+          "installed": false,
+          "login_blocked": true,
+          "name": "antigravity"
+        }
+      ],
+      "type": "node_profiles"
+    },
+    "node_repos": {
+      "node": "vps-fra",
+      "repos": [
+        {
+          "ahead": 0,
+          "behind": 2,
+          "branch": "main",
+          "clean": true,
+          "full_name": "octocat/hello-world",
+          "in_use": false,
+          "last_fetch_ms": 1700000007000,
+          "managed": true,
+          "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world"
+        }
+      ],
+      "type": "node_repos"
     },
     "node_update_busy_gaming": {
       "agents": [
@@ -479,6 +535,16 @@
     "check_update_node": {
       "node": "vps-fra",
       "type": "check_update"
+    },
+    "clean_node_dry": {
+      "dry_run": true,
+      "node": "vps-fra",
+      "type": "clean_node"
+    },
+    "clean_repo": {
+      "node": "vps-fra",
+      "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world",
+      "type": "clean_repo"
     },
     "delete_credential": {
       "id": "cred-1",

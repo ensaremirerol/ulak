@@ -44,11 +44,34 @@ pub enum DaemonToHub {
         agent: AgentId,
         reason: String,
     },
+    /// The node's named profiles; sent after Hello and whenever they change.
+    Profiles {
+        profiles: Vec<ProfileInfo>,
+    },
+    /// The node's repo index (at most 200 entries); sent after Hello and whenever it changes.
+    RepoIndex {
+        repos: Vec<RepoEntry>,
+    },
+    /// Result of `CleanRepos` / `CleanRepo` or of the automatic cleanup. With `dry_run`,
+    /// `removed` lists what WOULD be removed.
+    CleanReport {
+        dry_run: bool,
+        removed: Vec<CleanItem>,
+        kept: Vec<CleanItem>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubToDaemon {
+    /// Delete every eligible clone under the daemon's work root; answered with `CleanReport`.
+    CleanRepos {
+        dry_run: bool,
+    },
+    /// Delete one clone; `path` must equal the path of an indexed work-root entry.
+    CleanRepo {
+        path: String,
+    },
     /// Look for a newer release in the daemon's own configured repo; report via `UpdateStatus`.
     CheckUpdate,
     /// Download, verify, install and restart; the daemon decides what to fetch.
@@ -156,6 +179,16 @@ pub enum UiToHub {
         id: QueueId,
     },
     ListQueue,
+    /// Clean a node's work-root clones (`dry_run`: only report). Reply: `CleanReport`.
+    CleanNode {
+        node: NodeId,
+        dry_run: bool,
+    },
+    /// Clean one indexed work-root clone of a node. Reply: `CleanReport`.
+    CleanRepo {
+        node: NodeId,
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,6 +289,23 @@ pub enum HubToUi {
     /// Placed on a node, or cancelled.
     QueueRemoved {
         id: QueueId,
+    },
+    /// A node's named profiles (relay of `DaemonToHub::Profiles`); replayed per node on connect.
+    NodeProfiles {
+        node: NodeId,
+        profiles: Vec<ProfileInfo>,
+    },
+    /// A node's repo index (relay of `DaemonToHub::RepoIndex`); replayed per node on connect.
+    NodeRepos {
+        node: NodeId,
+        repos: Vec<RepoEntry>,
+    },
+    /// Relay of `DaemonToHub::CleanReport`.
+    CleanReport {
+        node: NodeId,
+        dry_run: bool,
+        removed: Vec<CleanItem>,
+        kept: Vec<CleanItem>,
     },
     Error {
         message: String,

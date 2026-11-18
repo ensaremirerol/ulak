@@ -90,6 +90,9 @@ impl GitCfg {
     pub fn host(&self) -> &str {
         &self.host
     }
+    pub fn program(&self) -> &str {
+        &self.program
+    }
     pub fn with_timeout(mut self, t: Duration) -> Self {
         self.timeout = t;
         self
@@ -396,7 +399,9 @@ pub async fn clone_repo(
     }
     .await;
     if r.is_err() {
-        let _ = std::fs::remove_dir_all(&agent_dir);
+        // the agent dir may hold a clone another agent reuses: remove only what this made
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir(&agent_dir);
     }
     r.map(|()| dir)
 }

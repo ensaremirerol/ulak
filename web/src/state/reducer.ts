@@ -1,6 +1,6 @@
 // Pure state machine, ported from crates/ulak/src/model.rs (apply + helpers). No I/O, no signals.
 import type {
-  AgentStatus, Blocker, BlockerKind, HubToUi, NodeId, NodeInfo, Question, UpdateState, VersionInfo,
+  AgentStatus, Blocker, BlockerKind, HubToUi, NodeId, NodeInfo, ProfileInfo, Question, RepoEntry, UpdateState, VersionInfo,
 } from '../proto';
 import type { Event, State, TermBuf, Toast, ToastKind } from './types';
 
@@ -16,7 +16,7 @@ export function initialState(now = Date.now()): State {
     conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, lastFailure: {}, mailbox: [], devices: [],
     otp: null, terminals: {}, selected: null, toasts: [], nextToastId: 1, now,
     hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
-    credentials: [], repos: {}, branches: {}, queue: [],
+    credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
   };
 }
 
@@ -115,7 +115,9 @@ export const branchKey = (credential: string, repo: string): string => `${creden
 
 function setStatus(s: State, agent: string, node: NodeId, status: AgentStatus): State {
   const nodes = s.nodes.map((n) => (n.id === node && !n.agents.includes(agent) ? { ...n, agents: [...n.agents, agent] } : n));
-  return { ...s, nodes, statuses: { ...s.statuses, [agent]: status } };
+  // Remember where a failed agent ran: the node's own list may never (or no longer) include it.
+  const lastFailure = status === 'Failed' && !s.lastFailure[agent] ? { ...s.lastFailure, [agent]: { node, reason: '', at: s.now } } : s.lastFailure;
+  return { ...s, nodes, lastFailure, statuses: { ...s.statuses, [agent]: status } };
 }
 
 function reduceHub(s: State, f: HubToUi): State {
@@ -189,6 +191,12 @@ function reduceHub(s: State, f: HubToUi): State {
       return { ...s, nodeVersions: { ...s.nodeVersions, [f.node]: f.info } };
     case 'update_status':
       return { ...s, updates: { ...s.updates, [f.node]: f.status } };
+    case 'node_profiles':
+      return { ...s, nodeProfiles: { ...s.nodeProfiles, [f.node]: f.profiles } };
+    case 'node_repos':
+      return { ...s, nodeRepos: { ...s.nodeRepos, [f.node]: f.repos } };
+    case 'clean_report':
+      return { ...s, lastClean: { ...s.lastClean, [f.node]: { dryRun: f.dry_run, removed: f.removed, kept: f.kept } } };
     case 'error':
       return addToast(s, 'error', f.message);
   }
@@ -203,13 +211,49 @@ export const questionAgeMs = (s: State, q: Question): number => Math.max(0, s.no
 export const blockersFor = (s: State, node: NodeId | undefined, profile: string): Blocker[] =>
   s.blockers.filter((b) => b.profile === profile && (node === undefined || b.node === node));
 
+/** Profile names online nodes reported, first seen first, with the nodes offering each. */
+export function profileChoices(s: State): { name: string; on: { node: NodeInfo; info: ProfileInfo }[] }[] {
+  const out = new Map<string, { node: NodeInfo; info: ProfileInfo }[]>();
+  for (const node of s.nodes.filter((n) => n.state !== 'Offline')) for (const info of s.nodeProfiles[node.id] ?? []) out.set(info.name, [...(out.get(info.name) ?? []), { node, info }]);
+  return [...out].map(([name, on]) => ({ name, on }));
+}
+
+/** `name` is a profile some online node reports, but not this node (the hub will not place it there). Other names are custom binaries. */
+export const lacksProfile = (s: State, node: NodeId, name: string): boolean => {
+  const p = s.nodeProfiles[node];
+  return p !== undefined && p.length > 0 && !p.some((i) => i.name === name) && profileChoices(s).some((c) => c.name === name);
+};
+
+/** Mirrors the hub's `repo_rank`: 0 an unused clean managed clone (reused), 1 any clone, 2 none. */
+export function repoRank(entries: readonly RepoEntry[] | undefined, repo: string): 0 | 1 | 2 {
+  const of = (entries ?? []).filter((e) => e.full_name === repo);
+  if (of.length === 0) return 2;
+  return of.some((e) => e.managed && e.clean && !e.in_use) ? 0 : 1;
+}
+
+/** "Already on <node> (...)" for the node an Auto spawn of `repo` prefers, or null. */
+export function repoHint(s: State, repo: string): string | null {
+  let best: { node: NodeInfo; rank: 0 | 1 } | null = null;
+  for (const node of s.nodes) {
+    const rank = repoRank(s.nodeRepos[node.id], repo);
+    if (node.state !== 'Offline' && rank < 2 && (best === null || rank < best.rank)) best = { node, rank: rank as 0 | 1 };
+  }
+  if (!best) return null;
+  const e = s.nodeRepos[best.node.id]!.find((x) => x.full_name === repo)!;
+  const why = best.rank === 0 ? 'clean' : e.in_use ? 'in use' : !e.managed ? 'not managed' : 'has changes';
+  return `Already on ${best.node.hostname} (${why})`;
+}
+
 export const kindTitle = (k: BlockerKind): string => (k === 'Login' ? 'Login required' : 'Install failed');
+
+/** Short shas may differ in length (7 vs 12): equal when one is a prefix of the other. */
+const sameGit = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
 
 export type VersionFlag = 'differs from hub' | 'protocol too old';
 /** How a version differs from the hub's; an older protocol wins over any other difference. */
 export function versionFlag(hub: VersionInfo, v: VersionInfo): VersionFlag | null {
   if (v.proto < hub.proto) return 'protocol too old';
-  return v.proto !== hub.proto || v.version !== hub.version || v.git !== hub.git ? 'differs from hub' : null;
+  return v.proto !== hub.proto || v.version !== hub.version || !sameGit(v.git, hub.git) ? 'differs from hub' : null;
 }
 export const nodeFlag = (s: State, n: NodeId): VersionFlag | null => {
   const v = s.nodeVersions[n];

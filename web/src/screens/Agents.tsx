@@ -102,7 +102,14 @@ function QueuePanel({ items, now }: { items: QueuedSpawn[]; now: number }) {
 export function Agents() {
   const s = store.state.value;
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const agents = s.nodes.flatMap((n) => n.agents.map((id) => ({ id, node: n })));
+  const listed = s.nodes.flatMap((n) => n.agents.map((id) => ({ id, node: n })));
+  // A failed agent the node never listed (or already dropped) stays visible until it changes state.
+  const failed = Object.entries(s.lastFailure).flatMap(([id, f]) => {
+    const node = s.nodes.find((n) => n.id === f.node);
+    const st = s.statuses[id];
+    return node && !listed.some((a) => a.id === id) && (st === undefined || st === 'Failed') ? [{ id, node }] : [];
+  });
+  const agents = [...listed, ...failed];
   const asking = new Set(s.questions.map((q) => q.from));
   return (
     <>

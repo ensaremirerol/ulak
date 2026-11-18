@@ -1,7 +1,10 @@
-//! `agents.json`: per-profile (binary file name) check, install recipe and login patterns.
+//! `agents.json`: per-profile check, install recipe and login patterns. A profile is named by
+//! the spawn's `profile.binary` (its file name); an entry may run another `binary` with its own
+//! `args`, `config_dir` and `env` (e.g. two claude accounts as `claude-work` and
+//! `claude-personal`), and then inherits whatever it leaves out from that binary's entry.
 //! Install recipes come ONLY from this local file (and the built-in defaults); the hub never
 //! supplies a command. Recipes are argv vectors, run without a shell.
-use crate::errors::ConfigError;
+use crate::{errors::ConfigError, repos::expand_tilde};
 use futures_util::{
     future::{BoxFuture, Shared},
     FutureExt,
@@ -15,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::process::Command;
+use ulak_proto::SpawnSpec;
 
 const DETAIL_MAX: usize = 400;
 
@@ -50,6 +54,50 @@ pub struct Recipe {
     /// var holding the agent token) and `{ca_file}` (hub CA pem). Used when `mcp` is not `claude`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_args: Vec<String>,
+    /// The executable this profile runs (`~` expanded on the node). Absent: the profile name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// Argv placed before the spawn's own profile args.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Config folder (`~` expanded); for claude binaries it becomes `CLAUDE_CONFIG_DIR`. The
+    /// spawn's own `profile.config_dir` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<String>,
+    /// Extra environment; the spawn's env wins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+/// How one spawn is actually started (see [`Agents::exec_spec`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exec {
+    pub binary: String,
+    pub args: Vec<String>,
+    /// Lower priority than the spec's env.
+    pub env: BTreeMap<String, String>,
+    pub config_dir: Option<String>,
+    pub recipe: Recipe,
+}
+
+impl Exec {
+    /// The spawn as given, without any `agents.json` entry.
+    pub fn plain(spec: &SpawnSpec) -> Self {
+        let config_dir = spec
+            .profile()
+            .config_dir()
+            .map(|d| d.to_string_lossy().into_owned());
+        Self {
+            binary: spec.profile().binary().to_owned(),
+            args: spec.profile().args().to_vec(),
+            env: config_dir
+                .iter()
+                .map(|d| ("CLAUDE_CONFIG_DIR".to_owned(), d.clone()))
+                .collect(),
+            config_dir,
+            recipe: Recipe::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +117,10 @@ impl Default for Recipe {
             login_scan_secs: d_scan(),
             mcp: None,
             mcp_args: Vec::new(),
+            binary: None,
+            args: Vec::new(),
+            config_dir: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -128,9 +180,66 @@ impl Agents {
         Ok(me)
     }
 
-    /// The recipe for a binary (file name); unknown profiles get check-only defaults.
-    pub fn recipe(&self, binary: &str) -> Recipe {
-        self.0.get(binary_name(binary)).cloned().unwrap_or_default()
+    /// The recipe of a profile (file name); unknown profiles get check-only defaults. An entry
+    /// with another `binary` takes `check`, `install`, `login_patterns` and `mcp` from that
+    /// binary's entry when it has none of its own.
+    pub fn recipe(&self, name: &str) -> Recipe {
+        let name = binary_name(name);
+        let mut r = self.0.get(name).cloned().unwrap_or_default();
+        let Some(base_name) = r.binary.as_deref().map(binary_name).map(str::to_owned) else {
+            return r;
+        };
+        if base_name == name {
+            return r;
+        }
+        if let Some(base) = self.0.get(&base_name) {
+            r.check = r.check.or_else(|| base.check.clone());
+            r.install = r.install.or_else(|| base.install.clone());
+            if r.login_patterns.is_empty() {
+                r.login_patterns = base.login_patterns.clone();
+            }
+            r.mcp = r.mcp.or(base.mcp);
+            if r.mcp_args.is_empty() {
+                r.mcp_args = base.mcp_args.clone();
+            }
+        }
+        if r.mcp.is_none() && base_name == "claude" {
+            r.mcp = Some(Mcp::Claude); // the name no longer says "claude"
+        }
+        r
+    }
+
+    /// Resolves the profile of `spec` (named by its `profile.binary`) to what actually runs.
+    pub fn exec_spec(&self, spec: &SpawnSpec) -> Exec {
+        let mut e = Exec::plain(spec);
+        let recipe = self.recipe(spec.profile().binary());
+        if let Some(b) = &recipe.binary {
+            e.binary = expand_tilde(Path::new(b)).to_string_lossy().into_owned();
+        }
+        e.args = recipe.args.iter().cloned().chain(e.args).collect();
+        for (k, v) in &recipe.env {
+            e.env.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if e.config_dir.is_none() {
+            e.config_dir = recipe
+                .config_dir
+                .as_deref()
+                .map(|d| expand_tilde(Path::new(d)).to_string_lossy().into_owned());
+            if let Some(d) = e
+                .config_dir
+                .as_ref()
+                .filter(|_| binary_name(&e.binary) == "claude")
+            {
+                e.env.insert("CLAUDE_CONFIG_DIR".into(), d.clone());
+            }
+        }
+        e.recipe = recipe;
+        e
+    }
+
+    /// Every named profile (defaults plus `agents.json`), sorted by name.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
     }
 }
 
@@ -302,7 +411,7 @@ impl Installer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
@@ -354,6 +463,70 @@ mod tests {
         assert_eq!(f.recipe("antigravity"), Recipe::default()); // defaults stay
         assert!(Agents::from_json(r#"{"a":{"bogus":1}}"#).is_err());
         assert!(Agents::from_json("nope").is_err());
+    }
+
+    pub(crate) const TWO_CLAUDES: &str = r#"{"claude-work":{"binary":"claude","config_dir":"~/.claude-work"},"claude-personal":{"binary":"claude","config_dir":"~/.claude-personal","args":["--x"],"env":{"A":"1"}}}"#;
+
+    pub(crate) fn spec_for(binary: &str, cfg: Option<&str>, env: &[(&str, &str)]) -> SpawnSpec {
+        SpawnSpec::new(
+            ulak_proto::AgentId::new("a1").unwrap(),
+            ulak_proto::AgentProfile::new(binary, vec!["--y".into()], cfg.map(Into::into)).unwrap(),
+            "/w".into(),
+            "go".into(),
+            env.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn named_profiles_resolve_to_their_binary_and_inherit_the_rest() {
+        let a = Agents::from_json(TWO_CLAUDES).unwrap();
+        let home = std::env::var("HOME").unwrap();
+        let w = a.exec_spec(&spec_for("claude-work", None, &[]));
+        assert_eq!(w.binary, "claude");
+        assert_eq!(w.args, ["--y"]);
+        assert_eq!(
+            w.config_dir.as_deref(),
+            Some(format!("{home}/.claude-work").as_str())
+        );
+        assert_eq!(w.env["CLAUDE_CONFIG_DIR"], format!("{home}/.claude-work"));
+        // check, install and login patterns come from `claude`; mcp follows the real binary
+        let base = Agents::default().recipe("claude");
+        assert_eq!(w.recipe.check, base.check);
+        assert_eq!(w.recipe.install, base.install);
+        assert_eq!(w.recipe.login_patterns, base.login_patterns);
+        assert_eq!(w.recipe.mcp, Some(Mcp::Claude));
+        assert_eq!(a.recipe("claude-work").login_patterns, base.login_patterns);
+        let p = a.exec_spec(&spec_for("claude-personal", None, &[("A", "mine")]));
+        assert_eq!(p.args, ["--x", "--y"]);
+        assert_eq!(p.env["A"], "1"); // lower priority: the spec env still wins in the argv
+        assert_eq!(
+            p.env["CLAUDE_CONFIG_DIR"],
+            format!("{home}/.claude-personal")
+        );
+        // the spawn's own config_dir wins
+        let o = a.exec_spec(&spec_for("claude-work", Some("/own"), &[]));
+        assert_eq!(o.env["CLAUDE_CONFIG_DIR"], "/own");
+        // no entry: the spawn as given
+        let plain = spec_for("claude", None, &[]);
+        assert_eq!(a.exec_spec(&plain).binary, "claude");
+        assert!(a.exec_spec(&plain).env.is_empty());
+        // a config_dir on a non-claude binary sets no CLAUDE_CONFIG_DIR
+        let x = Agents::from_json(r#"{"g":{"binary":"gemini","config_dir":"/c"}}"#).unwrap();
+        let e = x.exec_spec(&spec_for("g", None, &[]));
+        assert!(
+            e.env.is_empty() && e.config_dir.as_deref() == Some("/c") && e.recipe.mcp.is_none()
+        );
+        // the blocker keys differ, so the two accounts block independently
+        let k = |b: &str| spec_for(b, None, &[]).profile().key().unwrap();
+        assert_ne!(k("claude-work"), k("claude-personal"));
+        assert_eq!(a.names().filter(|n| n.starts_with("claude")).count(), 3);
+        assert!(serde_json::to_string(&Agents::default())
+            .unwrap()
+            .find("binary")
+            .is_none());
     }
 
     #[test]

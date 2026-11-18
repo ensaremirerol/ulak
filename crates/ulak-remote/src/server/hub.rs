@@ -174,6 +174,9 @@ pub struct Hub {
 pub(crate) struct NodeMeta {
     pub version: Option<VersionInfo>,
     pub update: Option<UpdateState>,
+    /// Last `Profiles`; `None` or empty: an older daemon (any binary is accepted).
+    pub profiles: Option<Vec<ProfileInfo>>,
+    pub repos: Option<Vec<RepoEntry>>,
 }
 
 /// Handle to the running server. Dropping it does not stop the hub; call `abort`.
@@ -353,6 +356,48 @@ impl Hub {
                 });
             }
         }
+    }
+
+    /// Updates the connected node's metadata entry.
+    pub(crate) fn meta(&self, id: &NodeId, f: impl FnOnce(&mut NodeMeta)) {
+        f(self
+            .versions
+            .lock()
+            .expect("versions lock is never held across a panic")
+            .entry(id.clone())
+            .or_default());
+    }
+
+    /// Profile names the node reported; `None`: it reported none (older daemon).
+    pub(crate) fn profile_names(&self, id: &NodeId) -> Option<Vec<String>> {
+        let v = self
+            .versions
+            .lock()
+            .expect("versions lock is never held across a panic");
+        let p = v.get(id)?.profiles.as_ref().filter(|p| !p.is_empty())?;
+        Some(p.iter().map(|i| i.name.clone()).collect())
+    }
+
+    /// Some connected node reports `name` as a profile.
+    pub(crate) fn profile_known(&self, name: &str) -> bool {
+        self.versions
+            .lock()
+            .expect("versions lock is never held across a panic")
+            .values()
+            .flat_map(|m| m.profiles.iter().flatten())
+            .any(|p| p.name == name)
+    }
+
+    /// `repo_rank` of the node's repo index.
+    pub(crate) fn repo_rank(&self, id: &NodeId, repo: &RepoRef) -> u8 {
+        let v = self
+            .versions
+            .lock()
+            .expect("versions lock is never held across a panic");
+        crate::repo_rank(
+            v.get(id).and_then(|m| m.repos.as_deref()).unwrap_or(&[]),
+            repo,
+        )
     }
 
     pub(crate) fn ui_send(&self, m: HubToUi) {

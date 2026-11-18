@@ -31,7 +31,7 @@ export function spawnFormToFrame(f: SpawnForm): UiToHub {
       workdir: f.repo ? '' : f.workdir.trim(),
       prompt: f.prompt,
       env: {},
-      ...(f.repo ? { source: { kind: 'repo' as const, repo: f.repo.repo, branch: f.repo.branch || null, credential: f.repo.credential, allow_push: f.repo.allowPush } } : {}),
+      ...(f.repo ? { source: { kind: 'repo' as const, repo: f.repo.repo, branch: f.repo.branch || null, credential: f.repo.credential, allow_push: f.repo.allowPush, ...(f.repo.fresh ? { fresh: true } : {}) } } : {}),
     },
   };
 }
@@ -84,6 +84,10 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'check_update', node: i.node ?? null }];
     case 'update_node':
       return [{ type: 'update_node', node: i.node ?? null }];
+    case 'clean_node':
+      return [{ type: 'clean_node', node: i.node, dry_run: i.dryRun }];
+    case 'clean_repo':
+      return [{ type: 'clean_repo', node: i.node, path: i.path }];
   }
 }
 

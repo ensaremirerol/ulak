@@ -23,7 +23,7 @@ pub use github::GitHub;
 pub use passkeys::{PasskeyInfo, Passkeys, Sessions};
 pub use proxy::TrustedProxies;
 pub use registry::Registry;
-pub use scheduler::{pick_node, pick_node_where, Thresholds};
+pub use scheduler::{pick_node, pick_node_ranked, pick_node_where, repo_rank, Thresholds};
 pub use secrets::Secrets;
 pub use server::{Hub, HubConfig, Running};
 pub use store::{Blockers, Credentials, Mailbox, Questions, Queue, QueueEntry, Store, QUEUE_CAP};

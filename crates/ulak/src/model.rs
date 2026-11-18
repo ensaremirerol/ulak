@@ -189,7 +189,10 @@ impl Flag {
 pub fn flag(hub: &VersionInfo, v: &VersionInfo) -> Option<Flag> {
     if v.proto() < hub.proto() {
         Some(Flag::ProtocolTooOld)
-    } else if v.proto() != hub.proto() || v.version() != hub.version() || v.git() != hub.git() {
+    } else if v.proto() != hub.proto()
+        || v.version() != hub.version()
+        || !(v.git().starts_with(hub.git()) || hub.git().starts_with(v.git()))
+    {
         Some(Flag::DiffersFromHub)
     } else {
         None

@@ -16,6 +16,7 @@ use ulakd::{
     errors::{AgentError, TelemetryError},
     git::{clone_repo, GitCfg},
     hub::{connect, run_session, AgentHost, SessionCfg, SharedProbe},
+    repos::{CleanCfg, Settings},
     telemetry::{Probe, Probed},
     tmux::Tmux,
 };
@@ -231,6 +232,10 @@ async fn screen(t: &Tmux, id: &AgentId, needle: &str) -> bool {
 }
 
 fn repo_spec(id: &str, allow_push: bool) -> SpawnSpec {
+    repo_spec_with(id, allow_push, false, None)
+}
+
+fn repo_spec_with(id: &str, allow_push: bool, fresh: bool, branch: Option<&str>) -> SpawnSpec {
     SpawnSpec::new_repo(
         aid(id),
         AgentProfile::new(
@@ -244,9 +249,10 @@ fn repo_spec(id: &str, allow_push: bool) -> SpawnSpec {
         .unwrap(),
         Source::Repo {
             repo: repo(),
-            branch: None,
+            branch: branch.map(|b| BranchName::new(b).unwrap()),
             credential: CredentialId::new("c1").unwrap(),
             allow_push,
+            fresh,
         },
         "go".into(),
         BTreeMap::new(),
@@ -289,7 +295,7 @@ async fn tmux_repo_agent_starts_in_clone_and_cleans_up() {
     tm.kill_agent(s.agent_id()).await.unwrap();
 
     // allow_push true: helper and token file in the private run dir
-    let s2 = repo_spec("p2", true);
+    let s2 = repo_spec_with("p2", true, true, None); // fresh: p1's clone is not reused
     tm.git_access(aid("p2"), tok());
     tm.spawn_agent(&s2).await.unwrap();
     let h = t.path().join("run/git-p2");
@@ -315,6 +321,188 @@ async fn tmux_repo_agent_starts_in_clone_and_cleans_up() {
     assert!(leftovers(&t.path().join("work"))
         .iter()
         .all(|n| !n.starts_with('.')));
+    let _ = Command::new("tmux")
+        .args(["-L", &sock, "kill-server"])
+        .output();
+}
+
+fn out(dir: &Path, args: &[&str]) -> String {
+    let o = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_owned()
+}
+
+#[tokio::test]
+async fn tmux_repo_spawn_reuses_an_unused_clone() {
+    if !have_tmux() {
+        eprintln!("tmux not installed; skipping");
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let base = bare_repo(t.path());
+    let sock = format!("ulakd-test-reuse-{}", std::process::id());
+    let tm = Tmux::new(Some(sock.clone()))
+        .with_delays(Duration::from_millis(200), Duration::from_millis(50))
+        .with_git(GitCfg::new(t.path().join("work"), t.path().join("run")).with_test_host(&base));
+    let spawn = |id: &'static str, branch: Option<&'static str>| {
+        let tm = tm.clone();
+        async move {
+            tm.git_access(aid(id), tok());
+            tm.spawn_agent(&repo_spec_with(id, false, false, branch))
+                .await
+        }
+    };
+    // nothing to reuse: fresh clone
+    spawn("r1", None).await.unwrap();
+    let c1 = t.path().join("work/r1/hello");
+    assert!(screen(&tm, &aid("r1"), &format!("pwd={}", c1.display())).await);
+    // r1's clone is in use (its tmux session starts there): another fresh clone
+    spawn("r2", None).await.unwrap();
+    let c2 = t.path().join("work/r2/hello");
+    assert!(screen(&tm, &aid("r2"), &format!("pwd={}", c2.display())).await);
+    tm.kill_agent(&aid("r1")).await.unwrap();
+    tm.kill_agent(&aid("r2")).await.unwrap();
+
+    // the remote moved on `dev`; r2's clone is dirty, so r1's clean clone is reused
+    let src = t.path().join("src");
+    git(&src, &["checkout", "-q", "dev"]);
+    std::fs::write(src.join("DEV"), "dev").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-q", "-m", "dev"]);
+    let bare = t.path().join("srv/octo/hello.git");
+    git(&src, &["push", "-q", bare.to_str().unwrap(), "dev"]);
+    std::fs::write(c2.join("scratch"), "wip").unwrap();
+    spawn("r3", Some("dev")).await.unwrap();
+    assert!(screen(&tm, &aid("r3"), &format!("pwd={}", c1.display())).await);
+    assert!(c1.join("DEV").exists(), "fetched and checked out dev");
+    assert_eq!(out(&c1, &["rev-parse", "--abbrev-ref", "HEAD"]), "dev");
+    assert_eq!(out(&c1, &["config", "branch.dev.merge"]), "refs/heads/dev");
+    assert_eq!(
+        out(&c1, &["config", "remote.origin.pushurl"]),
+        "no-push-here"
+    );
+    assert!(!std::fs::read_to_string(c1.join(".git/config"))
+        .unwrap()
+        .contains(TOKEN));
+    tm.kill_agent(&aid("r3")).await.unwrap();
+
+    // a single-branch clone of `dev` reused without a branch lands on the remote default
+    // (main), and hooks planted by the previous agent never run (they would see the token)
+    tm.git_access(aid("r5"), tok());
+    tm.spawn_agent(&repo_spec_with("r5", false, true, Some("dev")))
+        .await
+        .unwrap();
+    tm.kill_agent(&aid("r5")).await.unwrap();
+    let c5 = t.path().join("work/r5/hello");
+    let leak = t.path().join("leak");
+    for h in ["post-checkout", "reference-transaction", "post-merge"] {
+        let f = c5.join(".git/hooks").join(h);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(
+            &f,
+            format!(
+                "#!/bin/sh\necho \"$ULAK_GIT_TOKEN\" >> {}\n",
+                leak.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(c1.join("scratch"), "wip").unwrap(); // c5 is the only clean clone
+    spawn("r6", None).await.unwrap();
+    assert!(
+        screen(&tm, &aid("r6"), &format!("pwd={}", c5.display())).await,
+        "{:?} {:?}",
+        std::fs::read_dir(t.path().join("work"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>(),
+        out(&c5, &["status", "--porcelain", "-b"])
+    );
+    assert_eq!(out(&c5, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert!(!leak.exists(), "a hook ran during reuse");
+    tm.kill_agent(&aid("r6")).await.unwrap();
+
+    // every unused clone is dirty now: refused with a clear reason, nothing touched
+    std::fs::write(c5.join("scratch"), "wip").unwrap();
+    let e = spawn("r4", None).await.unwrap_err();
+    assert!(e.to_string().contains("uncommitted changes"), "{e}");
+    assert!(!t.path().join("work/r4").exists());
+    assert_eq!(out(&c1, &["rev-parse", "--abbrev-ref", "HEAD"]), "dev");
+    let _ = Command::new("tmux")
+        .args(["-L", &sock, "kill-server"])
+        .output();
+}
+
+#[tokio::test]
+async fn tmux_index_and_cleanup_respect_running_agents() {
+    if !have_tmux() {
+        eprintln!("tmux not installed; skipping");
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let base = bare_repo(t.path());
+    let sock = format!("ulakd-test-clean-{}", std::process::id());
+    let settings = Settings {
+        clean: CleanCfg {
+            auto: true,
+            after_exit_hours: 1,
+        },
+        ..Settings::default()
+    };
+    let tm = Tmux::new(Some(sock.clone()))
+        .with_delays(Duration::from_millis(200), Duration::from_millis(50))
+        .with_git(GitCfg::new(t.path().join("work"), t.path().join("run")).with_test_host(&base))
+        .with_settings(settings);
+    for (id, fresh) in [("c1", false), ("c2", true)] {
+        tm.git_access(aid(id), tok());
+        tm.spawn_agent(&repo_spec_with(id, false, fresh, None))
+            .await
+            .unwrap();
+    }
+    tm.kill_agent(&aid("c2")).await.unwrap();
+    let work = t.path().join("work").canonicalize().unwrap();
+    let (c1, c2) = (work.join("c1/hello"), work.join("c2/hello"));
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let idx = tm.repo_index().await.unwrap();
+    assert_eq!(idx.len(), 2);
+    assert!(idx
+        .iter()
+        .all(|e| e.managed && e.full_name.as_str() == "octo/hello"));
+    assert!(idx.iter().any(|e| e.path == s(&c1) && e.in_use), "{idx:?}");
+    assert!(idx.iter().any(|e| e.path == s(&c2) && !e.in_use));
+
+    let dry = tm.clean_repos(true).await.unwrap();
+    assert_eq!(
+        dry.removed
+            .iter()
+            .map(|i| i.path.clone())
+            .collect::<Vec<_>>(),
+        [s(&c2)]
+    );
+    assert!(dry
+        .kept
+        .iter()
+        .any(|i| i.path == s(&c1) && i.reason.contains("using")));
+    assert!(c2.exists(), "dry run removes nothing");
+    let bad = tm.clean_repo("/etc".into()).await.unwrap();
+    assert!(bad.removed.is_empty() && bad.kept[0].reason.contains("not an indexed"));
+    // automatic: c2 has been idle since the index scan above; due one hour later
+    let now = ulakd::repos::now_ms();
+    assert!(tm.maintain(now).await.unwrap().removed.is_empty());
+    let auto = tm.maintain(now + 2 * 3_600_000).await.unwrap();
+    assert_eq!(auto.removed.len(), 1);
+    assert!(!c2.exists() && c1.exists());
+    let one = tm.clean_repo(s(&c1)).await.unwrap();
+    assert!(one.removed.is_empty() && c1.exists(), "in use: kept");
+    tm.kill_agent(&aid("c1")).await.unwrap();
+    let one = tm.clean_repo(s(&c1)).await.unwrap();
+    assert_eq!(one.removed.len(), 1);
+    assert!(!c1.exists());
     let _ = Command::new("tmux")
         .args(["-L", &sock, "kill-server"])
         .output();

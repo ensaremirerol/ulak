@@ -436,3 +436,50 @@ REMAINING
 ## ulakd hub update source (done)
 - `update.json` `source: hub|github` (unset = hub when hub_url/ca/cert/key exist in the config dir, else github; first-run file does not pin it). `crates/ulakd/src/update/hub.rs`: `HubClient` (ureq, aws-lc-rs, hub CA only root, device client cert, identity re-read per request, no redirects, https-only host root URL). `Updater` branches in `latest()`/`asset()`; verification/install untouched. New `UpdateError::Hub` carries the exact user messages (no cache / unreachable / refused).
 - Tests: `crates/ulakd/tests/updater_hub.rs` (fake mTLS hub: install, check, tampered archive/sig/sums/sums-sig, no cache, 401/403, unreachable, bad identity, bad version, GitHub stand-in never accepts), unit tests in config.rs and hub.rs. `cargo clippy -p ulakd --all-targets` currently trips on ulak-remote releases.rs:145 (`sort_by` -> `sort_by_key`, other agent's file); ulakd itself is clean (`--lib --bins`).
+
+## Profiles, repo index, cleanup (contract)
+ulakd side done (agents.rs, repos.rs, tmux.rs, hub.rs, main.rs; web proto + reducer). Hub relay and UI are NOT done.
+
+Wire (ui <-> hub, exact JSON from `web/test/fixtures/wire.json`):
+- `{"dry_run": true, "node": "vps-fra", "type": "clean_node"}`
+- `{"node": "vps-fra", "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world", "type": "clean_repo"}`
+- `{"node": "vps-fra", "profiles": [{"binary": "claude", "config_dir": "/home/u/.claude-work", "installed": true, "login_blocked": false, "name": "claude-work"}, {"binary": "antigravity", "config_dir": null, "installed": false, "login_blocked": true, "name": "antigravity"}], "type": "node_profiles"}`
+- `{"node": "vps-fra", "repos": [{"ahead": 0, "behind": 2, "branch": "main", "clean": true, "full_name": "octocat/hello-world", "in_use": false, "last_fetch_ms": 1700000007000, "managed": true, "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world"}], "type": "node_repos"}`
+- `{"dry_run": true, "kept": [{"full_name": null, "path": "/home/u/code/other", "reason": "not under the work root"}], "node": "vps-fra", "removed": [{"full_name": "octocat/hello-world", "path": "/home/u/.config/ulakd/work/reviewer-2/hello-world", "reason": "up to date with the remote (last fetch)"}], "type": "clean_report"}`
+- Repo spawn source: `"fresh": true` (omitted when false) always clones anew.
+
+Daemon <-> hub: same payloads without `node`: `{"type":"profiles","profiles":[..]}`, `{"type":"repo_index","repos":[..]}` (max 200, sorted by path), `{"type":"clean_report","dry_run":..,"removed":[..],"kept":[..]}`; hub -> daemon `{"type":"clean_repos","dry_run":..}`, `{"type":"clean_repo","path":".."}`.
+- ulakd sends Profiles and RepoIndex after Hello (after Version/UpdateStatus) and whenever they change (deduped against the last sent), refreshed in the background after spawn, kill, clean, blocker events, agents exiting and every `index_interval_mins`. Default hosts send none of them.
+- Every CleanRepos/CleanRepo is answered with one CleanReport; an automatic cleanup sends one only when it removed something.
+
+`<config>/ulakd.json` (optional; absent = defaults; unknown keys are an error):
+`{"repo_roots": ["~/code"], "index_interval_mins": 10, "clean": {"auto": false, "after_exit_hours": 24}}`
+- `repo_roots`: extra folders scanned (the folder itself, one and two levels deep) for repos whose origin is github.com; indexed with `managed: false`, never cleaned, never reused.
+- Work-root clones `<work>/<agent>/<repo>` are `managed: true`.
+
+`agents.json` profile entries: the key is the name a spawn uses as `profile.binary`. New optional fields: `binary` (what runs, `~` expanded), `args` (before the spawn's args), `config_dir` (`~` expanded; `CLAUDE_CONFIG_DIR` for claude binaries; the spawn's own `config_dir` wins), `env` (the spawn's env wins). `check`, `install`, `login_patterns`, `mcp`, `mcp_args` left out are taken from the entry of `binary`. Blockers stay keyed by the profile name, so two accounts block independently:
+`{"claude-work":{"binary":"claude","config_dir":"~/.claude-work"},"claude-personal":{"binary":"claude","config_dir":"~/.claude-personal"}}`
+
+Reuse (repo spawn without `fresh`): under a repo lock, pick an unused managed clone of the same repo (clean ones first), claim it, fetch the branch (default: origin/HEAD) with the askpass + token, check it out (tracking branch created when only remote), fast-forward only, reset the push guard (`no-push-here` unless `allow_push`). A dirty clone fails the spawn (`agent_failed`, "has uncommitted changes ... spawn with fresh=true"); none unused: fresh clone as before. Clones in use = tmux `ulak-*` session start folders + claims of starting spawns.
+
+Cleanup safety (a clone is deleted only when ALL hold; anything unknown keeps it):
+- path is exactly `<work>/<agent>/<repo>` and canonical (no symlink anywhere; re-checked right before deletion); `CleanRepo.path` must equal a path from a fresh scan (string compare);
+- no agent uses it (if tmux cannot be listed nothing is deleted);
+- no modified, staged or untracked files; no stash; a remote exists; no local branch commit and no detached-HEAD commit missing from the remote-tracking refs (as of the last fetch; the reason says so);
+- automatic (`clean.auto`): additionally idle (no agent) for `after_exit_hours`, measured from the first scan that saw it unused (`<work>/<agent>/.ulak-idle`).
+- dry run judges everything and deletes nothing. The emptied `<work>/<agent>` folder is removed too.
+
+Remaining for the hub+web agent: relay Profiles/RepoIndex/CleanReport as NodeProfiles/NodeRepos/CleanReport (and replay the latest per node on UI connect; drop on node offline), route CleanNode/CleanRepo to the node (now answered with an Error in ws.rs), repo-aware scheduling (prefer a node that has an unused clone), UI: profile picker from NodeProfiles, repos list, clean buttons (dry run first), fresh toggle on repo spawn.
+Known limits (ulakd side): reuse runs git with `core.hooksPath=/dev/null` and the token env only for `ls-remote`/`fetch`, but a hostile local `.git/config` of a reused clone (`url.*.insteadOf`, `http.proxy`) could still redirect that fetch (use `fresh: true` if agents are untrusted); a node without repo spawns answers clean requests with no CleanReport (log line only); `repo_roots` checkouts are indexed but never reused or cleaned; the msvc build of these changes is unverified (cross toolchain missing here); the web reducer keeps per-node profiles/repos/clean entries after a node goes offline.
+
+## Profiles, repos, cleanup: hub and UI
+Hub (ulak-remote):
+- `Profiles`/`RepoIndex` are stored per connected node (`NodeMeta.profiles/repos`, keyed by the daemon connection, never a payload id) and relayed as `NodeProfiles`/`NodeRepos`; `CleanReport` is relayed as `CleanReport{node}`. Replayed per node on UI connect after the queue frame (only non-empty). Cleared when the daemon connection ends (empty frames broadcast only if something was stored). Oversize reports (profiles > 64, repos > 200, clean items > 400, any path/name/branch/reason > 1024 bytes) are dropped whole with a `daemon <id>: ...` log line.
+- `CleanNode` -> `CleanRepos{dry_run}`, `CleanRepo` -> `CleanRepo{path}` to that node only; unknown/offline node -> Error; the path must equal a `managed: true` entry of that node's index (else Error).
+- Placement: when the spawn's `profile.binary` is a name some connected node reports as a profile, a node that reports a non-empty profile list is eligible only if it has that name (installed or not). Other binaries (paths, bare custom names like `sh` in the ulakd e2e test) and nodes reporting no profiles (older daemons) are placed as before. Missing profile -> queued (Auto and pinned); login blocker check unchanged (hub blocker store keyed by node + profile key).
+- `pick_node_ranked` + `repo_rank` (scheduler.rs, unit-tested): Auto repo spawns prefer an unused clean managed clone (0), then any clone (1), then the rest; ties by lowest CPU as before. Explicit targets unchanged. Fresh spawns are ranked the same.
+Web:
+- Spawn dialog: profile picker = union of `nodeProfiles` names + `custom` (legacy claude/antigravity/custom when no node reports profiles); note lists the nodes offering it (config dir, not installed, login required); last used profile in localStorage (`ulak.spawn.profile`, try/catch). Targets lacking the profile are marked `- no <profile>` and do not count as free. CLAUDE_CONFIG_DIR only for Folder, under 'Advanced'. 'Fresh clone' switch (off; frame carries `fresh: true` only when on). Hint 'Already on <host> (clean|has changes|in use|not managed)' via `repoHint`, same rank as the hub. Agent id is marked required (label `*`, aria-required, 'Agent id is required.' after a submit attempt).
+- Nodes: per node card with profiles (name, config dir, installed, login required), collapsible 'Repositories (n)' (name, branch, clean/dirty, ahead/behind, last fetch, in use, managed/external, two-click Remove for unused managed clones), 'Preview cleanup' and two-click 'Clean up', last report inline (Would remove / Removed / Kept with reasons).
+- Agents: a failed agent the node never listed (agent_failed, or a Failed status later dropped by a node_update) stays listed until its status changes.
+Known limits: the hub keeps the last report until the connection ends (a heartbeat-expired but still connected node keeps it); a profile name no connected node reports is treated as a custom binary (placed anywhere, the daemon decides); the hub does not check `installed` (the daemon installs).
