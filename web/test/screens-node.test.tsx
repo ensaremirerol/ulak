@@ -32,6 +32,16 @@ describe('NodeDetail', () => {
     expect(store.state.value.stats).toBeNull();
   });
 
+  it('switching nodes keeps the new node watched even if the old cleanup runs late', () => {
+    feed({ type: 'node_update', ...node('n2', 'beta') });
+    const { rerender } = render(<NodeDetail key="n1" id="n1" />);
+    act(() => rerender(<NodeDetail key="n2" id="n2" />));
+    expect(store.state.value.stats?.node).toBe('n2');
+    act(() => { store.intent({ kind: 'unwatch_node', node: 'n1' }); });
+    act(() => feed({ type: 'node_stats', node: 'n2', connected_ms: null, samples: [tel(1, 1)] }));
+    expect(store.state.value.stats).toEqual({ node: 'n2', connectedMs: null, samples: [tel(1, 1)] });
+  });
+
   it('line path breaks where a value is missing', () => {
     expect(linePath([tel(0, 0, 0), tel(1, 0, null), tel(2, 0, 100)], (t) => t.gpu_pct)).toBe('M0.0 120.0M600.0 0.0');
   });

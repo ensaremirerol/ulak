@@ -388,7 +388,7 @@ describe('node profiles, repos and clean reports', () => {
 
 describe('hub config, node stats (0.1.7)', () => {
   const t = (at_ms: number, cpu_pct = 1) => ({ ...tel, at_ms, cpu_pct });
-  const watch = (s: State, n: string | null) => dispatch(s, { kind: 'watch_node', node: n });
+  const watch = (s: State, n: string) => dispatch(s, { kind: 'watch_node', node: n });
 
   it('hub_config replaces profiles and settings', () => {
     const p = { node: null, profile: { name: 'a', binary: 'claude' } };
@@ -411,7 +411,8 @@ describe('hub config, node stats (0.1.7)', () => {
     expect(s.stats!.connectedMs).toBe(5);
     expect(s.stats!.samples).toHaveLength(STATS_CAP);
     expect(s.stats!.samples[0]!.at_ms).toBe(6);
-    expect(watch(s, null)).toEqual({ frames: [], state: { ...s, stats: null } });
+    expect(dispatch(s, { kind: 'unwatch_node', node: 'n2' }).state).toBe(s);
+    expect(dispatch(s, { kind: 'unwatch_node', node: 'n1' })).toEqual({ frames: [], state: { ...s, stats: null } });
   });
 
   it('node_update appends new telemetry of the watched node only, capped at 720', () => {

@@ -215,7 +215,9 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       check(settingsErrors(i.form));
       return [{ type: 'save_node_settings', node: i.node, settings: settingsFromForm(i.form) }];
     case 'watch_node':
-      return i.node === null ? [] : [{ type: 'node_stats', node: i.node }];
+      return [{ type: 'node_stats', node: i.node }];
+    case 'unwatch_node':
+      return [];
     case 'clean_node':
       return [{ type: 'clean_node', node: i.node, dry_run: i.dryRun }];
     case 'clean_repo':
@@ -239,8 +241,9 @@ export function applyIntentLocally(s: State, i: Intent): State {
     case 'add_device':
       return { ...s, otp: null };
     case 'watch_node':
-      if (i.node === null) return { ...s, stats: null };
       return s.stats?.node === i.node ? s : { ...s, stats: { node: i.node, connectedMs: null, samples: [] } };
+    case 'unwatch_node':
+      return s.stats?.node === i.node ? { ...s, stats: null } : s;
     default:
       return s;
   }

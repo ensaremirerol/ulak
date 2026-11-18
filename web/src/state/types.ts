@@ -137,7 +137,8 @@ export type Intent =
   | { kind: 'save_profile'; node: NodeId | null; form: ProfileForm; keepEnv?: Record<string, string> }
   | { kind: 'delete_profile'; node: NodeId | null; name: string }
   | { kind: 'save_node_settings'; node: NodeId; form: SettingsForm }
-  /** The node screen opened (asks for its history) or closed (`node` null: stop collecting). */
-  | { kind: 'watch_node'; node: NodeId | null }
+  /** The node screen opened (asks for its history) / closed (stops collecting, unless another node took over). */
+  | { kind: 'watch_node'; node: NodeId }
+  | { kind: 'unwatch_node'; node: NodeId }
   | { kind: 'clean_node'; node: NodeId; dryRun: boolean }
   | { kind: 'clean_repo'; node: NodeId; path: string };

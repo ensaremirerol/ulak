@@ -169,7 +169,7 @@ export function NodeDetail({ id }: { id: string }) {
   // Ask for the history on open and whenever the node comes back; stop collecting on leave.
   useEffect(() => {
     store.intent({ kind: 'watch_node', node: id });
-    return () => { store.intent({ kind: 'watch_node', node: null }); };
+    return () => { store.intent({ kind: 'unwatch_node', node: id }); };
   }, [id, off]);
   const back = <a href={href('nodes')}>All nodes</a>;
   if (!n) return <EmptyState title="Unknown node" action={back}>No node with id {id} has reported to the hub.</EmptyState>;

@@ -82,7 +82,7 @@ export function createStore(init: State = initialState()): Store {
         return false;
       }
       state.value = applyIntentLocally(state.value, i);
-      return frames.length > 0 || i.kind === 'detach' || i.kind === 'select' || i.kind === 'watch_node';
+      return frames.length > 0 || i.kind === 'detach' || i.kind === 'select' || i.kind === 'unwatch_node';
     },
   };
   return store;
