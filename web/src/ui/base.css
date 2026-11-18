@@ -29,7 +29,7 @@ h1, h2, h3, p { margin: 0; }
 .banner { padding: 10px 16px; border-radius: var(--radius-sm); background: var(--warn-bg); color: var(--warn); }
 .page-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .page-head h1 { font-size: 24px; font-weight: 600; }
-.grid { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.grid { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
@@ -164,4 +164,14 @@ p.err { margin: 0; color: var(--bad); overflow-wrap: anywhere; }
   .dialog { max-height: 100%; }
 }
 .repo-list { max-height: 240px; overflow-y: auto; }
+/* node screen chart: SVG geometry in attributes, colours here (CSP: no inline styles) */
+.chart { display: block; width: 100%; height: 140px; background: var(--surface-2); border-radius: var(--radius-sm); }
+.chart-grid { stroke: var(--border); stroke-width: 1; }
+.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.chart-line.cpu, .swatch.cpu { stroke: var(--info); background: var(--info); }
+.chart-line.gpu, .swatch.gpu { stroke: var(--warn); background: var(--warn); }
+.chart-line.mem, .swatch.mem { stroke: var(--accent); background: var(--accent); }
+.chart-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.chart-legend li { display: flex; align-items: center; gap: 6px; }
+.swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; }
 .repo-list .agent-row { width: 100%; }

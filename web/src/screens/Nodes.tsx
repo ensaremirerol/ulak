@@ -1,9 +1,10 @@
-import type { CleanItem, NodeInfo, RepoEntry, UpdateState } from '../proto';
+import type { NodeInfo, UpdateState } from '../proto';
 import { availableVersion, nodeFlag, store, updatesAvailable } from '../state';
 import { BlockerCard } from '../ui/BlockerCard';
 import { Button, EmptyState, Pill, type Tone } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { ageLabel, clock, nodeStateLabel, nodeStateTone } from '../ui/format';
+import { clock, nodeStateLabel, nodeStateTone } from '../ui/format';
+import { nodeHref } from '../ui/router';
 
 const BUSY: Record<string, string> = { checking: 'Checking...', downloading: 'Downloading...', verifying: 'Verifying...', installing: 'Installing...', restarting: 'Restarting...' };
 
@@ -17,6 +18,8 @@ export function updateView(u: UpdateState | undefined): { tone: Tone; label: str
   }
 }
 
+const plural = (k: number, what: string) => `${k} ${what}${k === 1 ? '' : 's'}`;
+
 function Row({ n }: { n: NodeInfo }) {
   const s = store.state.value;
   const v = s.nodeVersions[n.id];
@@ -27,7 +30,11 @@ function Row({ n }: { n: NodeInfo }) {
   const working = u !== undefined && u.state in BUSY;
   return (
     <tr>
-      <td><div class="strong">{n.hostname}</div><div class="muted small">{v ? `${v.os} ${v.arch}` : 'unknown platform'}</div></td>
+      <td>
+        <a class="strong" href={nodeHref(n.id)}>{n.hostname}</a>
+        <div class="muted small">{v ? `${v.os} ${v.arch}` : 'unknown platform'}</div>
+        <div class="muted small">{plural(n.agents.length, 'agent')}, {plural(s.nodeRepos[n.id]?.length ?? 0, 'repo')}</div>
+      </td>
       <td><Pill tone={nodeStateTone(n.state)}>{nodeStateLabel(n.state)}</Pill></td>
       <td class="mono">{v ? `${v.version} (${v.git.slice(0, 7)})` : 'unknown'}{flag && <> <Pill tone="warn">{flag}</Pill></>}</td>
       <td><span class={`upd ${upd.tone}`}>{upd.label}</span></td>
@@ -36,73 +43,6 @@ function Row({ n }: { n: NodeInfo }) {
         {availableVersion(u) && <ConfirmButton variant="primary" label="Update" confirmLabel="Restarts the node: confirm" disabled={off} onConfirm={() => store.intent({ kind: 'update_node', node: n.id })} />}
       </td>
     </tr>
-  );
-}
-
-const syncLabel = (r: RepoEntry): string =>
-  r.ahead === null || r.behind === null ? 'no upstream' : r.ahead === 0 && r.behind === 0 ? 'in sync' : `${r.ahead} ahead, ${r.behind} behind`;
-
-function Items({ title, items }: { title: string; items: CleanItem[] }) {
-  return (
-    <div class="stack tight">
-      <strong class="small">{title} ({items.length})</strong>
-      {items.length > 0 && <ul class="repo-list small">{items.map((i) => <li key={i.path}><span class="mono">{i.full_name ?? i.path}</span><span class="muted">{i.reason}</span></li>)}</ul>}
-    </div>
-  );
-}
-
-/** A node's profiles, its repo index, cleanup buttons and the last clean report. */
-function NodeRepos({ n }: { n: NodeInfo }) {
-  const s = store.state.value;
-  const profiles = s.nodeProfiles[n.id] ?? [];
-  const repos = s.nodeRepos[n.id] ?? [];
-  const report = s.lastClean[n.id];
-  const off = n.state === 'Offline';
-  return (
-    <section class="card stack" aria-label={`Repositories on ${n.hostname}`}>
-      <div class="card-title"><strong>{n.hostname}</strong></div>
-      {profiles.length > 0 && (
-        <ul class="repo-list small" aria-label={`Profiles on ${n.hostname}`}>
-          {profiles.map((p) => (
-            <li key={p.name}>
-              <span class="strong">{p.name}</span>
-              <span class="muted mono">{p.config_dir ?? 'default config'}</span>
-              <Pill tone={p.installed ? 'ok' : 'muted'}>{p.installed ? 'Installed' : 'Not installed'}</Pill>
-              {p.login_blocked && <Pill tone="warn">Login required</Pill>}
-            </li>
-          ))}
-        </ul>
-      )}
-      <details>
-        <summary>Repositories ({repos.length})</summary>
-        {repos.length === 0 ? <p class="muted small">No repositories indexed on this node.</p> : (
-          <ul class="repo-list small" aria-label={`Repositories of ${n.hostname}`}>
-            {repos.map((r) => (
-              <li key={r.path}>
-                <span class="strong">{r.full_name}</span>
-                <span class="mono">{r.branch ?? 'detached'}</span>
-                <Pill tone={r.clean ? 'ok' : 'warn'}>{r.clean ? 'Clean' : 'Dirty'}</Pill>
-                <span class="muted">{syncLabel(r)}</span>
-                <span class="muted">{r.last_fetch_ms === null ? 'never fetched' : `fetched ${ageLabel(Math.max(0, s.now - r.last_fetch_ms))}`}</span>
-                {r.in_use && <Pill tone="info">In use</Pill>}
-                <span class="muted">{r.managed ? 'managed' : 'external'}</span>
-                {r.managed && !r.in_use && <ConfirmButton label="Remove" confirmLabel="Click again to remove" disabled={off} onConfirm={() => store.intent({ kind: 'clean_repo', node: n.id, path: r.path })} />}
-              </li>
-            ))}
-          </ul>
-        )}
-      </details>
-      <div class="row">
-        <Button size="sm" variant="ghost" disabled={off} onClick={() => store.intent({ kind: 'clean_node', node: n.id, dryRun: true })}>Preview cleanup</Button>
-        <ConfirmButton label="Clean up" confirmLabel="Deletes unused clones: confirm" disabled={off} onConfirm={() => store.intent({ kind: 'clean_node', node: n.id, dryRun: false })} />
-      </div>
-      {report && (
-        <div class="stack tight" role="status" aria-label={`Cleanup report for ${n.hostname}`}>
-          <Items title={report.dryRun ? 'Would remove' : 'Removed'} items={report.removed} />
-          <Items title="Kept" items={report.kept} />
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -136,7 +76,6 @@ export function Nodes() {
           </table>
         </section>
       )}
-      {s.nodes.length > 0 && <div class="stack">{s.nodes.map((n) => <NodeRepos key={n.id} n={n} />)}</div>}
     </>
   );
 }

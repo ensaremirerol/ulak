@@ -1,6 +1,6 @@
 import { b64ToBytes, bytesToB64 } from './bytes';
 import type {
-  AgentStatus, Blocker, CleanItem, CredentialInfo, DeviceInfo, HubToUi, HubToUiType, Message, NodeInfo, NodeState,
+  AgentStatus, Blocker, CleanItem, CredentialInfo, DeviceInfo, HubProfile, HubToUi, NodeSettings, HubToUiType, Message, NodeInfo, NodeState,
   OtpOffer, ProfileInfo, RepoEntry, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
   VersionInfo,
 } from './types';
@@ -183,6 +183,37 @@ function profileInfo(v: unknown): ProfileInfo {
     config_dir: optStr(o.config_dir, 'config_dir'),
     installed: bool(o.installed, 'installed'),
     login_blocked: bool(o.login_blocked, 'login_blocked'),
+    ...(o.from_hub === undefined ? {} : bool(o.from_hub, 'from_hub') ? { from_hub: true } : {}),
+  };
+}
+
+/** `key` only when present (serde skips empty/None fields; round-trips must not add them). */
+const some = <K extends string, T>(o: Obj, key: K, f: (x: unknown) => T): { [P in K]?: T } =>
+  (o[key] === undefined || o[key] === null ? {} : { [key]: f(o[key]) }) as { [P in K]?: T };
+
+export function hubProfile(v: unknown): HubProfile {
+  const o = obj(v, 'hub profile');
+  return {
+    name: str(o.name, 'name'),
+    binary: str(o.binary, 'binary'),
+    ...some(o, 'args', (x) => arr(x, 'args', (y) => str(y, 'arg'))),
+    ...some(o, 'config_dir', (x) => str(x, 'config_dir')),
+    ...some(o, 'env', (x) => Object.fromEntries(Object.entries(obj(x, 'env')).map(([k, y]) => [k, str(y, 'env value')]))),
+  };
+}
+
+export function nodeSettings(v: unknown): NodeSettings {
+  const o = obj(v, 'node settings');
+  const b = (x: unknown) => bool(x, 'setting');
+  const n = (x: unknown) => num(x, 'setting');
+  return {
+    ...some(o, 'repo_roots', (x) => arr(x, 'repo_roots', (y) => str(y, 'repo root'))),
+    ...some(o, 'index_interval_mins', n),
+    ...some(o, 'clean_auto', b),
+    ...some(o, 'clean_after_exit_hours', n),
+    ...some(o, 'auto_update', b),
+    ...some(o, 'cpu_busy_pct', n),
+    ...some(o, 'gpu_busy_pct', n),
   };
 }
 
@@ -275,6 +306,23 @@ const hubDecoders = {
   queue_removed: (o) => ({ type: 'queue_removed', id: s(o.id, 'id') }),
   node_profiles: (o) => ({ type: 'node_profiles', node: s(o.node, 'node'), profiles: arr(o.profiles, 'profiles', profileInfo) }),
   node_repos: (o) => ({ type: 'node_repos', node: s(o.node, 'node'), repos: arr(o.repos, 'repos', repoEntry) }),
+  hub_config: (o) => ({
+    type: 'hub_config',
+    profiles: arr(o.profiles, 'profiles', (x) => {
+      const p = obj(x, 'scoped profile');
+      return { node: optStr(p.node, 'node'), profile: hubProfile(p.profile) };
+    }),
+    settings: arr(o.settings, 'settings', (x) => {
+      const e = obj(x, 'settings entry');
+      return { node: str(e.node, 'node'), settings: nodeSettings(e.settings) };
+    }),
+  }),
+  node_stats: (o) => ({
+    type: 'node_stats',
+    node: s(o.node, 'node'),
+    connected_ms: optNum(o.connected_ms, 'connected_ms'),
+    samples: arr(o.samples, 'samples', telemetry),
+  }),
   clean_report: (o) => ({
     type: 'clean_report',
     node: s(o.node, 'node'),
@@ -374,6 +422,10 @@ const uiDecoders = {
   list_branches: (o) => ({ type: 'list_branches', credential: s(o.credential, 'credential'), repo: s(o.repo, 'repo') }),
   cancel_queued: (o) => ({ type: 'cancel_queued', id: s(o.id, 'id') }),
   list_queue: () => ({ type: 'list_queue' }),
+  save_profile: (o) => ({ type: 'save_profile', node: optStr(o.node, 'node'), profile: hubProfile(o.profile) }),
+  delete_profile: (o) => ({ type: 'delete_profile', node: optStr(o.node, 'node'), name: s(o.name, 'name') }),
+  save_node_settings: (o) => ({ type: 'save_node_settings', node: s(o.node, 'node'), settings: nodeSettings(o.settings) }),
+  node_stats: (o) => ({ type: 'node_stats', node: s(o.node, 'node') }),
   clean_node: (o) => ({ type: 'clean_node', node: s(o.node, 'node'), dry_run: bool(o.dry_run, 'dry_run') }),
   clean_repo: (o) => ({ type: 'clean_repo', node: s(o.node, 'node'), path: s(o.path, 'path') }),
 } satisfies { [K in UiToHubType]: Decoder<Extract<UiToHub, { type: K }>> };

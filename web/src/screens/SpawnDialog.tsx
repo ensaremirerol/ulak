@@ -183,7 +183,7 @@ export function SpawnDialog({ onClose }: { onClose(): void }) {
         <Segmented<string> label="Profile" value={profile} options={options.map((o) => ({ value: o, label: o }))} onChange={setProfile} />
         {offering.length > 0 && (
           <span class="hint">
-            On {offering.map(({ node, info }) => [node.hostname, info.config_dir && `config ${info.config_dir}`, !info.installed && 'not installed, installs on first spawn', info.login_blocked && 'login required'].filter(Boolean).join(': ')).join('; ')}
+            On {offering.map(({ node, info }) => [node.hostname, info.from_hub && 'from hub', info.config_dir && `config ${info.config_dir}`, !info.installed && 'not installed, installs on first spawn', info.login_blocked && 'login required'].filter(Boolean).join(': ')).join('; ')}
           </span>
         )}
       </div>

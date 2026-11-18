@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/preact'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CleanItem, ProfileInfo, RepoEntry, UiToHub } from '../src/proto';
 import { Agents } from '../src/screens/Agents';
-import { Nodes } from '../src/screens/Nodes';
+import { NodeDetail } from '../src/screens/NodeDetail';
 import { SpawnDialog } from '../src/screens/SpawnDialog';
 import { repoHint, repoRank, store } from '../src/state';
 import { CONFIRM_MS } from '../src/ui/ConfirmButton';
@@ -144,12 +144,12 @@ describe('SpawnDialog: profiles and fresh', () => {
   });
 });
 
-describe('Nodes: profiles, repositories, cleanup', () => {
+describe('Node screen: profiles, repositories, cleanup', () => {
   const removed: CleanItem[] = [{ path: '/w/a/hello-world', full_name: 'octocat/hello-world', reason: 'up to date with the remote (last fetch)' }];
   const kept: CleanItem[] = [{ path: '/home/u/code/other', full_name: null, reason: 'not under the work root' }];
 
   it('empty states', () => {
-    render(<Nodes />);
+    render(<NodeDetail id="n1" />);
     const sec = within(screen.getByRole('region', { name: 'Repositories on alpha' }));
     expect(sec.getByText('Repositories (0)')).toBeTruthy();
     expect(sec.getByText('No repositories indexed on this node.')).toBeTruthy();
@@ -161,7 +161,7 @@ describe('Nodes: profiles, repositories, cleanup', () => {
       { type: 'node_profiles', node: 'n1', profiles: [prof('claude-work', { config_dir: '/h/.cw' }), prof('antigravity', { installed: false, login_blocked: true })] },
       { type: 'node_repos', node: 'n1', repos: [entry('octocat/hello-world'), entry('octocat/dirty', { clean: false, ahead: 1, behind: 2, in_use: true, last_fetch_ms: null }), entry('me/ext', { managed: false, ahead: null, behind: null, branch: null })] },
     );
-    render(<Nodes />);
+    render(<NodeDetail id="n1" />);
     const profiles = within(screen.getByRole('list', { name: 'Profiles on alpha' })).getAllByRole('listitem').map((li) => li.textContent);
     expect(profiles).toEqual(['claude-work/h/.cwInstalled', 'antigravitydefault configNot installedLogin required']);
     const rows = within(screen.getByRole('list', { name: 'Repositories of alpha' })).getAllByRole('listitem');
@@ -174,7 +174,9 @@ describe('Nodes: profiles, repositories, cleanup', () => {
 
   it('preview, two-click clean up and per-repo remove send the exact frames; the report renders', () => {
     feed({ type: 'node_repos', node: 'n1', repos: [entry('octocat/hello-world')] });
-    render(<Nodes />);
+    render(<NodeDetail id="n1" />);
+    expect(sent).toEqual([{ type: 'node_stats', node: 'n1' }]);
+    sent.length = 0;
     const sec = within(screen.getByRole('region', { name: 'Repositories on alpha' }));
     fireEvent.click(sec.getByRole('button', { name: 'Preview cleanup' }));
     expect(sent).toEqual([{ type: 'clean_node', node: 'n1', dry_run: true }]);

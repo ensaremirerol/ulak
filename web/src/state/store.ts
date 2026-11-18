@@ -52,6 +52,7 @@ export function createStore(init: State = initialState()): Store {
     resync: () => [
       { type: 'list_credentials' },
       { type: 'list_queue' },
+      ...(state.value.stats ? [{ type: 'node_stats', node: state.value.stats.node } as const] : []),
       ...(state.value.selected ? [{ type: 'attach', agent: state.value.selected } as const] : []),
     ],
     onPane(agent, fn) {
@@ -81,7 +82,7 @@ export function createStore(init: State = initialState()): Store {
         return false;
       }
       state.value = applyIntentLocally(state.value, i);
-      return frames.length > 0 || i.kind === 'detach' || i.kind === 'select';
+      return frames.length > 0 || i.kind === 'detach' || i.kind === 'select' || i.kind === 'unwatch_node';
     },
   };
   return store;
