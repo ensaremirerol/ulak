@@ -79,7 +79,11 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Transport for WsTr
             match self.0.next().await {
                 None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
                 Some(Err(e)) => return Err(e.into()),
-                Some(Ok(WsMessage::Text(t))) => return Ok(Some(decode(t.as_str())?)),
+                // A newer hub may send frames this build does not know: skip, never reconnect-loop.
+                Some(Ok(WsMessage::Text(t))) => match decode(t.as_str()) {
+                    Ok(f) => return Ok(Some(f)),
+                    Err(e) => eprintln!("ulak: skipped a hub frame: {e}"),
+                },
                 Some(Ok(_)) => {} // ping/pong handled by tungstenite; binary ignored
             }
         }
