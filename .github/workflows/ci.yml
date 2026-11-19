@@ -1,5 +1,5 @@
-# Push to main: Linux tests + web, on `vars.LINUX_RUNNER` (see release.yml). The Windows/macOS
-# checks (2x/10x billed minutes) run only by hand.
+# Push to main: Linux tests, web, and the Windows/macOS app portability check. Linux jobs run on
+# `vars.LINUX_RUNNER` if set (see release.yml), else GitHub-hosted.
 name: ci
 on:
   push:
@@ -57,7 +57,6 @@ jobs:
         run: chown -R "$(stat -c %u:%g "$RUNNER_TEMP")" "$GITHUB_WORKSPACE" || true
   # Portability guard for the native UI: compile + lib tests only (no GPU snapshot/e2e tests).
   ui-portability:
-    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
