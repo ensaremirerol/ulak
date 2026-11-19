@@ -7,6 +7,10 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# Container jobs would otherwise run steps with sh (dash): no pipefail, no printf \x.
+defaults:
+  run:
+    shell: bash
 env:
   CARGO_TERM_COLOR: always
   # A full debug test build with debug info is ~14 GB; without it a few GB (self-hosted disk).
