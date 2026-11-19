@@ -25,6 +25,16 @@ ulak join https://hub.example.org:8443               # on your machine, with tha
 
 More machines: Devices > Add device, or `admin otp node`. Lost all UI devices: run `admin otp ui` again. Also `admin devices|revoke|passkeys|revoke-passkey|status`. The command talks to `$ULAK_DIR/admin.sock` (0600, local only). Compose example and details: [hub README](crates/ulak-remote/README.md#first-time-setup).
 
+## Add a node in one command
+
+On the node (Linux x86_64 or arm64, glibc 2.34+, tmux; Windows: inside WSL with systemd on), as the user the agents should run as:
+
+```sh
+curl -fsSL https://github.com/ensaremirerol/ulak/releases/latest/download/install-ulakd.sh | sh -s -- https://hub.example.org
+```
+
+It downloads the latest `ulakd`, checks its ed25519 signature and checksum, installs it to `~/.local/share/ulak/bin`, joins the hub (asks for the one-time code and the hub fingerprint; or pass `ULAKD_OTP=... ULAKD_FINGERPRINT=...` before `sh`) and runs it as the systemd user service `ulakd`. No sudo; `sudo loginctl enable-linger $USER` keeps it running after logout. Re-running it upgrades the binary. The web UI's Devices > Add device shows this command (and a Docker one) with the code filled in.
+
 ## Quick start
 
 Needs Rust (stable), tmux on the node machines. The browser UI also needs Node.js 22 + npm.

@@ -70,6 +70,8 @@ jobs:
             tar -C "target/$TARGET/release" -czf "dist/$bin-$TARGET.tar.gz" "$bin"
           done
           tar -C target/aarch64-unknown-linux-gnu/release -czf dist/ulakd-aarch64-unknown-linux-gnu.tar.gz ulakd
+          # One-command node install: releases/latest/download/install-ulakd.sh (signed with the archives).
+          cp scripts/install-ulakd.sh dist/
           # Fail the release if a binary needs a newer glibc than the build host promises (readelf reads any arch).
           for b in target/*/release/ulakd target/$TARGET/release/ulak-remote target/$TARGET/release/ulak; do
             need=$(readelf -W --dyn-syms "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
@@ -150,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum -- *.tar.gz > SHA256SUMS
+          sha256sum -- *.tar.gz *.sh > SHA256SUMS
           cat SHA256SUMS
       - name: Sign (ed25519, detached raw signatures)
         env:
@@ -176,7 +178,10 @@ jobs:
             [ "$DRY_RUN" = true ] || exit 1
           fi
           cd dist
-          for f in ./*.tar.gz SHA256SUMS; do
+          # The installer must embed the same public key the daemons do.
+          der_b64=$( { printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; head -n1 ../crates/ulakd/release-key.pub | xxd -r -p; } | base64 -w0)
+          grep -qF "$der_b64" install-ulakd.sh || { echo "install-ulakd.sh embeds a different release key" >&2; exit 1; }
+          for f in ./*.tar.gz ./*.sh SHA256SUMS; do
             openssl pkeyutl -sign -rawin -inkey "$key" -in "$f" -out "$f.sig"
             openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/pub.pem" -in "$f" -sigfile "$f.sig"
           done
