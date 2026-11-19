@@ -102,6 +102,7 @@ details[open] > summary { margin-bottom: 8px; }
 .grow { flex: 1 1 auto; min-width: 0; }
 .nowrap { flex-wrap: nowrap; white-space: nowrap; }
 .wrap { word-break: break-all; }
+.cmd { margin: 0; padding: 8px; white-space: pre-wrap; word-break: break-all; user-select: text; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .full { flex-basis: 100%; }
 .stack.tight { gap: 8px; }

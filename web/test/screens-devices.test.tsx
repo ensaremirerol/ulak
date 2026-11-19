@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UiToHub } from '../src/proto';
-import { countdown, Devices, kindOf } from '../src/screens/Devices';
+import { countdown, Devices, hubOrigin, installCommands, kindOf, shq } from '../src/screens/Devices';
 import { store } from '../src/state';
 import { feed, freshStore, ofType } from './helpers';
 
@@ -111,5 +111,66 @@ describe('Devices', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy code' })); });
     expect(store.state.value.toasts.at(-1)?.text).toContain('the code is selected');
     expect(getSelection()?.toString()).toBe('ABC-123');
+  });
+
+  it('node offers show install blocks with values substituted; browser offers none', () => {
+    feed({ type: 'hub_version', version: '0.1.7', git: 'g', proto: 1, os: 'linux', arch: 'x86_64' });
+    offer();
+    const { unmount } = render(<Devices />);
+    const input = screen.getByLabelText('Hub address for nodes') as HTMLInputElement;
+    expect(input.value).toBe(`https://${location.host}`);
+    const hub = 'https://hub.example.org';
+    fireEvent.input(input, { target: { value: hub } });
+    const pres = () => [...document.querySelectorAll('pre')].map((p) => p.textContent ?? '');
+    const [linux, docker] = pres();
+    expect(linux).toBe(`curl -fsSL https://github.com/ensaremirerol/ulak/releases/latest/download/install-ulakd.sh | ULAKD_OTP='ABC-123' ULAKD_FINGERPRINT='SHA256:deadbeef' sh -s -- '${hub}'`);
+    expect(docker).toContain("-e ULAKD_OTP='ABC-123' -e ULAKD_FINGERPRINT='SHA256:deadbeef'");
+    expect(docker).toContain(`ghcr.io/ensaremirerol/ulakd:0.1.7 -c '[ -f /data/cert.pem ] || ulakd join ${hub}; exec ulakd run'`);
+    unmount();
+    offer('browser');
+    render(<Devices />);
+    expect(pres()).toEqual([]);
+    expect(screen.queryByLabelText('Hub address for nodes')).toBeNull();
+  });
+
+  it('hub address edits update the commands; invalid ones hide the blocks', () => {
+    offer();
+    render(<Devices />);
+    const input = screen.getByLabelText('Hub address for nodes');
+    fireEvent.input(input, { target: { value: 'https://hub:8443' } });
+    expect(document.querySelector('pre')?.textContent).toContain("sh -s -- 'https://hub:8443'");
+    expect(document.querySelectorAll('pre')[1]?.textContent).toContain('ulakd:latest');
+    for (const bad of ['http://hub:8443', 'https://hub/x', 'https://hub?a=1', 'nope']) {
+      fireEvent.input(input, { target: { value: bad } });
+      expect(screen.getByRole('alert').textContent).toContain('https://');
+      expect(document.querySelector('pre')).toBeNull();
+    }
+  });
+
+  it('quotes values for a POSIX shell', () => {
+    expect(shq("a'b")).toBe(String.raw`'a'\''b'`);
+    expect(hubOrigin('https://hub/')).toBe('https://hub');
+    expect(hubOrigin('https://u:p@hub')).toBeNull();
+    const c = installCommands("X'Y", 'F', "https://h'", 'v1.2');
+    expect(c.linux).toContain(String.raw`ULAKD_OTP='X'\''Y'`);
+    expect(c.docker.endsWith(`ulakd:1.2 -c ${shq(`[ -f /data/cert.pem ] || ulakd join ${shq("https://h'")}; exec ulakd run`)}`)).toBe(true);
+    expect(shq("''")).toBe(String.raw`''\'''\'''`);
+  });
+
+  it('copy shows Copied, or a fallback without a clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    offer();
+    const { unmount } = render(<Devices />);
+    fireEvent.input(screen.getByLabelText('Hub address for nodes'), { target: { value: 'https://hub' } });
+    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: 'Copy' }).at(-2)!); });
+    expect(writeText.mock.calls[0]?.[0]).toMatch(/^curl /);
+    expect(screen.getByText('Copied')).toBeTruthy();
+    unmount();
+    vi.stubGlobal('navigator', {});
+    render(<Devices />);
+    fireEvent.input(screen.getByLabelText('Hub address for nodes'), { target: { value: 'https://hub' } });
+    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: 'Copy' }).at(-1)!); });
+    expect(screen.getByText('Select the text and copy it')).toBeTruthy();
   });
 });
