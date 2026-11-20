@@ -98,8 +98,13 @@ async fn update_cli(dir: &Path, apply: bool) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before the runtime's threads exist: it changes the process environment.
+    ulakd::agents::add_user_bin_to_path();
+    tokio::runtime::Runtime::new()?.block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = default_dir();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {

@@ -17,7 +17,7 @@ use futures_util::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex,
     time::Duration,
@@ -359,6 +359,26 @@ pub fn tail_detail(out: &str) -> String {
     joined.chars().skip(n.saturating_sub(DETAIL_MAX)).collect()
 }
 
+/// Appends `~/.local/bin` to PATH when missing: per-user installs (npm with the prefix above,
+/// claude's own installer) land there, and systemd/Docker PATHs often lack it. Call before any
+/// thread starts (it sets the process environment).
+pub fn add_user_bin_to_path() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let bin = PathBuf::from(home).join(".local/bin");
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if dirs.contains(&bin) {
+        return;
+    }
+    dirs.push(bin);
+    if let Ok(p) = std::env::join_paths(dirs) {
+        std::env::set_var("PATH", p);
+    }
+}
+
 fn in_path(bin: &str) -> bool {
     #[cfg(unix)]
     fn exec(m: &std::fs::Metadata) -> bool {
@@ -412,6 +432,15 @@ async fn install_flow(binary: String, r: Recipe) -> Result<(), String> {
     };
     let secs = r.install_timeout_secs;
     let mut cmd = Command::new(&a[0]);
+    // `npm install -g` into the system prefix needs root; ulakd runs as a plain user, so global
+    // npm installs go to ~/.local (bin in ~/.local/bin, which `add_user_bin_to_path` covers).
+    if let (None, None, Some(home)) = (
+        std::env::var_os("npm_config_prefix"),
+        std::env::var_os("NPM_CONFIG_PREFIX"),
+        std::env::var_os("HOME"),
+    ) {
+        cmd.env("npm_config_prefix", Path::new(&home).join(".local"));
+    }
     cmd.args(&a[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -812,6 +841,20 @@ pub(crate) mod tests {
             1
         );
         assert!(is_installed(&r, &bin).await);
+    }
+
+    #[tokio::test]
+    async fn install_gets_a_per_user_npm_prefix() {
+        let d = tmp("npm");
+        let body = format!(
+            "echo \"$npm_config_prefix\" > {d}/prefix\nprintf '#!/bin/sh\\nexit 0\\n' > {b}\nchmod +x {b}",
+            d = d.display(),
+            b = d.join("fake-agent").display()
+        );
+        let (r, bin) = recipe_for(&d, &body, 30);
+        Installer::default().ensure(&bin, &r).await.unwrap();
+        let want = format!("{}/.local\n", std::env::var("HOME").unwrap());
+        assert_eq!(std::fs::read_to_string(d.join("prefix")).unwrap(), want);
     }
 
     #[tokio::test]
