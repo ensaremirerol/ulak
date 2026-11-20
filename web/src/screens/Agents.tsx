@@ -1,10 +1,10 @@
-import { useState } from 'preact/hooks';
+import { useRef, useState } from 'preact/hooks';
 import type { NodeInfo, QueuedSpawn } from '../proto';
 import { agentStatusLabel, agentTone, awaitsSession, availableVersion, kindTitle, keysFromText, nodeOf, store } from '../state';
 import { Button, Card, Dot, EmptyState, Pill, ProgressBar } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { ageLabel, nodeStateLabel, nodeStateTone } from '../ui/format';
-import { Terminal } from '../ui/Terminal';
+import { Terminal, type TerminalHandle } from '../ui/Terminal';
 import { SpawnDialog } from './SpawnDialog';
 
 /** Escape sequences for the phone key bar. */
@@ -43,6 +43,15 @@ function NodeCard({ n }: { n: NodeInfo }) {
 function AgentTerminal({ agent }: { agent: string }) {
   const s = store.state.value;
   const [text, setText] = useState('');
+  const term = useRef<TerminalHandle>(null);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(term.current?.text() ?? '');
+      store.toast('ok', 'Copied.');
+    } catch {
+      store.toast('info', 'Copy is not available here: select the text and press Ctrl+C.');
+    }
+  };
   const node = nodeOf(s, agent);
   const st = s.statuses[agent];
   const send = (seq: string) => store.intent({ kind: 'send_keys', data: keysFromText(seq) });
@@ -51,13 +60,14 @@ function AgentTerminal({ agent }: { agent: string }) {
       <div class="term-head">
         <div class="row"><Dot tone={agentTone(st)} /><strong>{agent}</strong>{node && <span class="muted">on {node.hostname}</span>}<Pill tone={agentTone(st)}>{agentStatusLabel(st)}</Pill></div>
         <div class="row">
+          {!awaitsSession(st) && <Button size="sm" variant="ghost" title="Copies the selection, or the whole screen" onClick={() => void copy()}>Copy</Button>}
           <Button size="sm" variant="ghost" onClick={() => store.intent({ kind: 'detach' })}>Detach</Button>
           <ConfirmButton label="Kill" confirmLabel="Click again to kill" onConfirm={() => store.intent({ kind: 'kill', agent })} />
         </div>
       </div>
       {awaitsSession(st)
         ? <div class="term-host term-wait muted" role="status">{st === 'Installing' ? 'Installing…' : 'Starting…'} The terminal opens when the agent is running (a repository is cloned first).</div>
-        : <Terminal agent={agent} />}
+        : <Terminal agent={agent} handle={term} />}
       <div class="keybar" aria-label="Keys">
         {KEYS.map(([label, seq]) => <button key={label} type="button" class="key" onClick={() => send(seq)}>{label}</button>)}
       </div>

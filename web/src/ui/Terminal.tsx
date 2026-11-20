@@ -1,6 +1,7 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { useEffect, useRef } from 'preact/hooks';
+import type { Ref } from 'preact';
+import { useEffect, useImperativeHandle, useRef } from 'preact/hooks';
 import { utf8 } from '../proto';
 import { store } from '../state';
 import { termBytes } from '../state/reducer';
@@ -56,10 +57,26 @@ function adoptInjectedStyles() {
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
+/** The selection, else the whole screen (trailing blanks trimmed). */
+export function termText(t: XTerm): string {
+  if (t.hasSelection()) return t.getSelection();
+  const b = t.buffer.active;
+  const lines: string[] = [];
+  for (let y = 0; y < b.length; y++) lines.push(b.getLine(y)?.translateToString(true) ?? '');
+  return lines.join('\n').trimEnd();
+}
+
+/** Ctrl/Cmd+C with a selection copies it; without one Ctrl+C stays the interrupt key. */
+export const isCopyKey = (e: KeyboardEvent, selected: boolean): boolean =>
+  selected && e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c';
+
+export interface TerminalHandle { text(): string }
+
 /** xterm.js bound to one agent: replays the buffered bytes, then writes chunks as they arrive. */
-export function Terminal({ agent }: { agent: string }) {
+export function Terminal({ agent, handle }: { agent: string; handle?: Ref<TerminalHandle> }) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<XTerm | null>(null);
+  useImperativeHandle(handle ?? null, () => ({ text: () => (term.current ? termText(term.current) : '') }), []);
 
   useEffect(() => {
     adoptInjectedStyles();
@@ -76,6 +93,12 @@ export function Terminal({ agent }: { agent: string }) {
       },
     });
     t.open(host.current!);
+    t.attachCustomKeyEventHandler((e) => {
+      if (!isCopyKey(e, t.hasSelection())) return true;
+      void navigator.clipboard?.writeText(t.getSelection());
+      e.preventDefault();
+      return false;
+    });
     t.onData((d) => store.intent({ kind: 'send_keys', data: utf8(d) }));
     term.current = t;
     return () => {
