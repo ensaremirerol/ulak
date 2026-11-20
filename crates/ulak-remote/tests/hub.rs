@@ -731,6 +731,39 @@ async fn kill_reaches_the_node_and_revokes_tokens() {
         HubToDaemon::Kill { agent: a.clone() }
     );
     assert!(AgentTokens::verify(&**fx.hub.store(), &tok, now()).is_err());
+    // Failed before it ran (e.g. its install failed): the node does not list it, the hub closes it.
+    let f = agent("f-1");
+    send(
+        &mut d,
+        &DaemonToHub::AgentStatus {
+            agent: f.clone(),
+            status: AgentStatus::Failed,
+        },
+    )
+    .await;
+    until(&mut u, |m| {
+        matches!(
+            m,
+            HubToUi::AgentStatus {
+                status: AgentStatus::Failed,
+                ..
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    send(&mut u, &UiToHub::Kill { agent: f.clone() }).await;
+    assert_eq!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::Kill { agent: f.clone() }
+    );
+    let st = until(&mut u, |m| match m {
+        HubToUi::AgentStatus { agent, status, .. } if agent == f => Some(status),
+        HubToUi::Error { message } => panic!("{message}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(st, AgentStatus::Exited(None));
     // Unknown agent: an error frame, nothing else.
     send(
         &mut u,

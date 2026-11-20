@@ -173,7 +173,7 @@ pub enum ServerError {
     Device(#[from] DeviceError),
     #[error("node {0:?} is not connected")]
     NodeOffline(NodeId),
-    #[error("no connected node runs agent {0:?}")]
+    #[error("no connected node runs agent {}", .0.as_str())]
     AgentUnplaced(AgentId),
     #[error("node {node} speaks protocol {got}, the hub needs at least {min}")]
     DaemonTooOld { node: String, got: u32, min: u32 },

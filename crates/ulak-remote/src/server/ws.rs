@@ -516,13 +516,34 @@ fn on_ui(
             h.to_daemon(&node, HubToDaemon::PaneInput { agent, data })?;
         }
         UiToHub::Kill { agent } => {
-            let node = h.node_of_agent(&agent)?;
-            h.to_daemon(
-                &node,
-                HubToDaemon::Kill {
-                    agent: agent.clone(),
-                },
-            )?;
+            match h.node_of_agent(&agent) {
+                Ok(node) => h.to_daemon(
+                    &node,
+                    HubToDaemon::Kill {
+                        agent: agent.clone(),
+                    },
+                )?,
+                // Never started (e.g. waiting on a failed install) or its node is gone: nothing
+                // runs, so the hub closes it itself; a connected node still gets the Kill.
+                Err(e) => {
+                    let known = h.statuses().into_iter().find(|(a, ..)| *a == agent);
+                    let Some((_, node, _)) = known else {
+                        return Err(e);
+                    };
+                    let _ = h.to_daemon(
+                        &node,
+                        HubToDaemon::Kill {
+                            agent: agent.clone(),
+                        },
+                    );
+                    h.ui_send(HubToUi::AgentStatus {
+                        agent: agent.clone(),
+                        node: node.clone(),
+                        status: AgentStatus::Exited(None),
+                    });
+                    h.set_status(agent.clone(), node, AgentStatus::Exited(None));
+                }
+            }
             AgentTokens::revoke_agent(&*h.store, &agent)?;
             h.queue_kick.notify_one();
         }
