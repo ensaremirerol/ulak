@@ -128,6 +128,12 @@ pub enum HubToDaemon {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
+    /// Resize the agent's pane (tmux window) to the viewer's terminal. Nodes before 0.1.10 ignore it.
+    Resize {
+        agent: AgentId,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +155,12 @@ pub enum UiToHub {
         agent: AgentId,
         #[serde(with = "b64")]
         data: Vec<u8>,
+    },
+    /// The viewer's terminal size for the agent's pane; the last resize wins across viewers.
+    Resize {
+        agent: AgentId,
+        cols: u16,
+        rows: u16,
     },
     Kill {
         agent: AgentId,

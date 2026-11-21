@@ -153,15 +153,15 @@ describe('queue', () => {
     expect(q.getByText(/octocat\/hello-world@main · Auto · 1 min ago/)).toBeTruthy();
     expect(q.getByText(/\/srv\/p · node n1/)).toBeTruthy();
     expect(q.getByText('credential cred-1 is gone')).toBeTruthy();
-    expect(screen.getByText('2 waiting')).toBeTruthy();
+    expect(screen.getByText('Waiting for a node · 2')).toBeTruthy();
     act(() => feed({ type: 'queue_changed', item: item('q-3') }));
-    expect(screen.getByText('3 waiting')).toBeTruthy();
+    expect(screen.getByText('Waiting for a node · 3')).toBeTruthy();
     fireEvent.click(q.getAllByRole('button', { name: 'Cancel' })[0]!);
     expect(ofType(sent, 'cancel_queued')).toEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Click again to cancel' }));
     expect(ofType(sent, 'cancel_queued')).toEqual([{ type: 'cancel_queued', id: 'q-1' }]);
     act(() => feed({ type: 'queue_removed', id: 'q-1' }));
-    expect(screen.getByText('2 waiting')).toBeTruthy();
+    expect(screen.getByText('Waiting for a node · 2')).toBeTruthy();
   });
 
   it('the Agents nav item shows the queue count', () => {

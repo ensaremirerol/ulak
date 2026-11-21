@@ -244,10 +244,9 @@ describe('Agents: failed agents', () => {
   it('a failed agent the node never listed shows up without a reload', () => {
     render(<Agents />);
     act(() => feed({ type: 'agent_failed', agent: 'ghost-1', node: 'n1', reason: 'clone failed' }));
-    expect(within(screen.getByRole('list', { name: 'Agents' })).getByText('ghost-1')).toBeTruthy();
+    expect(screen.getByRole('listitem', { name: 'ghost-1: Failed' }).textContent).toContain('clone failed');
     // A Failed status followed by a node update that drops it keeps it listed too.
     act(() => feed({ type: 'agent_status', agent: 'ghost-2', node: 'n2', status: 'Failed' }, { type: 'node_update', ...node('n2', 'beta') }));
-    const list = within(screen.getByRole('list', { name: 'Agents' }));
-    expect(list.getByText('ghost-2').closest('button')!.textContent).toContain('on beta');
+    expect(screen.getByRole('listitem', { name: 'ghost-2: Failed' }).textContent).toContain('on beta');
   });
 });

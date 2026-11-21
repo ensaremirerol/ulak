@@ -700,6 +700,12 @@
       "data": "AP8bW0EN",
       "type": "pane_input"
     },
+    "resize": {
+      "agent": "reviewer-2",
+      "cols": 120,
+      "rows": 40,
+      "type": "resize"
+    },
     "resolve_blocker": {
       "id": "b-1",
       "type": "resolve_blocker"

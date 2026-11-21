@@ -197,6 +197,8 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'list_queue' }];
     case 'kill':
       return [{ type: 'kill', agent: i.agent }];
+    case 'resize':
+      return [{ type: 'resize', agent: i.agent, cols: Math.round(i.cols), rows: Math.round(i.rows) }];
     case 'add_device':
       return [{ type: 'add_device', kind: i.device }];
     case 'revoke_device':

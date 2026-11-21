@@ -80,6 +80,15 @@ pub trait AgentHost: Send + Sync + 'static {
         &self,
         id: &AgentId,
     ) -> impl Future<Output = Result<mpsc::Receiver<Vec<u8>>, AgentError>> + Send;
+    /// Resizes the agent's pane to a viewer's terminal; default: ignored (fixed-size host).
+    fn resize(
+        &self,
+        _id: &AgentId,
+        _cols: u16,
+        _rows: u16,
+    ) -> impl Future<Output = Result<(), AgentError>> + Send {
+        std::future::ready(Ok(()))
+    }
     /// The node's named profiles; `None` (default): this host reports none.
     fn profiles(&self) -> impl Future<Output = Option<Vec<ProfileInfo>>> + Send {
         std::future::ready(None)
@@ -469,6 +478,11 @@ impl<'a, H: AgentHost> Session<'a, H> {
             HubToDaemon::PaneInput { agent, data } => {
                 if let Err(e) = self.host.input(&agent, &data).await {
                     eprintln!("ulakd: input {agent:?} failed: {e}");
+                }
+            }
+            HubToDaemon::Resize { agent, cols, rows } => {
+                if let Err(e) = self.host.resize(&agent, cols, rows).await {
+                    eprintln!("ulakd: resize {agent:?} failed: {e}");
                 }
             }
             HubToDaemon::Attach { agent } => self.attach(agent).await,

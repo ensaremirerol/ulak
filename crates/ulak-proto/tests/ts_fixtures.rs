@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 27;
+const UI_VARIANTS: usize = 28;
 const HUB_VARIANTS: usize = 32;
 
 fn agent() -> AgentId {
@@ -111,6 +111,7 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::Attach { .. } => "attach",
         UiToHub::Detach { .. } => "detach",
         UiToHub::PaneInput { .. } => "pane_input",
+        UiToHub::Resize { .. } => "resize",
         UiToHub::Kill { .. } => "kill",
         UiToHub::AddDevice { .. } => "add_device",
         UiToHub::RevokeDevice { .. } => "revoke_device",
@@ -223,6 +224,14 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
             UiToHub::PaneInput {
                 agent: agent(),
                 data: vec![0, 255, 27, b'[', b'A', b'\r'],
+            },
+        ),
+        (
+            "resize",
+            UiToHub::Resize {
+                agent: agent(),
+                cols: 120,
+                rows: 40,
             },
         ),
         ("kill", UiToHub::Kill { agent: agent() }),

@@ -132,6 +132,8 @@ export type Intent =
   | { kind: 'cancel_queued'; id: string }
   | { kind: 'list_queue' }
   | { kind: 'kill'; agent: AgentId }
+  /** The agent terminal's size in the viewer (cells); nodes from 0.1.10 resize the pane to it. */
+  | { kind: 'resize'; agent: AgentId; cols: number; rows: number }
   | { kind: 'add_device'; device: DeviceKind }
   | { kind: 'revoke_device'; id: NodeId }
   | { kind: 'refresh_devices' }

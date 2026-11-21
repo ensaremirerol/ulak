@@ -77,6 +77,30 @@ async fn spawn_type_nudge_kill() {
     t.input_agent(id, b"raw input\r").await.unwrap();
     assert!(screen(&t, id, "raw input").await);
 
+    // A viewer's terminal size reaches the tmux window (clamped to sane bounds).
+    let size = |sz: &str| {
+        let o = Command::new("tmux")
+            .args([
+                "-L",
+                &sock,
+                "display-message",
+                "-p",
+                "-t",
+                &id.tmux_session(),
+            ])
+            .arg("#{window_width}x#{window_height}")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), sz);
+    };
+    AgentHost::resize(&t, id, 100, 30).await.unwrap();
+    size("100x30");
+    AgentHost::resize(&t, id, 9999, 1).await.unwrap();
+    size("400x5");
+    let mut rx = t.attach_agent(id).await.unwrap();
+    let frame = String::from_utf8(rx.recv().await.unwrap()).unwrap();
+    assert!(frame.split("\r\n").count() <= 5, "{frame:?}");
+
     t.kill_agent(id).await.unwrap();
     assert!(t.list_agents().await.unwrap().is_empty());
     let _ = Command::new("tmux")

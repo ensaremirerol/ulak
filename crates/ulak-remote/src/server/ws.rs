@@ -511,6 +511,10 @@ fn on_ui(
                 h.to_daemon(&node, HubToDaemon::Detach { agent })?;
             }
         }
+        UiToHub::Resize { agent, cols, rows } => {
+            let node = h.node_of_agent(&agent)?;
+            h.to_daemon(&node, HubToDaemon::Resize { agent, cols, rows })?;
+        }
         UiToHub::PaneInput { agent, data } => {
             let node = h.node_of_agent(&agent)?;
             h.to_daemon(&node, HubToDaemon::PaneInput { agent, data })?;

@@ -412,6 +412,7 @@ const uiDecoders = {
   attach: (o) => ({ type: 'attach', agent: s(o.agent, 'agent') }),
   detach: (o) => ({ type: 'detach', agent: s(o.agent, 'agent') }),
   pane_input: (o) => ({ type: 'pane_input', agent: s(o.agent, 'agent'), data: b64ToBytes(s(o.data, 'data')) }),
+  resize: (o) => ({ type: 'resize', agent: s(o.agent, 'agent'), cols: num(o.cols, 'cols'), rows: num(o.rows, 'rows') }),
   kill: (o) => ({ type: 'kill', agent: s(o.agent, 'agent') }),
   add_device: (o) => ({ type: 'add_device', kind: oneOf(o.kind, DEVICE_KINDS, 'kind') }),
   revoke_device: (o) => ({ type: 'revoke_device', id: s(o.id, 'id') }),

@@ -246,6 +246,7 @@ export type UiToHub =
   | { type: 'attach'; agent: AgentId }
   | { type: 'detach'; agent: AgentId }
   | { type: 'pane_input'; agent: AgentId; data: Uint8Array }
+  | { type: 'resize'; agent: AgentId; cols: number; rows: number }
   | { type: 'kill'; agent: AgentId }
   | { type: 'add_device'; kind: DeviceKind }
   | { type: 'revoke_device'; id: NodeId }

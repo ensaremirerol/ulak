@@ -725,12 +725,28 @@ async fn kill_reaches_the_node_and_revokes_tokens() {
         matches!(m, HubToUi::NodeUpdate(_)).then_some(())
     })
     .await;
+    let resize = |agent: &AgentId| UiToHub::Resize {
+        agent: agent.clone(),
+        cols: 120,
+        rows: 40,
+    };
+    send(&mut u, &resize(&a)).await;
+    assert_eq!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::Resize {
+            agent: a.clone(),
+            cols: 120,
+            rows: 40
+        }
+    );
     send(&mut u, &UiToHub::Kill { agent: a.clone() }).await;
     assert_eq!(
         recv::<HubToDaemon>(&mut d).await,
         HubToDaemon::Kill { agent: a.clone() }
     );
     assert!(AgentTokens::verify(&**fx.hub.store(), &tok, now()).is_err());
+    send(&mut u, &resize(&agent("zz-9"))).await;
+    until(&mut u, |m| matches!(m, HubToUi::Error { .. }).then_some(())).await;
     // Failed before it ran (e.g. its install failed): the node does not list it, the hub closes it.
     let f = agent("f-1");
     send(

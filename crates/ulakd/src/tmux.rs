@@ -169,6 +169,24 @@ fn capture_plain_argv(id: &AgentId) -> Vec<String> {
     vec![s("capture-pane"), s("-p"), s("-t"), id.tmux_session()]
 }
 
+/// Pane sizes a viewer may ask for; anything outside is clamped.
+pub const COLS: std::ops::RangeInclusive<u16> = 20..=400;
+pub const ROWS: std::ops::RangeInclusive<u16> = 5..=200;
+
+pub fn resize_argv(id: &AgentId, cols: u16, rows: u16) -> Vec<String> {
+    let cols = cols.clamp(*COLS.start(), *COLS.end());
+    let rows = rows.clamp(*ROWS.start(), *ROWS.end());
+    vec![
+        s("resize-window"),
+        s("-t"),
+        id.tmux_session(),
+        s("-x"),
+        cols.to_string(),
+        s("-y"),
+        rows.to_string(),
+    ]
+}
+
 pub fn cursor_argv(id: &AgentId) -> Vec<String> {
     vec![
         s("display-message"),
@@ -1045,6 +1063,11 @@ impl AgentHost for Tmux {
     }
     async fn kill(&self, id: &AgentId) -> Result<(), AgentError> {
         self.kill_agent(id).await
+    }
+    async fn resize(&self, id: &AgentId, cols: u16, rows: u16) -> Result<(), AgentError> {
+        self.run("resize-window", resize_argv(id, cols, rows), None)
+            .await
+            .map(drop)
     }
     async fn nudge(&self, id: &AgentId, text: &str) -> Result<(), AgentError> {
         self.nudge_agent(id, text).await

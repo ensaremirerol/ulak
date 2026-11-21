@@ -1,3 +1,4 @@
+import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { Ref } from 'preact';
@@ -7,9 +8,11 @@ import { store } from '../state';
 import { termBytes } from '../state/reducer';
 import { cursorScrollTop } from './scroll';
 
-// The protocol has no resize frame and ulakd creates every tmux pane at 200x50 (tmux.rs), so render at exactly that size
-// and scroll the host instead of fitting: fitting to the window would wrap/crop the redraw.
+// Nodes before 0.1.10 ignore `resize` and keep every tmux pane at 200x50 (tmux.rs): for them render at exactly that
+// size and scroll the host, as fitting would wrap/crop the redraw. Newer nodes resize the pane to the fitted terminal.
 const COLS = 200, ROWS = 50;
+/** Wait after the last size change before telling the node (a drag resizes many times). */
+const RESIZE_DEBOUNCE_MS = 150;
 
 /**
  * xterm.js injects <style> elements at runtime; the hub CSP (style-src 'self') blocks them. A blocked element still keeps
@@ -73,17 +76,17 @@ export const isCopyKey = (e: KeyboardEvent, selected: boolean): boolean =>
 export interface TerminalHandle { text(): string }
 
 /** xterm.js bound to one agent: replays the buffered bytes, then writes chunks as they arrive. */
-export function Terminal({ agent, handle }: { agent: string; handle?: Ref<TerminalHandle> }) {
+export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; handle?: Ref<TerminalHandle> }) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<XTerm | null>(null);
+  const fitter = useRef<FitAddon | null>(null);
   useImperativeHandle(handle ?? null, () => ({ text: () => (term.current ? termText(term.current) : '') }), []);
 
   useEffect(() => {
     adoptInjectedStyles();
     const t = new XTerm({
       fontFamily: css('--font-mono') || 'monospace',
-      cols: COLS,
-      rows: ROWS,
+      ...(fit ? {} : { cols: COLS, rows: ROWS }),
       fontSize: 13,
       cursorBlink: true,
       scrollback: 5000,
@@ -92,6 +95,10 @@ export function Terminal({ agent, handle }: { agent: string; handle?: Ref<Termin
         red: css('--bad'), green: css('--ok'), yellow: css('--warn'), blue: css('--info'),
       },
     });
+    if (fit) {
+      fitter.current = new FitAddon();
+      t.loadAddon(fitter.current);
+    }
     t.open(host.current!);
     t.attachCustomKeyEventHandler((e) => {
       if (!isCopyKey(e, t.hasSelection())) return true;
@@ -104,8 +111,36 @@ export function Terminal({ agent, handle }: { agent: string; handle?: Ref<Termin
     return () => {
       t.dispose();
       term.current = null;
+      fitter.current = null;
     };
-  }, []);
+  }, [fit]);
+
+  // Fit to the box and tell the node; again whenever the box changes size (window, fullscreen, pop-out).
+  useEffect(() => {
+    const f = fitter.current, h = host.current;
+    if (!fit || !f || !h) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let sent = '';
+    const refit = () => {
+      const d = f.proposeDimensions();
+      if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 2 || d.rows < 2) return; // hidden box
+      f.fit();
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const key = `${d.cols}x${d.rows}`;
+        if (key === sent) return;
+        sent = key;
+        store.intent({ kind: 'resize', agent, cols: d.cols, rows: d.rows });
+      }, RESIZE_DEBOUNCE_MS);
+    };
+    refit();
+    const ro = new ResizeObserver(refit);
+    ro.observe(h);
+    return () => {
+      ro.disconnect();
+      clearTimeout(timer);
+    };
+  }, [agent, fit]);
 
   useEffect(() => {
     const t = term.current!;
@@ -113,13 +148,42 @@ export function Terminal({ agent, handle }: { agent: string; handle?: Ref<Termin
     const old = termBytes(store.state.peek().terminals[agent]);
     const follow = () => {
       const h = host.current;
-      if (!h) return;
+      if (!h || fit) return; // a fitted terminal shows the whole pane
       h.scrollTop = cursorScrollTop(t.buffer.active.cursorY, h.scrollHeight / ROWS, h.scrollTop, h.clientHeight);
     };
     if (old.length > 0) t.write(old, follow);
     t.focus();
-    return store.onPane(agent, (d) => t.write(d, follow));
-  }, [agent]);
+    // Every chunk is a full redraw, which wipes xterm's selection: while the user drags or has text selected, hold
+    // the redraws and apply only the latest once the selection is gone.
+    let held: Uint8Array | null = null;
+    let dragging = false;
+    const holding = () => dragging || t.hasSelection();
+    const flush = () => {
+      if (held && !holding()) {
+        t.write(held, follow);
+        held = null;
+      }
+    };
+    const h = host.current!;
+    const down = () => { dragging = true; };
+    const up = () => {
+      dragging = false;
+      flush();
+    };
+    h.addEventListener('mousedown', down);
+    window.addEventListener('mouseup', up);
+    const sel = t.onSelectionChange(flush);
+    const off = store.onPane(agent, (d) => {
+      if (holding()) held = d;
+      else t.write(d, follow);
+    });
+    return () => {
+      off();
+      sel.dispose();
+      h.removeEventListener('mousedown', down);
+      window.removeEventListener('mouseup', up);
+    };
+  }, [agent, fit]);
 
-  return <div class="term-host" ref={host} />;
+  return <div class={`term-host${fit ? ' term-fit' : ''}`} ref={host} />;
 }

@@ -33,6 +33,18 @@ export const route: ReadonlySignal<Route> = current;
 /** The node of a node detail route (`#/nodes/<id>`), else null. */
 export const routeNode: ReadonlySignal<string | null> = currentNode;
 export const nodeHref = (id: string): string => `#/nodes/${encodeURIComponent(id)}`;
+/** The separate-window terminal of one agent (opened by "New window"). */
+export const termHref = (agent: string): string => `#/term/${encodeURIComponent(agent)}`;
+/** `#/term/<agent>` -> the agent id; null otherwise. Read once: that window shows nothing else. */
+export function parseTermAgent(hash: string): string | null {
+  const m = /^#?\/?term\/([^/?]+)/.exec(hash);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]!);
+  } catch {
+    return null;
+  }
+}
 export const href = (r: Route): string => `#/${r}`;
 export const navigate = (r: Route): void => {
   location.hash = href(r);
