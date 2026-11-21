@@ -210,6 +210,31 @@ describe('folder browser (nodes from 0.1.12)', () => {
     expect(screen.getByRole('list', { name: 'Folders in /home/me' })).toBeTruthy(); // cached answer for ~
   });
 
+  it('reopening starts in the chosen folder and keeps it; a refreshed listing does not undo a row click', () => {
+    feed(version('n1', '0.1.12'));
+    openFolders();
+    act(() => feed({ type: 'dir_listing', node: 'n1', listing: { requested: '~', path: '/home/me', dirs: ['notes', 'ulak'], error: null } }));
+    fireEvent.click(screen.getByText('ulak').closest('button')!);
+    act(() => feed({ type: 'dir_listing', node: 'n1', listing: { requested: '~', path: '/home/me', dirs: ['notes', 'ulak'], error: null } }));
+    expect((screen.getByRole('textbox', { name: 'Path' }) as HTMLInputElement).value).toBe('/home/me/ulak');
+    fireEvent.click(screen.getByRole('button', { name: 'Use this folder' }));
+    sent.length = 0;
+    fireEvent.click(screen.getByRole('button', { name: /^Where/ }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Folder on a node' }));
+    expect(ofType(sent, 'list_dir')).toEqual([{ type: 'list_dir', node: 'n1', path: '/home/me/ulak' }]);
+    act(() => feed({ type: 'dir_listing', node: 'n1', listing: { requested: '/home/me/ulak', path: '/home/me/ulak', dirs: [], error: null } }));
+    expect((screen.getByRole('textbox', { name: 'Path' }) as HTMLInputElement).value).toBe('/home/me/ulak');
+  });
+
+  it('picks the first node when nodes arrive after the picker opens', () => {
+    sent = freshStore();
+    openFolders();
+    act(() => feed({ type: 'node_update', ...node('n1', 'alpha') }));
+    type('Path', '/srv/p');
+    fireEvent.click(screen.getByRole('button', { name: 'Use this folder' }));
+    expect(screen.getByRole('button', { name: /^Where/ }).textContent).toContain('/srv/p on alpha');
+  });
+
   it('older nodes: no request, a typed path or a known project', () => {
     openFolders();
     expect(ofType(sent, 'list_dir')).toEqual([]);

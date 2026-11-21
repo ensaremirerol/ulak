@@ -16,8 +16,10 @@ export function crumbs(path: string): [label: string, path: string][] {
 /** Browse a node's folders (nodes from 0.1.12; older ones: type a path or pick a known project). */
 export function FolderPicker({ initial, onPick }: { initial: FolderChoice | null; onPick(c: FolderChoice): void }) {
   const s = store.state.value;
-  const [node, setNode] = useState(initial?.node ?? s.nodes[0]?.id ?? '');
-  const [at, setAt] = useState('~');
+  // Nodes can arrive after the picker opens: default to the first one until the user picks.
+  const [picked, setNode] = useState(initial?.node ?? '');
+  const node = picked || (s.nodes[0]?.id ?? '');
+  const [at, setAt] = useState(initial?.path || '~');
   const [typed, setTyped] = useState(initial?.path ?? '');
   const [late, setLate] = useState(false);
   const browse = node !== '' && listsDirs(s, node);
@@ -30,9 +32,11 @@ export function FolderPicker({ initial, onPick }: { initial: FolderChoice | null
     const t = setTimeout(() => setLate(true), LIST_TIMEOUT_MS);
     return () => clearTimeout(t);
   }, [node, at, browse]);
+  // Keyed on the path, not the object: a refreshed answer for the same folder must not undo a row click.
+  const shown = listing && !listing.error ? listing.path : null;
   useEffect(() => {
-    if (listing && !listing.error) setTyped(listing.path);
-  }, [listing]);
+    if (shown !== null) setTyped(shown);
+  }, [shown]);
 
   const open = (path: string) => setAt(path);
   const known = s.nodeRepos[node] ?? [];
