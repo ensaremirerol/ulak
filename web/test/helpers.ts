@@ -16,4 +16,4 @@ export function freshStore(conn: 'open' | 'connecting' = 'open'): UiToHub[] {
 }
 
 export const feed = (...frames: HubToUi[]) => frames.forEach((f) => store.onFrame(f));
-export const ofType = <T extends UiToHub['type']>(sent: UiToHub[], t: T) => sent.filter((f) => f.type === t);
+export const ofType = <T extends UiToHub['type']>(sent: UiToHub[], t: T) => sent.filter((f): f is Extract<UiToHub, { type: T }> => f.type === t);

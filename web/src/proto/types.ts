@@ -240,6 +240,93 @@ export interface CleanItem {
   reason: string;
 }
 
+/** `owner/name#64`. */
+export type IssueRef = string;
+
+/** An open GitHub issue as the hub fetched it. Text is untrusted. */
+export interface Issue {
+  issue: IssueRef;
+  title: string;
+  body: string;
+  author: string;
+  /** The author owns, is a member of or collaborates on the repository. */
+  trusted: boolean;
+  labels: string[];
+  comments: number;
+  updated_ms: number;
+  url: string;
+  /** From a tagged repository (not yours): never auto-started. */
+  tagged: boolean;
+}
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  labels: string[];
+  prompt: string;
+  route: boolean;
+  comment: boolean;
+  auto_start: boolean;
+}
+
+export type RouteFallback = 'new_agent' | 'inbox';
+
+export interface RouteRule {
+  repo: RepoRef | null;
+  label: string | null;
+  words: string[];
+  to: AgentId;
+  fallback: RouteFallback;
+}
+
+export interface Routing {
+  on_by_default: boolean;
+  block: string;
+  rules: RouteRule[];
+  hints: string;
+  max_forwards: number;
+  ask_first: boolean;
+}
+
+export interface IssueSettings {
+  credential: CredentialId | null;
+  tagged: RepoRef[];
+  templates: PromptTemplate[];
+  routing: Routing;
+}
+
+export interface IssueLink {
+  agent: AgentId;
+  issue: IssueRef;
+  branch: string | null;
+  comment: boolean;
+  route: boolean;
+  at_ms: number;
+  commented_start: boolean;
+  pr: number | null;
+}
+
+export interface IssueStart {
+  issue: IssueRef;
+  branch: string | null;
+  comment: boolean;
+  route: boolean;
+}
+
+export type ForwardStatus = 'delivered' | 'started' | 'needs_owner' | 'dismissed';
+
+export interface Forward {
+  id: string;
+  issue: IssueRef;
+  from: AgentId;
+  to: AgentId | null;
+  reason: string;
+  status: ForwardStatus;
+  note: string;
+  title: string;
+  at_ms: number;
+}
+
 /** What the hub tells a one-time-code holder (device enrolment). */
 export interface OtpOffer {
   kind: DeviceKind;
@@ -281,7 +368,12 @@ export type UiToHub =
   /** `node: null` = every connected node reporting the profile installable. */
   | { type: 'install_profile'; node: NodeId | null; name: string }
   | { type: 'clean_node'; node: NodeId; dry_run: boolean }
-  | { type: 'clean_repo'; node: NodeId; path: string };
+  | { type: 'clean_repo'; node: NodeId; path: string }
+  | { type: 'spawn_for_issue'; target: SpawnTarget; spec: SpawnSpec; issue: IssueStart }
+  | { type: 'list_issues' }
+  | { type: 'save_issue_settings'; settings: IssueSettings }
+  /** `to: null` leaves the forward in Issues. */
+  | { type: 'resolve_forward'; id: string; to: AgentId | null };
 
 export type HubToUi =
   | { type: 'snapshot'; nodes: NodeInfo[]; questions: Question[] }
@@ -319,6 +411,10 @@ export type HubToUi =
   /** `done: false` = started; `done: true` with `ok` and `detail` (error, or output tail) = finished. */
   | { type: 'install_status'; node: NodeId; name: string; done: boolean; ok: boolean; detail: string }
   | { type: 'clean_report'; node: NodeId; dry_run: boolean; removed: CleanItem[]; kept: CleanItem[] }
+  | { type: 'issues'; issues: Issue[]; errors: string[] }
+  | { type: 'issue_settings'; settings: IssueSettings }
+  | { type: 'issue_links'; links: IssueLink[] }
+  | { type: 'forwards'; forwards: Forward[] }
   | { type: 'error'; message: string };
 
 /** A frame this build does not know (newer hub) or could not parse. Never fatal. */

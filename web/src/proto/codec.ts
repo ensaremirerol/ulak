@@ -1,6 +1,6 @@
 import { b64ToBytes, bytesToB64 } from './bytes';
 import type {
-  AgentStatus, Blocker, CleanItem, CredentialInfo, DirListing, DeviceInfo, HubProfile, HubToUi, NodeSettings, HubToUiType, Message, NodeInfo, NodeState,
+  AgentStatus, Blocker, CleanItem, Forward, Issue, IssueLink, IssueSettings, IssueStart, PromptTemplate, RouteRule, CredentialInfo, DirListing, DeviceInfo, HubProfile, HubToUi, NodeSettings, HubToUiType, Message, NodeInfo, NodeState,
   OtpOffer, ProfileInfo, RepoEntry, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
   VersionInfo,
 } from './types';
@@ -241,6 +241,105 @@ function dirListing(v: unknown): DirListing {
   return { requested: s(o.requested, 'requested'), path: s(o.path, 'path'), dirs: arr(o.dirs, 'dirs', (x) => str(x, 'dir')), error: optStr(o.error, 'error') };
 }
 
+const strs = (v: unknown, what: string): string[] => arr(v, what, (x) => str(x, what));
+
+function issue(v: unknown): Issue {
+  const o = obj(v, 'issue');
+  return {
+    issue: str(o.issue, 'issue'),
+    title: str(o.title, 'title'),
+    body: str(o.body, 'body'),
+    author: str(o.author, 'author'),
+    trusted: bool(o.trusted, 'trusted'),
+    labels: strs(o.labels, 'labels'),
+    comments: num(o.comments, 'comments'),
+    updated_ms: num(o.updated_ms, 'updated_ms'),
+    url: str(o.url, 'url'),
+    tagged: bool(o.tagged, 'tagged'),
+  };
+}
+
+function promptTemplate(v: unknown): PromptTemplate {
+  const o = obj(v, 'template');
+  return {
+    id: str(o.id, 'id'),
+    name: str(o.name, 'name'),
+    labels: strs(o.labels ?? [], 'labels'),
+    prompt: str(o.prompt, 'prompt'),
+    route: bool(o.route ?? false, 'route'),
+    comment: bool(o.comment ?? false, 'comment'),
+    auto_start: bool(o.auto_start ?? false, 'auto_start'),
+  };
+}
+
+function routeRule(v: unknown): RouteRule {
+  const o = obj(v, 'rule');
+  return {
+    repo: optStr(o.repo, 'repo'),
+    label: optStr(o.label, 'label'),
+    words: strs(o.words ?? [], 'words'),
+    to: str(o.to, 'to'),
+    fallback: oneOf(o.fallback ?? 'inbox', ['new_agent', 'inbox'] as const, 'fallback'),
+  };
+}
+
+export function issueSettings(v: unknown): IssueSettings {
+  const o = obj(v, 'issue settings');
+  const r = obj(o.routing, 'routing');
+  return {
+    credential: optStr(o.credential, 'credential'),
+    tagged: strs(o.tagged ?? [], 'tagged'),
+    templates: arr(o.templates ?? [], 'templates', promptTemplate),
+    routing: {
+      on_by_default: bool(r.on_by_default, 'on_by_default'),
+      block: str(r.block, 'block'),
+      rules: arr(r.rules, 'rules', routeRule),
+      hints: str(r.hints, 'hints'),
+      max_forwards: num(r.max_forwards, 'max_forwards'),
+      ask_first: bool(r.ask_first, 'ask_first'),
+    },
+  };
+}
+
+function issueLink(v: unknown): IssueLink {
+  const o = obj(v, 'issue link');
+  return {
+    agent: str(o.agent, 'agent'),
+    issue: str(o.issue, 'issue'),
+    branch: optStr(o.branch, 'branch'),
+    comment: bool(o.comment ?? false, 'comment'),
+    route: bool(o.route ?? false, 'route'),
+    at_ms: num(o.at_ms, 'at_ms'),
+    commented_start: bool(o.commented_start ?? false, 'commented_start'),
+    pr: optNum(o.pr, 'pr'),
+  };
+}
+
+function issueStart(v: unknown): IssueStart {
+  const o = obj(v, 'issue start');
+  return {
+    issue: str(o.issue, 'issue'),
+    branch: optStr(o.branch, 'branch'),
+    comment: bool(o.comment, 'comment'),
+    route: bool(o.route, 'route'),
+  };
+}
+
+function forward(v: unknown): Forward {
+  const o = obj(v, 'forward');
+  return {
+    id: str(o.id, 'id'),
+    issue: str(o.issue, 'issue'),
+    from: str(o.from, 'from'),
+    to: optStr(o.to, 'to'),
+    reason: str(o.reason, 'reason'),
+    status: oneOf(o.status, ['delivered', 'started', 'needs_owner', 'dismissed'] as const, 'status'),
+    note: str(o.note ?? '', 'note'),
+    title: str(o.title ?? '', 'title'),
+    at_ms: num(o.at_ms, 'at_ms'),
+  };
+}
+
 function cleanItem(v: unknown): CleanItem {
   const o = obj(v, 'clean item');
   return { path: str(o.path, 'path'), full_name: optStr(o.full_name, 'full_name'), reason: str(o.reason, 'reason') };
@@ -347,6 +446,10 @@ const hubDecoders = {
     removed: arr(o.removed, 'removed', cleanItem),
     kept: arr(o.kept, 'kept', cleanItem),
   }),
+  issues: (o) => ({ type: 'issues', issues: arr(o.issues, 'issues', issue), errors: strs(o.errors, 'errors') }),
+  issue_settings: (o) => ({ type: 'issue_settings', settings: issueSettings(o.settings) }),
+  issue_links: (o) => ({ type: 'issue_links', links: arr(o.links, 'links', issueLink) }),
+  forwards: (o) => ({ type: 'forwards', forwards: arr(o.forwards, 'forwards', forward) }),
   error: (o) => ({ type: 'error', message: s(o.message, 'message') }),
 } satisfies { [K in HubToUiType]: Decoder<Extract<HubToUi, { type: K }>> };
 
@@ -449,6 +552,10 @@ const uiDecoders = {
   install_profile: (o) => ({ type: 'install_profile', node: optStr(o.node, 'node'), name: s(o.name, 'name') }),
   clean_node: (o) => ({ type: 'clean_node', node: s(o.node, 'node'), dry_run: bool(o.dry_run, 'dry_run') }),
   clean_repo: (o) => ({ type: 'clean_repo', node: s(o.node, 'node'), path: s(o.path, 'path') }),
+  spawn_for_issue: (o) => ({ type: 'spawn_for_issue', target: target(o.target), spec: spawnSpec(o.spec), issue: issueStart(o.issue) }),
+  list_issues: () => ({ type: 'list_issues' }),
+  save_issue_settings: (o) => ({ type: 'save_issue_settings', settings: issueSettings(o.settings) }),
+  resolve_forward: (o) => ({ type: 'resolve_forward', id: s(o.id, 'id'), to: optStr(o.to, 'to') }),
 } satisfies { [K in UiToHubType]: Decoder<Extract<UiToHub, { type: K }>> };
 
 export const UI_TO_HUB_TYPES = Object.keys(uiDecoders) as UiToHubType[];

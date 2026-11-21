@@ -195,6 +195,8 @@ describe('queue', () => {
 describe('Settings credentials', () => {
   it('lists credentials, Delete is two-click, Add sends the token and clears the field', () => {
     feed({ type: 'credentials', credentials: [cred] });
+    location.hash = '#/settings/github';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
     render(<Settings />);
     expect(screen.getByText(/GitHub · octocat · added/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));

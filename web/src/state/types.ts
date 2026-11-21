@@ -2,6 +2,7 @@ import type {
   AgentId, AgentStatus, Blocker, DeviceInfo, DeviceKind, HubToUi, Message, NodeId, NodeInfo,
   OtpOffer, Question, CredentialInfo, RepoInfo, QueuedSpawn, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
   ProfileInfo, RepoEntry, CleanItem, DirListing, ScopedProfile, NodeSettings, Telemetry,
+  Forward, Issue, IssueLink, IssueSettings, IssueStart,
 } from '../proto';
 import type { ConnState } from '../net';
 
@@ -70,6 +71,14 @@ export interface State {
   acks: { config: number; error: number; lastError: string };
   /** The latest install per `node\0profile` (see `installKey`); `ok` only once done. */
   installs: Record<string, { running: boolean; ok?: boolean; detail: string; at: number }>;
+  /** The last `issues` answer (null: never asked). */
+  issues: { list: Issue[]; errors: string[]; at: number } | null;
+  /** Templates, tagged repositories and routing (null until the hub sends them). */
+  issueSettings: IssueSettings | null;
+  /** Agents started for an issue. */
+  issueLinks: IssueLink[];
+  /** The last forwards, newest first. */
+  forwards: Forward[];
 }
 
 export type Event =
@@ -129,6 +138,10 @@ export type Intent =
   | { kind: 'send_keys'; data: Uint8Array }
   | { kind: 'answer'; question: QuestionId; text: string }
   | { kind: 'spawn'; form: SpawnForm }
+  | { kind: 'spawn_for_issue'; form: SpawnForm; issue: IssueStart }
+  | { kind: 'list_issues' }
+  | { kind: 'save_issue_settings'; settings: IssueSettings }
+  | { kind: 'resolve_forward'; id: string; to: AgentId | null }
   /** The token only lives in the frame; it is never kept in state. */
   | { kind: 'add_credential'; name: string; token: string }
   | { kind: 'delete_credential'; id: string }

@@ -7,6 +7,7 @@ import type { Intent, ProfileForm, SettingsForm, SpawnForm, State, Tri } from '.
 export class IntentError extends Error {}
 
 const SLUG = /^[a-z0-9-]{1,64}$/;
+const BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
 const slug = (v: string, what: string): string => {
   if (!SLUG.test(v)) throw new IntentError(`${what} must be 1-64 characters: lowercase letters, digits and "-" (got "${v.slice(0, 40)}")`);
   return v;
@@ -179,6 +180,18 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'answer', question: i.question, text: i.text }];
     case 'spawn':
       return [spawnFormToFrame(i.form)];
+    case 'spawn_for_issue': {
+      const f = spawnFormToFrame(i.form);
+      if (f.type !== 'spawn') return [];
+      if (i.issue.branch !== null && !BRANCH.test(i.issue.branch)) throw new IntentError('Branch: letters, digits and . _ / - only');
+      return [{ type: 'spawn_for_issue', target: f.target, spec: f.spec, issue: i.issue }];
+    }
+    case 'list_issues':
+      return [{ type: 'list_issues' }];
+    case 'save_issue_settings':
+      return [{ type: 'save_issue_settings', settings: i.settings }];
+    case 'resolve_forward':
+      return [{ type: 'resolve_forward', id: i.id, to: i.to }];
     case 'add_credential':
       if (!i.name.trim()) throw new IntentError('Name is empty: give the token a name, e.g. work');
       if (!i.token.trim()) throw new IntentError('Token is empty: paste a GitHub token');

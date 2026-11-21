@@ -1,6 +1,8 @@
 import { signal, type ReadonlySignal } from '@preact/signals';
 
-export const ROUTES = ['agents', 'inbox', 'nodes', 'mailbox', 'devices', 'settings'] as const;
+export const ROUTES = ['agents', 'issues', 'inbox', 'nodes', 'mailbox', 'devices', 'settings'] as const;
+/** The main navigation (Mailbox and Devices are reached from Inbox and Settings). */
+export const NAV = ['agents', 'issues', 'inbox', 'nodes', 'settings'] as const satisfies readonly Route[];
 export type Route = (typeof ROUTES)[number];
 
 /** `#/inbox` -> 'inbox'; anything unknown falls back to 'agents'. Sub-paths (`#/agents/x`) keep the first segment. */
@@ -20,14 +22,23 @@ export function parseNodeId(hash: string): string | null {
   }
 }
 
+/** The second path segment (`#/settings/templates` -> 'templates'), or null. */
+export function parseSub(hash: string): string | null {
+  return hash.replace(/^#\/?/, '').split(/[?]/)[0]!.split('/')[1] || null;
+}
+
 const current = signal<Route>(parseRoute(globalThis.location?.hash ?? ''));
 const currentNode = signal<string | null>(parseNodeId(globalThis.location?.hash ?? ''));
+const currentSub = signal<string | null>(parseSub(globalThis.location?.hash ?? ''));
 if (typeof window !== 'undefined') {
   window.addEventListener('hashchange', () => {
     current.value = parseRoute(location.hash);
     currentNode.value = parseNodeId(location.hash);
+    currentSub.value = parseSub(location.hash);
   });
 }
+/** The sub page of the current route (Settings tabs). */
+export const routeSub: ReadonlySignal<string | null> = currentSub;
 
 export const route: ReadonlySignal<Route> = current;
 /** The node of a node detail route (`#/nodes/<id>`), else null. */

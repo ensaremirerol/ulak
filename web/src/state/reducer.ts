@@ -22,6 +22,7 @@ export function initialState(now = Date.now()): State {
     hubProfiles: [], nodeSettings: {}, stats: null,
     acks: { config: 0, error: 0, lastError: '' },
     installs: {},
+    issues: null, issueSettings: null, issueLinks: [], forwards: [],
   };
 }
 
@@ -229,6 +230,14 @@ function reduceHub(s: State, f: HubToUi): State {
     }
     case 'clean_report':
       return { ...s, lastClean: { ...s.lastClean, [f.node]: { dryRun: f.dry_run, removed: f.removed, kept: f.kept } } };
+    case 'issues':
+      return { ...s, issues: { list: f.issues, errors: f.errors, at: s.now } };
+    case 'issue_settings':
+      return { ...s, issueSettings: f.settings, acks: { ...s.acks, config: s.acks.config + 1 } };
+    case 'issue_links':
+      return { ...s, issueLinks: f.links };
+    case 'forwards':
+      return { ...s, forwards: f.forwards };
     case 'error':
       return { ...addToast(s, 'error', f.message), acks: { ...s.acks, error: s.acks.error + 1, lastError: f.message } };
   }
@@ -265,7 +274,7 @@ export const listsDirs = (s: State, node: string): boolean => versionAtLeast(s.n
 
 /** Every agent id the hub may know (a new agent must not reuse one). */
 export function takenIds(s: State): Set<string> {
-  return new Set([...s.nodes.flatMap((n) => n.agents), ...Object.keys(s.statuses), ...Object.keys(s.lastFailure), ...s.queue.map((q) => q.agent)]);
+  return new Set([...s.nodes.flatMap((n) => n.agents), ...Object.keys(s.statuses), ...Object.keys(s.lastFailure), ...s.queue.map((q) => q.agent), ...s.issueLinks.map((l) => l.agent)]);
 }
 
 /** An agent id from the first words of the prompt (`fix-the-login-bug`), unique against `taken`; `agent` when the
