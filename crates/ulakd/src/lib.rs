@@ -8,6 +8,10 @@ pub mod guard;
 pub mod hub;
 pub mod join;
 pub mod mcp;
+#[cfg(unix)]
+pub mod pty;
+#[cfg(not(unix))]
+#[path = "pty_stub.rs"]
 pub mod pty;
 pub mod renew;
 pub mod repos;

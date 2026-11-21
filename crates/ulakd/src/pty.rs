@@ -33,10 +33,18 @@ impl Pty {
     /// Runs `argv` with a new PTY of `cols` x `rows` as its controlling terminal and stdio.
     pub fn spawn(argv: &[String], env: &[(&str, &str)], cols: u16, rows: u16) -> io::Result<Self> {
         let (mut m, mut s) = (0, 0);
-        let ws = winsize(cols, rows);
+        let mut ws = winsize(cols, rows);
         // SAFETY: openpty writes two fds into the out-params; name and termios may be null.
-        if unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), &ws) }
-            != 0
+        if unsafe {
+            libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                // const on Linux, mut on macOS
+                std::ptr::null_mut::<libc::termios>() as _,
+                &mut ws as *mut libc::winsize as _,
+            )
+        } != 0
         {
             return Err(io::Error::last_os_error());
         }
