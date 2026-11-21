@@ -493,3 +493,33 @@ Hub (ulak-remote, done):
 - `HubConfig` (profiles global first, then node, then name; settings by node) is in the UI connect replay right after `HubVersion` (and the release frame, if any) and broadcast after each successful change; failures go to the requester only as `Error`.
 - `NodeStats`: in memory per node, Hello + Heartbeat telemetry (a repeated `at_ms` is skipped), <= 720 samples received in the last hour; `connected_ms` = start of the current daemon connection, `None` after disconnect (history kept). Reply to the requester only; unknown node = empty.
 - Placement is unchanged: hub profiles count once the daemon reports them back in `Profiles` (`from_hub: true`); before that, a name no node reports is a custom binary.
+
+## 0.1.11 in progress: real terminal stream (2026-11-21)
+
+Released and verified: 0.1.9 (hub Kill fix, terminal copy), 0.1.10 (Agents screen redesign, `resize` frame,
+fit / full screen / new window, selection survives redraws). Both: 18 assets, 9/9 signatures, hub image bundles them.
+
+Plan (user approved "do the real terminal stream"; tag only with the user's OK):
+- ulakd: per streamed agent, a `tmux attach-session -t ulak-<id>` client in a PTY (libc openpty, setsid + TIOCSCTTY,
+  master close-on-exec, slave closed in parent, child reaped on detach). Raw bytes out; PaneInput written to the PTY
+  when a client exists (else the old paste path); Resize = TIOCSWINSZ when streaming (undo 0.1.10's resize-window
+  pin: `set-window-option -t <sess> window-size latest`), else resize-window. Session options with `-t` only
+  (never -g/-s: production uses the user's default tmux server): `status off`, `mouse on`. A new AttachStream
+  restarts the client so late joiners get a full repaint.
+- Frames: UiToHub::AttachStream{agent,cols,rows}; HubToDaemon::AttachStream{..}, DetachStream{agent};
+  DaemonToHub::PaneStream{agent,data}; HubToUi::PaneStream{agent,data}. Old attach/pane_output stay (native app,
+  nodes < 0.1.11). Hub keeps stream viewers apart from redraw viewers; UI Detach removes both.
+- Flow control (must have): coalesce PTY reads; bounded channel node-side so back-pressure reaches the PTY; hub drops
+  and resyncs (re-attach) a slow viewer instead of buffering. Test with `yes` and a throttled viewer.
+- Web: stream mode when node >= 0.1.11. Pick attach vs attach_stream at all three sites (select intent, held attach
+  when Starting -> Running in store.ts, reconnect replay in store.ts). In stream mode: no replay of the capped buffer;
+  request a fresh attach on mount; selection hold must queue every chunk (not keep only the latest). OSC 52 handler
+  (t.parser.registerOscHandler(52)) -> navigator.clipboard.writeText. Tell the user: drag now selects in tmux and
+  copies via OSC 52; Shift+drag is a browser selection; wheel scrolls tmux history.
+- Spike done (tmux 3.6, PTY client, mouse on): wheel enters copy-mode, drag -> OSC 52 payload equals tmux buffer,
+  no clients left after killing the client. Not yet checked: tmux 3.3a (Debian 12; escape-time 500 ms there, so Esc
+  is delayed through the client).
+- Done means: real-tmux test (attach, typed echo arrives, resize visible in `tput cols`, detach leaves no client);
+  hub late-joiner test; web tests for the three attach sites; live browser run (use double-click, the automation's
+  drag makes no xterm selection; log in with a soft-passkey token on ULAK_DEV_HTTP=1, admin socket path is too long
+  in the scratchpad so feed `otp browser` on stdin).
