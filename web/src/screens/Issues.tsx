@@ -26,7 +26,6 @@ function TagRepo({ onClose }: { onClose(): void }) {
   const add = () => {
     saveTagged(s, [...(s.issueSettings?.tagged ?? []), v]);
     onClose();
-    store.intent({ kind: 'list_issues' });
   };
   return (
     <Dialog
@@ -48,7 +47,7 @@ function IssueRow({ i, selected, onSelect }: { i: Issue; selected: boolean; onSe
   return (
     <li>
       <button type="button" class="issue-row" aria-current={selected ? 'true' : undefined} onClick={onSelect}>
-        <span class="row nowrap small muted">
+        <span class="issue-meta small muted">
           <span class="mono grow">{i.issue}</span>
           {i.tagged && <span>tagged{i.trusted ? '' : ' · external author'}</span>}
           <span>{ageLabel(s.now - i.updated_ms)}</span>
@@ -136,9 +135,11 @@ export function Issues() {
   const [reviewing, setReviewing] = useState<{ issue: Issue; templateId: string } | null>(null);
   const open = s.conn === 'open';
   const hasCred = s.credentials.length > 0;
+  // Again once the hub has saved a tag or untag (asking right after the save could beat it).
+  const taggedKey = s.issueSettings?.tagged.join(',') ?? null;
   useEffect(() => {
     if (open && hasCred) store.intent({ kind: 'list_issues' });
-  }, [open, hasCred]);
+  }, [open, hasCred, taggedKey]);
   useEffect(() => {
     if (open) store.intent({ kind: 'list_credentials' });
   }, [open]);

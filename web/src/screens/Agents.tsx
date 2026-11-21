@@ -247,7 +247,7 @@ export function Agents() {
         </div>
       </header>
       <section class={`console${s.selected ? ' has-sel' : ''}`}>
-        {s.nodes.length === 0 && <EmptyState title="No nodes connected">Add a node from the Devices page.</EmptyState>}
+        {s.nodes.length === 0 && <EmptyState title="No nodes connected">Add one on the <a href="#/nodes">Nodes</a> page.</EmptyState>}
         <div class="console-body">
           <div class="agent-col">
             {empty && s.queue.length === 0 && <EmptyState title={filter ? 'No matching agents' : 'No agents yet'}>{filter ? 'Clear the filter to see all agents.' : 'Start one with New agent.'}</EmptyState>}

@@ -251,3 +251,4 @@ a.tab[aria-current='page'] { border-bottom-color: var(--accent); color: var(--te
 .ok-note { margin: 0; color: var(--ok); }
 .node-card { display: flex; flex-direction: column; gap: 10px; }
 .warn-link { color: var(--warn); }
+.issue-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; }
