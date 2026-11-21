@@ -407,6 +407,11 @@
       "data": "AP8bW0jinJM=",
       "type": "pane_output"
     },
+    "pane_stream": {
+      "agent": "reviewer-2",
+      "data": "G1s/MTA0OWjinA==",
+      "type": "pane_stream"
+    },
     "question_closed": {
       "id": "q-1",
       "type": "question_closed"
@@ -605,6 +610,12 @@
     "attach": {
       "agent": "reviewer-2",
       "type": "attach"
+    },
+    "attach_stream": {
+      "agent": "reviewer-2",
+      "cols": 120,
+      "rows": 40,
+      "type": "attach_stream"
     },
     "cancel_queued": {
       "id": "q-1",

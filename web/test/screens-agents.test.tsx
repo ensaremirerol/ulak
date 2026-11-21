@@ -7,7 +7,7 @@ import { parseTermAgent, termHref } from '../src/ui/router';
 import { blocker, feed, freshStore, node, ofType } from './helpers';
 
 vi.mock('../src/ui/Terminal', () => ({
-  Terminal: ({ agent, fit }: { agent: string; fit: boolean }) => <div data-testid="term" data-fit={String(fit)}>{agent}</div>,
+  Terminal: ({ agent, mode }: { agent: string; mode: string }) => <div data-testid="term" data-mode={mode}>{agent}</div>,
 }));
 
 let sent: UiToHub[];
@@ -94,12 +94,14 @@ describe('Agents', () => {
     expect(sent.slice(1)).toEqual([{ type: 'detach', agent: 'a1' }, { type: 'attach', agent: 'a2' }]);
   });
 
-  it('fits the terminal only on nodes that can resize the pane', () => {
+  it('the terminal mode follows the node version: fixed, fit (0.1.10), stream (0.1.11)', () => {
     render(<Agents />);
     fireEvent.click(screen.getByText('a1'));
-    expect(screen.getByTestId('term').dataset.fit).toBe('false');
+    expect(screen.getByTestId('term').dataset.mode).toBe('fixed');
     act(() => feed(version('0.1.10')));
-    expect(screen.getByTestId('term').dataset.fit).toBe('true');
+    expect(screen.getByTestId('term').dataset.mode).toBe('fit');
+    act(() => feed(version('0.1.11')));
+    expect(screen.getByTestId('term').dataset.mode).toBe('stream');
   });
 
   const open = () => {

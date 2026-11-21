@@ -1,6 +1,6 @@
 // Pure state machine, ported from crates/ulak/src/model.rs (apply + helpers). No I/O, no signals.
 import type {
-  AgentStatus, Blocker, BlockerKind, HubToUi, NodeId, NodeInfo, ProfileInfo, Question, RepoEntry, UpdateState, VersionInfo,
+  AgentStatus, Blocker, BlockerKind, HubToUi, NodeId, NodeInfo, ProfileInfo, Question, RepoEntry, UiToHub, UpdateState, VersionInfo,
 } from '../proto';
 import type { Event, State, TermBuf, Toast, ToastKind } from './types';
 
@@ -16,7 +16,7 @@ export const STATS_CAP = 720;
 export function initialState(now = Date.now()): State {
   return {
     conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, lastFailure: {}, mailbox: [], devices: [],
-    otp: null, terminals: {}, selected: null, toasts: [], nextToastId: 1, now,
+    otp: null, terminals: {}, termSizes: {}, selected: null, toasts: [], nextToastId: 1, now,
     hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
     credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
     hubProfiles: [], nodeSettings: {}, stats: null,
@@ -61,11 +61,13 @@ export function appendPane(buf: TermBuf | undefined, data: Uint8Array, cap = TER
   const piece = data.length > cap ? data.slice(data.length - cap) : data;
   let chunks = [...(buf?.chunks ?? []), piece];
   let bytes = (buf?.bytes ?? 0) + piece.length;
+  let truncated = (buf?.truncated ?? false) || piece !== data;
   while (bytes > cap && chunks.length > 1) {
     bytes -= chunks[0]!.length;
     chunks = chunks.slice(1);
+    truncated = true;
   }
-  return { chunks, bytes, seq: (buf?.seq ?? 0) + 1 };
+  return { chunks, bytes, seq: (buf?.seq ?? 0) + 1, ...(truncated ? { truncated } : {}) };
 }
 
 /** All buffered bytes of a terminal as one array (for a terminal emulator). */
@@ -155,6 +157,7 @@ function reduceHub(s: State, f: HubToUi): State {
     case 'mailbox_log':
       return { ...s, mailbox: f.messages };
     case 'pane_output':
+    case 'pane_stream':
       return { ...s, terminals: { ...s.terminals, [f.agent]: appendPane(s.terminals[f.agent], f.data) } };
     case 'agent_status':
       return setStatus(s, f.agent, f.node, f.status);
@@ -232,6 +235,35 @@ function reduceHub(s: State, f: HubToUi): State {
 // ---- selectors (pure; wrap in `computed` for signals) ----
 
 export const nodeOf = (s: State, agent: string): NodeInfo | undefined => s.nodes.find((n) => n.agents.includes(agent));
+
+/** `version` (x.y.z, any suffix ignored) is at least `min`; false when unknown or malformed. */
+export function versionAtLeast(version: string | undefined, min: readonly [number, number, number]): boolean {
+  if (!version) return false;
+  const v = version.split(/[.+-]/).slice(0, 3).map(Number);
+  for (let i = 0; i < 3; i++) {
+    const a = v[i] ?? 0, b = min[i]!;
+    if (Number.isNaN(a)) return false;
+    if (a !== b) return a > b;
+  }
+  return true;
+}
+
+/** Nodes from 0.1.11 stream a real terminal (`attach_stream`); older ones send redraws. */
+export const STREAM_SINCE = [0, 1, 11] as const;
+export const streams = (s: State, agent: string): boolean => {
+  const n = nodeOf(s, agent);
+  return n !== undefined && versionAtLeast(s.nodeVersions[n.id]?.version, STREAM_SINCE);
+};
+
+/** Size a stream starts at before the terminal has measured itself. */
+export const DEFAULT_TERM_SIZE = { cols: 120, rows: 40 } as const;
+
+/** The frame that starts watching `agent`: a stream where the node can, else redraws. */
+export function attachFrame(s: State, agent: string): UiToHub {
+  if (!streams(s, agent)) return { type: 'attach', agent };
+  const { cols, rows } = s.termSizes[agent] ?? DEFAULT_TERM_SIZE;
+  return { type: 'attach_stream', agent, cols, rows };
+}
 export const questionAgeMs = (s: State, q: Question): number => Math.max(0, s.now - q.at_ms);
 
 /** Open blockers of `profile` on `node`, or on any node when `node` is undefined. */

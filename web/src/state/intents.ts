@@ -1,6 +1,6 @@
 import type { HubProfile, NodeSettings, UiToHub } from '../proto';
 import { utf8 } from '../proto';
-import { awaitsSession, MAILBOX_LIMIT } from './reducer';
+import { attachFrame, awaitsSession, MAILBOX_LIMIT } from './reducer';
 import type { Intent, ProfileForm, SettingsForm, SpawnForm, State, Tri } from './types';
 
 /** A form or input the hub would reject; the message says what to fix. */
@@ -169,7 +169,7 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
     case 'select':
       if (s.selected === i.agent) return [];
       // A starting agent has no session yet: the store attaches once it is Running.
-      return [...(s.selected ? [{ type: 'detach', agent: s.selected } as const] : []), ...(awaitsSession(s.statuses[i.agent]) ? [] : [{ type: 'attach', agent: i.agent } as const])];
+      return [...(s.selected ? [{ type: 'detach', agent: s.selected } as const] : []), ...(awaitsSession(s.statuses[i.agent]) ? [] : [attachFrame(s, i.agent)])];
     case 'detach':
       return s.selected ? [{ type: 'detach', agent: s.selected }] : [];
     case 'send_keys':
@@ -199,6 +199,8 @@ export function intentToFrames(s: State, i: Intent): UiToHub[] {
       return [{ type: 'kill', agent: i.agent }];
     case 'resize':
       return [{ type: 'resize', agent: i.agent, cols: Math.round(i.cols), rows: Math.round(i.rows) }];
+    case 'reattach':
+      return [attachFrame(s, i.agent)];
     case 'add_device':
       return [{ type: 'add_device', kind: i.device }];
     case 'revoke_device':
@@ -245,6 +247,12 @@ export function applyIntentLocally(s: State, i: Intent): State {
     }
     case 'detach':
       return { ...s, selected: null };
+    case 'resize':
+      return { ...s, termSizes: { ...s.termSizes, [i.agent]: { cols: Math.round(i.cols), rows: Math.round(i.rows) } } };
+    case 'reattach': {
+      const { [i.agent]: _old, ...terminals } = s.terminals;
+      return { ...s, terminals };
+    }
     case 'kill':
       return s.selected === i.agent ? { ...s, selected: null } : s;
     case 'add_device':

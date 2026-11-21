@@ -23,3 +23,14 @@ describe('terminal copy', () => {
     expect(termText(fake('', ['a', 'b', '', '']))).toBe('a\nb');
   });
 });
+
+describe('OSC 52', () => {
+  it('decodes the text tmux copies, ignores queries and junk', async () => {
+    const { osc52Text } = await import('../src/ui/Terminal');
+    expect(osc52Text(`c;${btoa('hello')}`)).toBe('hello');
+    expect(osc52Text(';' + btoa(String.fromCharCode(...new TextEncoder().encode('ü ✓'))))).toBe('ü ✓');
+    expect(osc52Text('c;?')).toBeNull();
+    expect(osc52Text('c;')).toBeNull();
+    expect(osc52Text('c;!!!')).toBeNull();
+  });
+});

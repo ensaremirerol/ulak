@@ -29,6 +29,12 @@ pub enum DaemonToHub {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
+    /// Raw bytes of the agent's tmux client (stream mode, `AttachStream`): a byte stream, not redraws.
+    PaneStream {
+        agent: AgentId,
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
     /// The agent cannot work until the user fixes something (login) or ulakd could not install it.
     AgentBlocked {
         agent: AgentId,
@@ -134,6 +140,17 @@ pub enum HubToDaemon {
         cols: u16,
         rows: u16,
     },
+    /// Stream the agent's terminal (a tmux client in a PTY) as `PaneStream`; a repeat restarts the
+    /// client, so every viewer gets a full repaint. Nodes before 0.1.11 ignore it.
+    AttachStream {
+        agent: AgentId,
+        cols: u16,
+        rows: u16,
+    },
+    /// No stream viewer is left for the agent.
+    DetachStream {
+        agent: AgentId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +175,13 @@ pub enum UiToHub {
     },
     /// The viewer's terminal size for the agent's pane; the last resize wins across viewers.
     Resize {
+        agent: AgentId,
+        cols: u16,
+        rows: u16,
+    },
+    /// Watch the agent as a raw terminal stream (`PaneStream`) instead of redraws (`Attach`).
+    /// `Detach` ends either kind.
+    AttachStream {
         agent: AgentId,
         cols: u16,
         rows: u16,
@@ -271,6 +295,12 @@ pub enum HubToUi {
     },
     MessageLogged(Message),
     PaneOutput {
+        agent: AgentId,
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// Raw bytes of the agent's tmux client (stream mode, `AttachStream`), relayed from the node: a byte stream, not redraws.
+    PaneStream {
         agent: AgentId,
         #[serde(with = "b64")]
         data: Vec<u8>,

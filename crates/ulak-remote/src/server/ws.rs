@@ -10,7 +10,13 @@ use axum::{
     response::{IntoResponse, Response},
     Extension,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::{broadcast, mpsc};
 use ulak_proto::*;
 
@@ -236,6 +242,7 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
             });
         }
         DaemonToHub::PaneOutput { agent, data } => h.pane_output(agent, data),
+        DaemonToHub::PaneStream { agent, data } => h.pane_stream(id, agent, data),
         DaemonToHub::Version(info) => {
             if info.proto() < MIN_DAEMON_PROTO {
                 return Err(ServerError::DaemonTooOld {
@@ -288,6 +295,8 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
     let mut kick = h.kick.subscribe();
     let conn = h.new_conn();
     let (tx, mut own) = mpsc::unbounded_channel();
+    // Stream bytes handed to `own` but not yet written to this socket (see `Hub::pane_stream`).
+    let queued = Arc::new(AtomicUsize::new(0));
     let snap = Questions::pending(&*h.store).map(|questions| HubToUi::Snapshot {
         nodes: h.registry.snapshot(),
         questions,
@@ -383,7 +392,7 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
         tokio::select! {
             m = s.recv() => match m {
                 Some(Ok(Message::Text(t))) => {
-                    let r = decode::<UiToHub>(&t).map_err(ServerError::from).and_then(|m| on_ui(&h, conn, &tx, m));
+                    let r = decode::<UiToHub>(&t).map_err(ServerError::from).and_then(|m| on_ui(&h, conn, &tx, &queued, m));
                     if let Err(e) = r {
                         if !send(&mut s, &HubToUi::Error { message: e.to_string() }).await { break }
                     }
@@ -396,7 +405,12 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            Some(m) = own.recv() => if !send(&mut s, &m).await { break },
+            Some(m) = own.recv() => {
+                if !send(&mut s, &m).await { break }
+                if let HubToUi::PaneStream { data, .. } = &m {
+                    queued.fetch_sub(data.len(), Ordering::Relaxed);
+                }
+            }
             () = kicked(&mut kick, &id, &sess) => break,
         }
     }
@@ -444,6 +458,7 @@ fn on_ui(
     h: &Arc<Hub>,
     conn: u64,
     tx: &mpsc::UnboundedSender<HubToUi>,
+    queued: &Arc<AtomicUsize>,
     m: UiToHub,
 ) -> Result<(), ServerError> {
     let now = now_ms();
@@ -505,13 +520,30 @@ fn on_ui(
             )?;
             h.attach(conn, tx, &agent);
         }
+        UiToHub::AttachStream { agent, cols, rows } => {
+            let node = h.node_of_agent(&agent)?;
+            h.attach_stream(conn, tx, queued, &agent, (cols, rows));
+            // Also for a second viewer: the node restarts its client, so this one gets a full repaint.
+            h.to_daemon(&node, HubToDaemon::AttachStream { agent, cols, rows })?;
+        }
         UiToHub::Detach { agent } => {
+            if h.detach_stream(conn, &agent) {
+                if let Ok(node) = h.node_of_agent(&agent) {
+                    h.to_daemon(
+                        &node,
+                        HubToDaemon::DetachStream {
+                            agent: agent.clone(),
+                        },
+                    )?;
+                }
+            }
             if h.detach(conn, &agent) {
                 let node = h.node_of_agent(&agent)?;
                 h.to_daemon(&node, HubToDaemon::Detach { agent })?;
             }
         }
         UiToHub::Resize { agent, cols, rows } => {
+            h.stream_resized(&agent, (cols, rows));
             let node = h.node_of_agent(&agent)?;
             h.to_daemon(&node, HubToDaemon::Resize { agent, cols, rows })?;
         }

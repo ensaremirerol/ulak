@@ -264,6 +264,8 @@ pub struct Tmux {
     claims: Claims,
     /// Held across scan+pick+claim (spawn) and scan+judge+delete (clean).
     repo_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Stream clients (`tmux attach` in a PTY) of streamed agents; dropping one kills it.
+    streams: Arc<std::sync::Mutex<HashMap<AgentId, crate::pty::Pty>>>,
 }
 
 impl Tmux {
@@ -300,6 +302,7 @@ impl Tmux {
             prompt_failures: Arc::new(tokio::sync::Mutex::new(rx)),
             claims: Claims::default(),
             repo_lock: Arc::default(),
+            streams: Arc::default(),
         }
     }
 
@@ -1016,8 +1019,111 @@ impl Tmux {
 
     /// Raw terminal input (keystrokes from the UI), pasted as-is.
     pub async fn input_agent(&self, id: &AgentId, data: &[u8]) -> Result<(), AgentError> {
+        // A streamed agent gets the bytes through its client, as typed (tmux answers, keys, mouse).
+        if let Some(r) = self.with_stream(id, |p| p.write(data)) {
+            return r.map_err(AgentError::from);
+        }
         self.ensure_running(id).await?;
         self.paste(id, data, false).await
+    }
+
+    /// Runs `f` on the agent's live stream client; `None` without one (a dead one is dropped).
+    fn with_stream<T>(&self, id: &AgentId, f: impl FnOnce(&crate::pty::Pty) -> T) -> Option<T> {
+        let mut m = self
+            .streams
+            .lock()
+            .expect("streams lock is never held across a panic");
+        let alive = m.get_mut(id).map(|p| p.alive())?;
+        if alive {
+            m.get(id).map(f)
+        } else {
+            m.remove(id);
+            None
+        }
+    }
+
+    /// Starts a `tmux attach` client for the agent in a PTY of `cols` x `rows` and streams what it
+    /// writes. The session gets no status line and mouse on (wheel scrolls its history, a drag
+    /// copies via OSC 52); options are set on that session only, never globally.
+    pub async fn stream_agent(
+        &self,
+        id: &AgentId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+        self.ensure_running(id).await?;
+        let sess = id.tmux_session();
+        for (action, argv) in [
+            (
+                "set-option",
+                vec![
+                    s("set-option"),
+                    s("-t"),
+                    sess.clone(),
+                    s("status"),
+                    s("off"),
+                ],
+            ),
+            (
+                "set-option",
+                vec![s("set-option"), s("-t"), sess.clone(), s("mouse"), s("on")],
+            ),
+            // 0.1.10's resize-window pinned the size: let the client's size count again.
+            (
+                "set-window-option",
+                vec![
+                    s("set-window-option"),
+                    s("-t"),
+                    sess.clone(),
+                    s("window-size"),
+                    s("latest"),
+                ],
+            ),
+        ] {
+            self.run(action, argv, None).await?;
+        }
+        let mut argv = vec![s("tmux")];
+        if let Some(sock) = &self.socket {
+            argv.extend([s("-L"), sock.clone()]);
+        }
+        argv.extend([s("attach-session"), s("-t"), sess]);
+        let (cols, rows) = (
+            cols.clamp(*COLS.start(), *COLS.end()),
+            rows.clamp(*ROWS.start(), *ROWS.end()),
+        );
+        let pty = crate::pty::Pty::spawn(&argv, &[("TERM", "xterm-256color")], cols, rows)?;
+        let mut reader = pty.reader()?;
+        // Small and bounded: a slow hub blocks this reader, the PTY fills and tmux throttles the client.
+        let (tx, rx) = mpsc::channel(4);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = vec![0u8; 64 << 10];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break, // EOF / EIO: the client is gone
+                    Ok(n) => {
+                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        // Replacing an old client kills it (Drop); the new one repaints in full for every viewer.
+        self.streams
+            .lock()
+            .expect("streams lock is never held across a panic")
+            .insert(id.clone(), pty);
+        Ok(rx)
+    }
+
+    pub fn unstream_agent(&self, id: &AgentId) {
+        let old = self
+            .streams
+            .lock()
+            .expect("streams lock is never held across a panic")
+            .remove(id);
+        drop(old);
     }
 
     /// Streams the pane as terminal bytes: each change is a full redraw (clear + screen).
@@ -1065,9 +1171,27 @@ impl AgentHost for Tmux {
         self.kill_agent(id).await
     }
     async fn resize(&self, id: &AgentId, cols: u16, rows: u16) -> Result<(), AgentError> {
+        let (c, r) = (
+            cols.clamp(*COLS.start(), *COLS.end()),
+            rows.clamp(*ROWS.start(), *ROWS.end()),
+        );
+        if let Some(res) = self.with_stream(id, |p| p.resize(c, r)) {
+            return res.map_err(AgentError::from);
+        }
         self.run("resize-window", resize_argv(id, cols, rows), None)
             .await
             .map(drop)
+    }
+    async fn attach_stream(
+        &self,
+        id: &AgentId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, AgentError> {
+        self.stream_agent(id, cols, rows).await
+    }
+    fn detach_stream(&self, id: &AgentId) {
+        self.unstream_agent(id);
     }
     async fn nudge(&self, id: &AgentId, text: &str) -> Result<(), AgentError> {
         self.nudge_agent(id, text).await

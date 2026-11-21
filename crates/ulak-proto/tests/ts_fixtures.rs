@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 28;
-const HUB_VARIANTS: usize = 32;
+const UI_VARIANTS: usize = 29;
+const HUB_VARIANTS: usize = 33;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -112,6 +112,7 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::Detach { .. } => "detach",
         UiToHub::PaneInput { .. } => "pane_input",
         UiToHub::Resize { .. } => "resize",
+        UiToHub::AttachStream { .. } => "attach_stream",
         UiToHub::Kill { .. } => "kill",
         UiToHub::AddDevice { .. } => "add_device",
         UiToHub::RevokeDevice { .. } => "revoke_device",
@@ -148,6 +149,7 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::QuestionClosed { .. } => "question_closed",
         HubToUi::MessageLogged(_) => "message_logged",
         HubToUi::PaneOutput { .. } => "pane_output",
+        HubToUi::PaneStream { .. } => "pane_stream",
         HubToUi::AgentStatus { .. } => "agent_status",
         HubToUi::OtpOffer { .. } => "otp_offer",
         HubToUi::Devices { .. } => "devices",
@@ -229,6 +231,14 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
         (
             "resize",
             UiToHub::Resize {
+                agent: agent(),
+                cols: 120,
+                rows: 40,
+            },
+        ),
+        (
+            "attach_stream",
+            UiToHub::AttachStream {
                 agent: agent(),
                 cols: 120,
                 rows: 40,
@@ -468,6 +478,13 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
             HubToUi::PaneOutput {
                 agent: agent(),
                 data: vec![0, 255, 27, b'[', b'H', 0xe2, 0x9c, 0x93],
+            },
+        ),
+        (
+            "pane_stream",
+            HubToUi::PaneStream {
+                agent: agent(),
+                data: vec![27, b'[', b'?', b'1', b'0', b'4', b'9', b'h', 0xe2, 0x9c],
             },
         ),
         ("agent_status_starting", status(AgentStatus::Starting)),

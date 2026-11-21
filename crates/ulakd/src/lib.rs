@@ -8,6 +8,7 @@ pub mod guard;
 pub mod hub;
 pub mod join;
 pub mod mcp;
+pub mod pty;
 pub mod renew;
 pub mod repos;
 pub mod telemetry;

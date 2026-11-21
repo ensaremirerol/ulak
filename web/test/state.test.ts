@@ -517,3 +517,47 @@ describe('profile installs', () => {
     expect(save('npm i -g x\nx --version\n')).toEqual([{ type: 'save_profile', node: null, profile: { name: 'cw', binary: 'claude', install: 'npm i -g x\nx --version' } }]);
   });
 });
+
+describe('terminal stream (nodes from 0.1.11)', () => {
+  const on = (version: string) => apply(fresh(), { type: 'node_update', ...node('n1', 'box', ['a1']) }, { type: 'node_version', node: 'n1', info: vi(version, 'g', 1) });
+
+  it('picks attach_stream at the last fitted size on 0.1.11, plain attach before', () => {
+    expect(dispatch(on('0.1.10'), { kind: 'select', agent: 'a1' }).frames).toEqual([{ type: 'attach', agent: 'a1' }]);
+    expect(dispatch(on('0.1.11'), { kind: 'select', agent: 'a1' }).frames).toEqual([{ type: 'attach_stream', agent: 'a1', cols: 120, rows: 40 }]);
+    const sized = dispatch(on('0.1.11'), { kind: 'resize', agent: 'a1', cols: 90.4, rows: 30 });
+    expect(sized.frames).toEqual([{ type: 'resize', agent: 'a1', cols: 90, rows: 30 }]);
+    expect(dispatch(sized.state, { kind: 'select', agent: 'a1' }).frames).toEqual([{ type: 'attach_stream', agent: 'a1', cols: 90, rows: 30 }]);
+  });
+
+  it('every attach site streams: select, Starting -> Running, reconnect', () => {
+    const store = createStore(on('0.1.11'));
+    const sent: unknown[] = [];
+    store.setSender((f) => { sent.push(f); return 'sent'; });
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Starting' } });
+    store.intent({ kind: 'select', agent: 'a1' });
+    expect(sent).toEqual([]);
+    store.dispatch({ kind: 'hub', frame: { type: 'agent_status', agent: 'a1', node: 'n1', status: 'Running' } });
+    expect(sent).toEqual([{ type: 'attach_stream', agent: 'a1', cols: 120, rows: 40 }]);
+    expect(store.resync().at(-1)).toEqual({ type: 'attach_stream', agent: 'a1', cols: 120, rows: 40 });
+  });
+
+  it('pane_stream buffers and reaches listeners; reattach drops the buffer and restarts the stream', () => {
+    const store = createStore(on('0.1.11'));
+    store.setSender(() => 'sent');
+    const got: string[] = [];
+    store.onPane('a1', (d) => got.push(new TextDecoder().decode(d)));
+    store.onFrame({ type: 'pane_stream', agent: 'a1', data: bytes('abc') });
+    expect(got).toEqual(['abc']);
+    expect(Array.from(termBytes(store.state.value.terminals.a1))).toEqual(Array.from(bytes('abc')));
+    expect(dispatch(store.state.value, { kind: 'reattach', agent: 'a1' })).toMatchObject({ frames: [{ type: 'attach_stream', agent: 'a1' }] });
+    expect(dispatch(store.state.value, { kind: 'reattach', agent: 'a1' }).state.terminals.a1).toBeUndefined();
+  });
+
+  it('a capped buffer says it was truncated (a stream cannot be replayed then)', () => {
+    let b = appendPane(undefined, bytes('aaaa'), 6);
+    expect(b.truncated).toBeUndefined();
+    b = appendPane(b, bytes('bbbb'), 6);
+    expect(b.truncated).toBe(true);
+    expect(appendPane(undefined, bytes('0123456789'), 6).truncated).toBe(true);
+  });
+});

@@ -135,3 +135,121 @@ async fn prompt_typing_failure_is_reported() {
         .args(["-L", &sock, "kill-server"])
         .output();
 }
+
+/// Reads the stream until `needle` shows up (or 10 s pass).
+async fn stream_until(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, needle: &str) -> String {
+    let mut seen = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(b) = rx.recv().await {
+            seen.extend_from_slice(&b);
+            if String::from_utf8_lossy(&seen).contains(needle) {
+                break;
+            }
+        }
+    })
+    .await;
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+#[tokio::test]
+async fn stream_types_through_the_client_resizes_and_leaves_no_client() {
+    if !have_tmux() {
+        eprintln!("tmux not installed; skipping");
+        return;
+    }
+    let sock = format!("ulakd-stream-{}", std::process::id());
+    let t = Tmux::new(Some(sock.clone()))
+        .with_delays(Duration::from_millis(200), Duration::from_millis(50));
+    let sp = SpawnSpec::new(
+        AgentId::new("st1").unwrap(),
+        AgentProfile::new("sh", vec!["-i".into()], None).unwrap(),
+        std::env::temp_dir(),
+        "true".into(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    t.spawn_agent(&sp).await.unwrap();
+    let id = sp.agent_id();
+    let tmux = |args: &[&str]| {
+        let o = Command::new("tmux")
+            .args(["-L", &sock])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    };
+    // 0.1.10 pins the size; streaming must undo it.
+    AgentHost::resize(&t, id, 150, 45).await.unwrap();
+
+    let mut rx = AgentHost::attach_stream(&t, id, 100, 30).await.unwrap();
+    for _ in 0..40 {
+        if !tmux(&["list-clients"]).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        tmux(&["list-clients", "-F", "#{client_width}x#{client_height}"]),
+        "100x30"
+    );
+    assert_eq!(
+        tmux(&["show-options", "-v", "-t", &id.tmux_session(), "status"]),
+        "off"
+    );
+    assert_eq!(
+        tmux(&["show-options", "-v", "-t", &id.tmux_session(), "mouse"]),
+        "on"
+    );
+    assert_eq!(
+        tmux(&["show-options", "-gv", "mouse"]),
+        "off",
+        "options must stay per session"
+    );
+
+    // Input goes through the client, as typed.
+    t.input_agent(id, b"echo stream-$((6*7))\r").await.unwrap();
+    assert!(stream_until(&mut rx, "stream-42")
+        .await
+        .contains("stream-42"));
+    AgentHost::resize(&t, id, 90, 25).await.unwrap();
+    for _ in 0..40 {
+        let w = tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &id.tmux_session(),
+            "#{window_width}x#{window_height}",
+        ]);
+        if w == "90x25" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // tmux applies a pane's tty size on a short timer after the window changes.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    t.input_agent(id, b"echo size=$(stty size)\r")
+        .await
+        .unwrap();
+    let seen = stream_until(&mut rx, "size=25 90").await;
+    assert!(
+        seen.contains("size=25 90"),
+        "{:?}",
+        &seen[seen.len().saturating_sub(400)..]
+    );
+
+    // A second attach replaces the client: still one client.
+    let _rx2 = AgentHost::attach_stream(&t, id, 80, 24).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(tmux(&["list-clients", "-F", "#{client_width}"]), "80");
+    AgentHost::detach_stream(&t, id);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(tmux(&["list-clients"]), "");
+    // Without a client, input falls back to the paste path.
+    t.input_agent(id, b"echo pasted\r").await.unwrap();
+    assert!(screen(&t, id, "pasted").await);
+
+    t.kill_agent(id).await.unwrap();
+    let _ = Command::new("tmux")
+        .args(["-L", &sock, "kill-server"])
+        .output();
+}

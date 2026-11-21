@@ -76,7 +76,26 @@ export const isCopyKey = (e: KeyboardEvent, selected: boolean): boolean =>
 export interface TerminalHandle { text(): string }
 
 /** xterm.js bound to one agent: replays the buffered bytes, then writes chunks as they arrive. */
-export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; handle?: Ref<TerminalHandle> }) {
+/** `fixed`: redraws at 200x50 (nodes < 0.1.10); `fit`: redraws sized to the box; `stream`: the tmux client's raw bytes. */
+export type TermMode = 'fixed' | 'fit' | 'stream';
+
+/** Stream bytes queued behind a selection before the hold gives up (the selection is then cleared). */
+const HOLD_CAP_BYTES = 1 << 20;
+
+/** OSC 52 (`<target>;<base64>`) -> the text to copy; null for a query (`?`) or bad data. */
+export function osc52Text(data: string): string | null {
+  const b64 = data.slice(data.indexOf(';') + 1);
+  if (!b64 || b64 === '?') return null;
+  try {
+    return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+}
+
+export function Terminal({ agent, mode, handle }: { agent: string; mode: TermMode; handle?: Ref<TerminalHandle> }) {
+  const fit = mode !== 'fixed';
+  const stream = mode === 'stream';
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<XTerm | null>(null);
   const fitter = useRef<FitAddon | null>(null);
@@ -105,6 +124,17 @@ export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; 
       void navigator.clipboard?.writeText(t.getSelection());
       e.preventDefault();
       return false;
+    });
+    // tmux copies a mouse selection with OSC 52: put it on the clipboard.
+    t.parser.registerOscHandler(52, (data) => {
+      const text = osc52Text(data);
+      if (text) {
+        navigator.clipboard?.writeText(text).then(
+          () => store.toast('ok', 'Copied.'),
+          () => store.toast('info', 'Copy is not available here: Shift+drag to select, then Ctrl+C.'),
+        );
+      }
+      return true;
     });
     t.onData((d) => store.intent({ kind: 'send_keys', data: utf8(d) }));
     term.current = t;
@@ -145,7 +175,10 @@ export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; 
   useEffect(() => {
     const t = term.current!;
     t.reset();
-    const old = termBytes(store.state.peek().terminals[agent]);
+    const buf = store.state.peek().terminals[agent];
+    // A byte stream replays only from its start: a capped buffer asks the node for a fresh full repaint instead.
+    const old = stream && buf?.truncated ? new Uint8Array() : termBytes(buf);
+    if (stream && buf?.truncated) store.intent({ kind: 'reattach', agent });
     const follow = () => {
       const h = host.current;
       if (!h || fit) return; // a fitted terminal shows the whole pane
@@ -153,15 +186,18 @@ export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; 
     };
     if (old.length > 0) t.write(old, follow);
     t.focus();
-    // Every chunk is a full redraw, which wipes xterm's selection: while the user drags or has text selected, hold
-    // the redraws and apply only the latest once the selection is gone.
-    let held: Uint8Array | null = null;
+    // New output wipes xterm's selection: while the user drags or has text selected, hold it back. Redraws keep
+    // only the latest (each is a full screen); a stream keeps every chunk in order, up to HOLD_CAP_BYTES. In stream
+    // mode a plain drag belongs to tmux (mouse on), so only an xterm selection (Shift+drag) holds.
+    let held: Uint8Array[] = [];
+    let heldBytes = 0;
     let dragging = false;
-    const holding = () => dragging || t.hasSelection();
+    const holding = () => (!stream && dragging) || t.hasSelection();
     const flush = () => {
-      if (held && !holding()) {
-        t.write(held, follow);
-        held = null;
+      if (held.length && !holding()) {
+        for (const c of held) t.write(c, follow);
+        held = [];
+        heldBytes = 0;
       }
     };
     const h = host.current!;
@@ -174,8 +210,20 @@ export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; 
     window.addEventListener('mouseup', up);
     const sel = t.onSelectionChange(flush);
     const off = store.onPane(agent, (d) => {
-      if (holding()) held = d;
-      else t.write(d, follow);
+      if (!holding()) {
+        t.write(d, follow);
+        return;
+      }
+      if (!stream) {
+        held = [d];
+        return;
+      }
+      held.push(d);
+      heldBytes += d.length;
+      if (heldBytes > HOLD_CAP_BYTES) {
+        t.clearSelection();
+        flush();
+      }
     });
     return () => {
       off();
@@ -183,7 +231,7 @@ export function Terminal({ agent, fit, handle }: { agent: string; fit: boolean; 
       h.removeEventListener('mousedown', down);
       window.removeEventListener('mouseup', up);
     };
-  }, [agent, fit]);
+  }, [agent, fit, stream]);
 
   return <div class={`term-host${fit ? ' term-fit' : ''}`} ref={host} />;
 }

@@ -15,7 +15,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::Duration,
@@ -149,6 +149,8 @@ pub struct Hub {
     pub(crate) kick: broadcast::Sender<NodeId>,
     /// agent -> (UI connection id -> its outbox): who sent Attach for that agent.
     attached: Mutex<HashMap<AgentId, HashMap<u64, mpsc::UnboundedSender<HubToUi>>>>,
+    /// Raw-stream viewers per agent (`AttachStream`), apart from redraw viewers.
+    streams: Mutex<HashMap<AgentId, Streamed>>,
     next_conn: AtomicU64,
     mcp_url: OnceLock<String>,
     first_san: String,
@@ -249,6 +251,7 @@ impl Hub {
             answered: broadcast::channel(64).0,
             kick: broadcast::channel(16).0,
             attached: Mutex::default(),
+            streams: Mutex::default(),
             next_conn: AtomicU64::new(0),
             mcp_url: OnceLock::new(),
             // WebAuthn needs a domain name, so prefer the first SAN that is not an IP address.
@@ -332,6 +335,89 @@ impl Hub {
             .insert(conn, tx.clone());
     }
 
+    fn streamed(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Streamed>> {
+        self.streams
+            .lock()
+            .expect("stream map lock is never held across a panic")
+    }
+
+    /// Adds `conn` as a stream viewer of `agent` at `cols` x `rows` (the newest size wins).
+    /// `queued`: that connection's stream bytes not yet written to its socket.
+    pub(crate) fn attach_stream(
+        &self,
+        conn: u64,
+        tx: &mpsc::UnboundedSender<HubToUi>,
+        queued: &Arc<AtomicUsize>,
+        agent: &AgentId,
+        size: (u16, u16),
+    ) {
+        let mut m = self.streamed();
+        let e = m.entry(agent.clone()).or_insert_with(|| Streamed {
+            size,
+            viewers: HashMap::new(),
+        });
+        e.size = size;
+        e.viewers.insert(
+            conn,
+            Viewer {
+                tx: tx.clone(),
+                queued: queued.clone(),
+                lagged: false,
+            },
+        );
+    }
+
+    /// Records a viewer's new size for later stream restarts.
+    pub(crate) fn stream_resized(&self, agent: &AgentId, size: (u16, u16)) {
+        if let Some(e) = self.streamed().get_mut(agent) {
+            e.size = size;
+        }
+    }
+
+    /// Drops `conn` as a stream viewer of `agent`; true if no stream viewer is left.
+    pub(crate) fn detach_stream(&self, conn: u64, agent: &AgentId) -> bool {
+        let mut m = self.streamed();
+        let Some(e) = m.get_mut(agent) else {
+            return false;
+        };
+        if e.viewers.remove(&conn).is_none() || !e.viewers.is_empty() {
+            return false;
+        }
+        m.remove(agent);
+        true
+    }
+
+    /// Relays stream bytes. A viewer whose socket is [`VIEWER_QUEUE_CAP`] behind gets nothing more
+    /// (a byte stream cannot skip parts); once it has caught up the stream restarts, which repaints
+    /// every viewer in full.
+    pub(crate) fn pane_stream(&self, node: &NodeId, agent: AgentId, data: Vec<u8>) {
+        let mut resync = None;
+        if let Some(e) = self.streamed().get_mut(&agent) {
+            for v in e.viewers.values_mut() {
+                let q = v.queued.load(Ordering::Relaxed);
+                if v.lagged {
+                    if q == 0 {
+                        v.lagged = false;
+                        resync = Some(e.size);
+                    }
+                    continue;
+                }
+                if q + data.len() > VIEWER_QUEUE_CAP {
+                    v.lagged = true;
+                    continue;
+                }
+                v.queued.fetch_add(data.len(), Ordering::Relaxed);
+                let _ = v.tx.send(HubToUi::PaneStream {
+                    agent: agent.clone(),
+                    data: data.clone(),
+                });
+            }
+        }
+        if let Some((cols, rows)) = resync {
+            let _ = self.to_daemon(node, HubToDaemon::AttachStream { agent, cols, rows });
+        }
+    }
+
     /// Drops `conn`'s attachment to `agent`; true if nobody is attached any more.
     pub(crate) fn detach(&self, conn: u64, agent: &AgentId) -> bool {
         let mut a = self.attachments();
@@ -347,6 +433,14 @@ impl Hub {
 
     /// A UI connection ended: detach it everywhere and stop pane streams nobody watches.
     pub(crate) fn detach_all(&self, conn: u64) {
+        let streamed: Vec<AgentId> = self.streamed().keys().cloned().collect();
+        for agent in streamed {
+            if self.detach_stream(conn, &agent) {
+                if let Ok(node) = self.node_of_agent(&agent) {
+                    let _ = self.to_daemon(&node, HubToDaemon::DetachStream { agent });
+                }
+            }
+        }
         let agents: Vec<AgentId> = self.attachments().keys().cloned().collect();
         for agent in agents {
             if self.detach(conn, &agent) {
@@ -800,4 +894,19 @@ async fn renew(
         Err(EnrollError::InvalidKey) => StatusCode::BAD_REQUEST.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Stream bytes a viewer's socket may be behind before it is skipped and later resynced.
+pub(crate) const VIEWER_QUEUE_CAP: usize = 4 << 20;
+
+pub(crate) struct Streamed {
+    /// Latest viewer size (attach or resize): a restart uses it.
+    size: (u16, u16),
+    viewers: HashMap<u64, Viewer>,
+}
+
+struct Viewer {
+    tx: mpsc::UnboundedSender<HubToUi>,
+    queued: Arc<AtomicUsize>,
+    lagged: bool,
 }

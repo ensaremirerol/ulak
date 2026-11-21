@@ -1,6 +1,6 @@
 [package]
 name = "ulakd"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 
 [lib]
@@ -30,6 +30,7 @@ ureq = { version = "3", default-features = false, features = ["rustls-no-provide
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4", default-features = false }
+libc = "0.2"
 
 [dev-dependencies]
 # Test builds trust a test key and allow http (see src/update/trust.rs); never in a normal build.

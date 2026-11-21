@@ -1758,3 +1758,137 @@ async fn admin_otp_enrolls_a_ui_once_and_admin_revoke_closes_its_socket() {
     assert!(closed(&mut ws).await);
     sock.close();
 }
+
+/// Next `PaneStream` bytes on a UI socket, skipping other frames.
+async fn stream_bytes(u: &mut Ws) -> Vec<u8> {
+    until(u, |m| match m {
+        HubToUi::PaneStream { data, .. } => Some(data),
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test]
+async fn stream_viewers_late_joiners_resize_and_detach() {
+    let fx = start(fast()).await;
+    let (mut u1, mut u2) = (ui(&fx).await, ui(&fx).await);
+    let a = agent("a-1");
+    let (_id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![a.clone()]).await;
+    until(&mut u1, |m| {
+        matches!(m, HubToUi::NodeUpdate(_)).then_some(())
+    })
+    .await;
+    let attach = |cols| UiToHub::AttachStream {
+        agent: a.clone(),
+        cols,
+        rows: 40,
+    };
+    let at_node = |cols| HubToDaemon::AttachStream {
+        agent: a.clone(),
+        cols,
+        rows: 40,
+    };
+    send(&mut u1, &attach(100)).await;
+    assert_eq!(recv::<HubToDaemon>(&mut d).await, at_node(100));
+    let out = |data: &[u8]| DaemonToHub::PaneStream {
+        agent: a.clone(),
+        data: data.to_vec(),
+    };
+    send(&mut d, &out(b"\x1b[?1049hone")).await;
+    assert_eq!(stream_bytes(&mut u1).await, b"\x1b[?1049hone");
+    // A late joiner restarts the client (full repaint for both).
+    send(&mut u2, &attach(80)).await;
+    assert_eq!(recv::<HubToDaemon>(&mut d).await, at_node(80));
+    send(&mut d, &out(b"two")).await;
+    assert_eq!(stream_bytes(&mut u1).await, b"two");
+    assert_eq!(stream_bytes(&mut u2).await, b"two");
+    send(
+        &mut u2,
+        &UiToHub::Resize {
+            agent: a.clone(),
+            cols: 90,
+            rows: 30,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::Resize { cols: 90, .. }
+    ));
+    // The stream ends only when its last viewer leaves.
+    send(&mut u1, &UiToHub::Detach { agent: a.clone() }).await;
+    send(&mut u2, &UiToHub::Detach { agent: a.clone() }).await;
+    assert_eq!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::DetachStream { agent: a.clone() }
+    );
+}
+
+#[tokio::test]
+async fn a_stream_viewer_that_falls_behind_is_skipped_then_resynced() {
+    let fx = start(fast()).await;
+    let mut slow = ui(&fx).await;
+    let a = agent("a-1");
+    let (_id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![a.clone()]).await;
+    until(&mut slow, |m| {
+        matches!(m, HubToUi::NodeUpdate(_)).then_some(())
+    })
+    .await;
+    send(
+        &mut slow,
+        &UiToHub::AttachStream {
+            agent: a.clone(),
+            cols: 100,
+            rows: 40,
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::AttachStream { .. }
+    ));
+    // 24 MiB while the viewer reads nothing: far more than its queue cap plus socket buffers.
+    let chunk = vec![b'x'; 512 << 10];
+    for _ in 0..48 {
+        send(
+            &mut d,
+            &DaemonToHub::PaneStream {
+                agent: a.clone(),
+                data: chunk.clone(),
+            },
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Drain what the hub did queue for it.
+    let mut got = 0;
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(500), slow.next()).await
+    {
+        if let Message::Text(t) = m {
+            if let Ok(HubToUi::PaneStream { data, .. }) = decode::<HubToUi>(&t) {
+                got += data.len();
+            }
+        }
+    }
+    assert!(
+        got < 48 * chunk.len(),
+        "a lagging viewer was not skipped ({got} bytes)"
+    );
+    // Caught up: the next output restarts the stream at the viewer's size.
+    send(
+        &mut d,
+        &DaemonToHub::PaneStream {
+            agent: a.clone(),
+            data: b"next".to_vec(),
+        },
+    )
+    .await;
+    assert_eq!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::AttachStream {
+            agent: a,
+            cols: 100,
+            rows: 40
+        }
+    );
+}

@@ -16,7 +16,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -80,6 +83,21 @@ pub trait AgentHost: Send + Sync + 'static {
         &self,
         id: &AgentId,
     ) -> impl Future<Output = Result<mpsc::Receiver<Vec<u8>>, AgentError>> + Send;
+    /// Streams the agent's terminal as raw bytes (a tmux client in a PTY of `cols` x `rows`); a
+    /// repeat replaces the client. Default: this host cannot stream.
+    fn attach_stream(
+        &self,
+        _id: &AgentId,
+        _cols: u16,
+        _rows: u16,
+    ) -> impl Future<Output = Result<mpsc::Receiver<Vec<u8>>, AgentError>> + Send {
+        std::future::ready(Err(AgentError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this host cannot stream a terminal",
+        ))))
+    }
+    /// Stops the agent's stream client, if any.
+    fn detach_stream(&self, _id: &AgentId) {}
     /// Resizes the agent's pane to a viewer's terminal; default: ignored (fixed-size host).
     fn resize(
         &self,
@@ -232,6 +250,10 @@ struct Session<'a, H> {
     last: Probed,
     known: HashSet<AgentId>,
     attached: HashMap<AgentId, JoinHandle<()>>,
+    /// Stream forwarders (`AttachStream`), one per streamed agent.
+    streams: HashMap<AgentId, JoinHandle<()>>,
+    /// Stream bytes queued for the hub and not yet written; forwarders wait above [`STREAM_QUEUE_CAP`].
+    stream_bytes: Arc<AtomicUsize>,
     /// Spawns in flight (clone/install running; the tmux session may not exist yet).
     starting: HashSet<AgentId>,
     /// Attaches that arrived while their agent was starting, with their arrival time.
@@ -390,6 +412,10 @@ impl<'a, H: AgentHost> Session<'a, H> {
     fn forget(&mut self, id: &AgentId) {
         self.known.remove(id);
         self.pending.remove(id);
+        if let Some(h) = self.streams.remove(id) {
+            h.abort();
+            self.host.detach_stream(id);
+        }
         if let Some(h) = self.attached.remove(id) {
             h.abort();
         }
@@ -486,6 +512,15 @@ impl<'a, H: AgentHost> Session<'a, H> {
                 }
             }
             HubToDaemon::Attach { agent } => self.attach(agent).await,
+            HubToDaemon::AttachStream { agent, cols, rows } => {
+                self.attach_stream(agent, cols, rows).await
+            }
+            HubToDaemon::DetachStream { agent } => {
+                if let Some(h) = self.streams.remove(&agent) {
+                    h.abort();
+                }
+                self.host.detach_stream(&agent);
+            }
             HubToDaemon::Detach { agent } => {
                 self.pending.remove(&agent);
                 if let Some(h) = self.attached.remove(&agent) {
@@ -521,6 +556,24 @@ impl<'a, H: AgentHost> Session<'a, H> {
             }
             HubToDaemon::CleanRepos { dry_run } => self.clean(CleanReq::All { dry_run }),
             HubToDaemon::CleanRepo { path } => self.clean(CleanReq::One { path }),
+        }
+    }
+
+    /// Starts (or restarts, for a late viewer's full repaint) the agent's raw terminal stream.
+    async fn attach_stream(&mut self, agent: AgentId, cols: u16, rows: u16) {
+        match self.host.attach_stream(&agent, cols, rows).await {
+            Ok(rx) => {
+                let task = tokio::spawn(forward_stream(
+                    agent.clone(),
+                    rx,
+                    self.out.clone(),
+                    self.stream_bytes.clone(),
+                ));
+                if let Some(old) = self.streams.insert(agent, task) {
+                    old.abort();
+                }
+            }
+            Err(e) => eprintln!("ulakd: stream {agent:?} failed: {e}"),
         }
     }
 
@@ -677,6 +730,8 @@ where
         last: sample(probe).await?,
         known,
         attached: HashMap::new(),
+        streams: HashMap::new(),
+        stream_bytes: Arc::new(AtomicUsize::new(0)),
         starting: HashSet::new(),
         pending: HashMap::new(),
         out,
@@ -747,13 +802,53 @@ where
                 if let Err(e) = sink.send(Message::text(encode(&m)?)).await {
                     break Err(e.into());
                 }
+                if let DaemonToHub::PaneStream { data, .. } = &m {
+                    s.stream_bytes.fetch_sub(data.len(), Ordering::Relaxed);
+                }
             }
         }
     };
     for h in s.attached.values() {
         h.abort();
     }
+    for (id, h) in &s.streams {
+        h.abort();
+        s.host.detach_stream(id);
+    }
     result
+}
+
+/// Stream bytes allowed in the queue to the hub before forwarders wait (the PTY reader then
+/// blocks, and tmux throttles its client).
+const STREAM_QUEUE_CAP: usize = 1 << 20;
+/// Largest `PaneStream` frame: PTY reads are merged up to this.
+const STREAM_FRAME_MAX: usize = 64 << 10;
+
+async fn forward_stream(
+    agent: AgentId,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    out: mpsc::UnboundedSender<DaemonToHub>,
+    queued: Arc<AtomicUsize>,
+) {
+    while let Some(mut data) = rx.recv().await {
+        while data.len() < STREAM_FRAME_MAX {
+            match rx.try_recv() {
+                Ok(more) => data.extend_from_slice(&more),
+                Err(_) => break,
+            }
+        }
+        while queued.load(Ordering::Relaxed) > STREAM_QUEUE_CAP {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        queued.fetch_add(data.len(), Ordering::Relaxed);
+        let frame = DaemonToHub::PaneStream {
+            agent: agent.clone(),
+            data,
+        };
+        if out.send(frame).is_err() {
+            break;
+        }
+    }
 }
 
 /// Connects and reconnects forever (with capped backoff).

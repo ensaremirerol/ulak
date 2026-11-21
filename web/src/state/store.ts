@@ -1,7 +1,7 @@
 import { computed, signal, type ReadonlySignal } from '@preact/signals';
 import type { HubToUi, UiToHub } from '../proto';
 import { applyIntentLocally, IntentError, intentToFrames } from './intents';
-import { awaitsSession, initialState, reduce } from './reducer';
+import { attachFrame, awaitsSession, initialState, reduce } from './reducer';
 import type { Event, Intent, State } from './types';
 
 /** How the store reaches the network (see net/client.ts `send`). */
@@ -36,9 +36,9 @@ export function createStore(init: State = initialState()): Store {
     // The selected agent just got its session: send the attach that select held back.
     const sel = state.value.selected;
     if (sel && sel === before.selected && awaitsSession(before.statuses[sel]) && state.value.statuses[sel] === 'Running') {
-      send({ type: 'attach', agent: sel });
+      send(attachFrame(state.value, sel));
     }
-    if (e.kind === 'hub' && e.frame.type === 'pane_output') {
+    if (e.kind === 'hub' && (e.frame.type === 'pane_output' || e.frame.type === 'pane_stream')) {
       for (const fn of panes.get(e.frame.agent) ?? []) fn(e.frame.data);
     }
   };
@@ -53,7 +53,7 @@ export function createStore(init: State = initialState()): Store {
       { type: 'list_credentials' },
       { type: 'list_queue' },
       ...(state.value.stats ? [{ type: 'node_stats', node: state.value.stats.node } as const] : []),
-      ...(state.value.selected ? [{ type: 'attach', agent: state.value.selected } as const] : []),
+      ...(state.value.selected ? [attachFrame(state.value, state.value.selected)] : []),
     ],
     onPane(agent, fn) {
       const set = panes.get(agent) ?? new Set();

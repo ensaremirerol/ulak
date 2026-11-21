@@ -247,6 +247,7 @@ export type UiToHub =
   | { type: 'detach'; agent: AgentId }
   | { type: 'pane_input'; agent: AgentId; data: Uint8Array }
   | { type: 'resize'; agent: AgentId; cols: number; rows: number }
+  | { type: 'attach_stream'; agent: AgentId; cols: number; rows: number }
   | { type: 'kill'; agent: AgentId }
   | { type: 'add_device'; kind: DeviceKind }
   | { type: 'revoke_device'; id: NodeId }
@@ -281,6 +282,8 @@ export type HubToUi =
   | { type: 'question_closed'; id: QuestionId }
   | ({ type: 'message_logged' } & Message)
   | { type: 'pane_output'; agent: AgentId; data: Uint8Array }
+  /** Raw bytes of the agent's tmux client (after `attach_stream`): a byte stream, not redraws. */
+  | { type: 'pane_stream'; agent: AgentId; data: Uint8Array }
   | { type: 'agent_status'; agent: AgentId; node: NodeId; status: AgentStatus }
   | ({ type: 'otp_offer' } & OtpOffer)
   | { type: 'devices'; devices: DeviceInfo[] }

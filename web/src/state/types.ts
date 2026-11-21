@@ -11,6 +11,8 @@ export interface TermBuf {
   bytes: number;
   /** Total chunks ever appended; changes on every append (use as a render key / change signal). */
   seq: number;
+  /** The cap dropped old chunks: a byte stream can no longer be replayed from the start. */
+  truncated?: boolean;
 }
 
 export type ToastKind = 'error' | 'info' | 'ok';
@@ -35,6 +37,8 @@ export interface State {
   devices: DeviceInfo[];
   otp: OtpOffer | null;
   terminals: Record<AgentId, TermBuf>;
+  /** The last size each agent's terminal was fitted to (cells); a stream (re)attach asks for it. */
+  termSizes: Record<AgentId, { cols: number; rows: number }>;
   selected: AgentId | null;
   toasts: Toast[];
   nextToastId: number;
@@ -134,6 +138,8 @@ export type Intent =
   | { kind: 'kill'; agent: AgentId }
   /** The agent terminal's size in the viewer (cells); nodes from 0.1.10 resize the pane to it. */
   | { kind: 'resize'; agent: AgentId; cols: number; rows: number }
+  /** Restart the agent's stream for a full repaint (the buffered bytes cannot be replayed). */
+  | { kind: 'reattach'; agent: AgentId }
   | { kind: 'add_device'; device: DeviceKind }
   | { kind: 'revoke_device'; id: NodeId }
   | { kind: 'refresh_devices' }

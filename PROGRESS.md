@@ -494,7 +494,7 @@ Hub (ulak-remote, done):
 - `NodeStats`: in memory per node, Hello + Heartbeat telemetry (a repeated `at_ms` is skipped), <= 720 samples received in the last hour; `connected_ms` = start of the current daemon connection, `None` after disconnect (history kept). Reply to the requester only; unknown node = empty.
 - Placement is unchanged: hub profiles count once the daemon reports them back in `Profiles` (`from_hub: true`); before that, a name no node reports is a custom binary.
 
-## 0.1.11 in progress: real terminal stream (2026-11-21)
+## 0.1.11: real terminal stream (2026-11-21, built and tested live, not tagged)
 
 Released and verified: 0.1.9 (hub Kill fix, terminal copy), 0.1.10 (Agents screen redesign, `resize` frame,
 fit / full screen / new window, selection survives redraws). Both: 18 assets, 9/9 signatures, hub image bundles them.
@@ -523,3 +523,12 @@ Plan (user approved "do the real terminal stream"; tag only with the user's OK):
   hub late-joiner test; web tests for the three attach sites; live browser run (use double-click, the automation's
   drag makes no xterm selection; log in with a soft-passkey token on ULAK_DEV_HTTP=1, admin socket path is too long
   in the scratchpad so feed `otp browser` on stdin).
+
+Status (2026-11-21): built. Frames, PTY client (`crates/ulakd/src/pty.rs`), hub stream viewers with a 4 MiB per-viewer
+cap and resync, node 1 MiB queue cap, web stream mode (attach sites, truncated-buffer reattach, ordered hold, OSC 52).
+Tests: pty unit, real-tmux stream test, hub late-joiner + 24 MiB slow-viewer test, web state/mode/OSC 52 tests.
+Live: typing, `stty size` = fitted size, wheel scrolls tmux history (5 lines per notch), 30 MB `yes` flood with hub
+38 MB / node 18 MB RSS, two viewers share one client (last resize wins), no client left after the last viewer or
+after the client's holder is SIGKILLed. Not checked: drag-to-copy end to end in a real browser (the automation's drag
+sends no motion), tmux 3.3a (Debian 12) Esc delay. Observed once: an earlier test hub ignored SIGTERM for 2 h (it
+exited normally in the next run); not reproduced.

@@ -5618,7 +5618,7 @@ dependencies = [
 
 [[package]]
 name = "ulak"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -5642,7 +5642,7 @@ dependencies = [
 
 [[package]]
 name = "ulak-proto"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "proptest",
@@ -5653,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "ulak-remote"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -5686,12 +5686,13 @@ dependencies = [
 
 [[package]]
 name = "ulakd"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "axum",
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "libc",
  "rcgen",
  "rustls",
  "serde",

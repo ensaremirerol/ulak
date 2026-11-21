@@ -10,7 +10,7 @@ import {
 function hubValue(f: HubToUi): unknown {
   const { type: _t, ...rest } = f;
   void _t;
-  if (f.type === 'pane_output') return { type: f.type, agent: f.agent, data: bytesToB64(f.data) };
+  if (f.type === 'pane_output' || f.type === 'pane_stream') return { type: f.type, agent: f.agent, data: bytesToB64(f.data) };
   return { type: f.type, ...rest };
 }
 

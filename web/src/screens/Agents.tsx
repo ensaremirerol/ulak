@@ -1,12 +1,12 @@
 import { signal } from '@preact/signals';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { AgentStatus, NodeInfo, QueuedSpawn } from '../proto';
-import { agentStatusLabel, agentTone, awaitsSession, keysFromText, nodeOf, store, type State } from '../state';
+import { agentStatusLabel, agentTone, awaitsSession, keysFromText, nodeOf, store, streams, versionAtLeast, type State } from '../state';
 import { Button, Dot, EmptyState, Pill, type Tone } from '../ui/components';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { ageLabel } from '../ui/format';
 import { nodeHref, termHref } from '../ui/router';
-import { Terminal, type TerminalHandle } from '../ui/Terminal';
+import { Terminal, type TerminalHandle, type TermMode } from '../ui/Terminal';
 import { SpawnDialog } from './SpawnDialog';
 
 /** Escape sequences for the phone key bar. */
@@ -16,16 +16,7 @@ export const KEYS: readonly (readonly [label: string, seq: string])[] = [
 
 /** Nodes from this version resize the agent's pane to the viewer (`resize` frame); older ones keep 200x50. */
 export const RESIZE_SINCE = [0, 1, 10] as const;
-export function supportsResize(version: string | undefined): boolean {
-  if (!version) return false;
-  const v = version.split(/[.+-]/).slice(0, 3).map(Number);
-  for (let i = 0; i < 3; i++) {
-    const a = v[i] ?? 0, b = RESIZE_SINCE[i]!;
-    if (Number.isNaN(a)) return false;
-    if (a !== b) return a > b;
-  }
-  return true;
-}
+export const supportsResize = (version: string | undefined): boolean => versionAtLeast(version, RESIZE_SINCE);
 
 export interface AgentRow { id: string; node: NodeInfo | undefined; status: AgentStatus | undefined }
 export interface NeedsRow extends AgentRow { kind: string; reason: string; action: 'answer' | 'inbox' | 'open' | 'remove' }
@@ -105,7 +96,7 @@ export function AgentPanel({ agent, popout = false }: { agent: string; popout?: 
   const node = nodeOf(s, agent) ?? s.nodes.find((n) => n.id === s.lastFailure[agent]?.node);
   const st = s.statuses[agent];
   const [label, tone] = statusOf(s, agent);
-  const fit = supportsResize(node ? s.nodeVersions[node.id]?.version : undefined);
+  const mode: TermMode = streams(s, agent) ? 'stream' : supportsResize(node ? s.nodeVersions[node.id]?.version : undefined) ? 'fit' : 'fixed';
   const send = (seq: string) => store.intent({ kind: 'send_keys', data: keysFromText(seq) });
 
   useEffect(() => {
@@ -158,7 +149,7 @@ export function AgentPanel({ agent, popout = false }: { agent: string; popout?: 
         <>
           {awaitsSession(st)
             ? <div class="term-host term-wait muted" role="status">{st === 'Installing' ? 'Installing…' : 'Starting…'} The terminal opens when the agent is running (a repository is cloned first).</div>
-            : <Terminal agent={agent} fit={fit} handle={term} />}
+            : <Terminal agent={agent} mode={mode} handle={term} />}
           <div class="keybar" aria-label="Keys">
             {KEYS.map(([k, seq]) => <button key={k} type="button" class="key" onClick={() => send(seq)}>{k}</button>)}
           </div>
@@ -185,7 +176,7 @@ export function AgentPanel({ agent, popout = false }: { agent: string; popout?: 
           <dt>Node</dt><dd>{node ? <a href={nodeHref(node.id)}>{node.hostname}</a> : 'unknown'}</dd>
           <dt>Status</dt><dd>{label}</dd>
           {s.lastFailure[agent] && <><dt>Last failure</dt><dd class="pre-wrap">{s.lastFailure[agent].reason}</dd></>}
-          <dt>Terminal</dt><dd>{fit ? 'Sized to this window' : 'Fixed 200 x 50 (update the node to 0.1.10 to fit it to the window)'}</dd>
+          <dt>Terminal</dt><dd>{mode === 'stream' ? 'Live stream, sized to this window. Drag to copy, Shift+drag to select here, wheel to scroll back.' : mode === 'fit' ? 'Sized to this window (update the node to 0.1.11 for the live stream)' : 'Fixed 200 x 50 (update the node to 0.1.11 for the live stream)'}</dd>
         </dl>
       )}
     </section>
