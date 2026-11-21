@@ -33,7 +33,7 @@ describe('SpawnDialog: repository source', () => {
     render(<SpawnDialog onClose={onClose} />);
     toWhere();
     expect(screen.getByRole('radio', { name: 'GitHub repository' }).getAttribute('aria-checked')).toBe('true');
-    const link = screen.getByRole('link', { name: /Contents: read/ });
+    const link = screen.getByRole('link', { name: /Contents, Issues and Pull requests: read/ });
     expect(link.getAttribute('href')).toBe('https://github.com/settings/personal-access-tokens/new');
     expect(link.getAttribute('rel')).toBe('noopener noreferrer');
     expect((screen.getByLabelText('GitHub token') as HTMLInputElement).type).toBe('password');

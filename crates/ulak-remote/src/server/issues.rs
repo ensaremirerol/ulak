@@ -85,6 +85,7 @@ enum Decision {
 fn decide(
     r: &Routing,
     issue: &Issue,
+    yours: bool,
     to: &str,
     prior: usize,
     running: &HashSet<AgentId>,
@@ -132,6 +133,11 @@ fn decide(
     Ok(match d {
         Decision::NewAgent if issue.tagged => Decision::Inbox(
             "Issues from tagged repositories never start an agent on their own.".into(),
+        ),
+        // An agent must not start agents on text someone else wrote: you review those first.
+        Decision::NewAgent if !(issue.trusted && yours) => Decision::Inbox(
+            "Only issues in your own repositories, opened by you or a collaborator, start an agent without you."
+                .into(),
         ),
         d => d,
     })
@@ -429,10 +435,11 @@ impl Hub {
             return Err(bad("never forward the issue you were started for"));
         }
         let s = self.issue_settings()?;
-        let (_, token) = self.issue_credential(&s)?;
+        let (cred, token) = self.issue_credential(&s)?;
         let found = self
             .github
             .issue(&token, &issue, s.tagged.contains(&issue.repo))?;
+        let yours = issue.repo.owner().eq_ignore_ascii_case(&cred.login);
         let prior: Vec<Forward> = self
             .forwards()?
             .into_iter()
@@ -442,7 +449,15 @@ impl Hub {
         forwarded_by.insert(from.clone());
         let mut running = self.running();
         running.remove(from);
-        let mut d = decide(&s.routing, &found, to, prior.len(), &running, &forwarded_by)?;
+        let mut d = decide(
+            &s.routing,
+            &found,
+            yours,
+            to,
+            prior.len(),
+            &running,
+            &forwarded_by,
+        )?;
         let mut proposed = None;
         if s.routing.ask_first {
             if let Decision::Deliver(a) = &d {
@@ -683,23 +698,49 @@ mod tests {
         let by: HashSet<_> = [a("me")].into();
         let up: HashSet<_> = [a("docs-sync")].into();
         assert_eq!(
-            decide(&r, &issue(false), "auto", 0, &up, &by).unwrap(),
+            decide(&r, &issue(false), true, "auto", 0, &up, &by).unwrap(),
             Decision::Deliver(a("docs-sync"))
         );
         assert_eq!(
-            decide(&r, &issue(false), "auto", 0, &HashSet::new(), &by).unwrap(),
+            decide(&r, &issue(false), true, "auto", 0, &HashSet::new(), &by).unwrap(),
             Decision::NewAgent
         );
         // Tagged repositories never start an agent: Inbox instead.
         assert!(matches!(
-            decide(&r, &issue(true), "auto", 0, &HashSet::new(), &by).unwrap(),
+            decide(&r, &issue(true), true, "auto", 0, &HashSet::new(), &by).unwrap(),
             Decision::Inbox(_)
         ));
         let none = Routing::default();
         assert!(matches!(
-            decide(&none, &issue(false), "auto", 0, &up, &by).unwrap(),
+            decide(&none, &issue(false), true, "auto", 0, &up, &by).unwrap(),
             Decision::Inbox(_)
         ));
+    }
+
+    #[test]
+    fn untrusted_or_foreign_issues_never_start_an_agent_from_a_forward() {
+        let r = routing();
+        let by: HashSet<_> = [a("me")].into();
+        let mut outside = issue(false);
+        outside.trusted = false;
+        assert!(matches!(
+            decide(&r, &outside, true, "new", 0, &HashSet::new(), &by).unwrap(),
+            Decision::Inbox(_)
+        ));
+        assert!(matches!(
+            decide(&r, &issue(false), false, "new", 0, &HashSet::new(), &by).unwrap(),
+            Decision::Inbox(_)
+        ));
+        assert_eq!(
+            decide(&r, &issue(false), true, "new", 0, &HashSet::new(), &by).unwrap(),
+            Decision::NewAgent
+        );
+        // Delivering to a running agent is still fine: no new agent starts.
+        let up: HashSet<_> = [a("docs-sync")].into();
+        assert_eq!(
+            decide(&r, &outside, false, "auto", 0, &up, &by).unwrap(),
+            Decision::Deliver(a("docs-sync"))
+        );
     }
 
     #[test]
@@ -708,23 +749,23 @@ mod tests {
         let up: HashSet<_> = [a("docs-sync"), a("b")].into();
         // A -> B -> A cannot happen: an agent that forwarded it is never handed it again.
         let by: HashSet<_> = [a("b"), a("docs-sync")].into();
-        assert!(decide(&r, &issue(false), "b", 1, &up, &by).is_err());
+        assert!(decide(&r, &issue(false), true, "b", 1, &up, &by).is_err());
         assert!(matches!(
-            decide(&r, &issue(false), "auto", 1, &up, &by).unwrap(),
+            decide(&r, &issue(false), true, "auto", 1, &up, &by).unwrap(),
             Decision::Inbox(_)
         ));
         // After max_forwards (2) it comes to Inbox.
         let by: HashSet<_> = [a("me")].into();
         assert!(matches!(
-            decide(&r, &issue(false), "b", 2, &up, &by).unwrap(),
+            decide(&r, &issue(false), true, "b", 2, &up, &by).unwrap(),
             Decision::Inbox(_)
         ));
         assert_eq!(
-            decide(&r, &issue(false), "b", 1, &up, &by).unwrap(),
+            decide(&r, &issue(false), true, "b", 1, &up, &by).unwrap(),
             Decision::Deliver(a("b"))
         );
         assert!(matches!(
-            decide(&r, &issue(false), "gone", 0, &up, &by).unwrap(),
+            decide(&r, &issue(false), true, "gone", 0, &up, &by).unwrap(),
             Decision::Inbox(_)
         ));
     }

@@ -67,7 +67,8 @@ export function issueAgents(s: State, issue: IssueRef): { agent: AgentId; live: 
     .sort((a, b) => b.at_ms - a.at_ms)
     .map((l) => {
       const st = s.statuses[l.agent];
-      const live = st === undefined || (st !== 'Failed' && typeof st !== 'object') || s.queue.some((q) => q.agent === l.agent);
+      // Unknown status (hub restarted, queue item cancelled) is not live: only a known running state or the queue.
+      const live = (st !== undefined && st !== 'Failed' && typeof st !== 'object') || s.queue.some((q) => q.agent === l.agent);
       return { agent: l.agent, live, pr: l.pr };
     });
 }

@@ -25,7 +25,7 @@ export function AddCredential({ onCancel }: { onCancel?(): void }) {
         <input id="cred-token" class="input mono" type="password" autocomplete="off" spellcheck={false} value={token} onInput={(e) => setToken(e.currentTarget.value)} />
         <span class="hint">Shown once, then only the hub keeps it.</span>
       </div>
-      <a href={TOKEN_URL} target="_blank" rel="noopener noreferrer">Create a fine-grained token with Contents: read (and write if you want agents to push)</a>
+      <a href={TOKEN_URL} target="_blank" rel="noopener noreferrer">Create a fine-grained token with Contents, Issues and Pull requests: read (write to let agents push and comment)</a>
       <div class="row">
         <Button type="submit" variant="primary" size="sm">Add token</Button>
         {onCancel && <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>}

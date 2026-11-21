@@ -1407,6 +1407,12 @@ async fn fresh_ui_versions(fx: &Fx, n: usize) -> (VersionInfo, Vec<HubToUi>) {
         recv::<HubToUi>(&mut ws).await,
         HubToUi::HubConfig { .. }
     ));
+    for _ in 0..3 {
+        assert!(matches!(
+            recv::<HubToUi>(&mut ws).await,
+            HubToUi::IssueSettings { .. } | HubToUi::IssueLinks { .. } | HubToUi::Forwards { .. }
+        ));
+    }
     let mut rest = vec![];
     for _ in 0..n {
         rest.push(recv::<HubToUi>(&mut ws).await);

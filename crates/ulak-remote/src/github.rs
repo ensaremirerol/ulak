@@ -383,15 +383,15 @@ impl GitHub {
             .ok_or_else(|| gh("not an issue (a pull request, or an unreadable answer)"))
     }
 
-    /// Who last added `label` to the issue (first 100 events only).
-    // ponytail: one page of events; an issue with more than 100 events reads as "not labeled".
+    /// Who last added `label` to the issue. Events come oldest first; an issue with more than
+    /// one page of events reads as "not labeled" (fail closed: no auto-start).
     pub fn labeled_by(
         &self,
         token: &GitToken,
         r: &IssueRef,
         label: &str,
     ) -> Result<Option<String>, ServerError> {
-        let (j, _) = self.get(
+        let (j, more) = self.get(
             &format!(
                 "/repos/{}/issues/{}/events?per_page=100",
                 r.repo.as_str(),
@@ -399,6 +399,9 @@ impl GitHub {
             ),
             token,
         )?;
+        if more {
+            return Ok(None);
+        }
         Ok(j.as_array()
             .into_iter()
             .flatten()
