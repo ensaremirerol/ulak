@@ -248,5 +248,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(d) = dev {
         d.abort();
     }
-    Ok(())
+    // The stdin reader is a blocking read the runtime would wait for at shutdown (forever while
+    // stdin stays open, e.g. a terminal or a pipe): everything is cleaned up, so exit now.
+    std::process::exit(0)
 }

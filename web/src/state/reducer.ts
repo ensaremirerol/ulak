@@ -16,7 +16,7 @@ export const STATS_CAP = 720;
 export function initialState(now = Date.now()): State {
   return {
     conn: 'connecting', nodes: [], questions: [], blockers: [], statuses: {}, lastFailure: {}, mailbox: [], devices: [],
-    otp: null, terminals: {}, termSizes: {}, selected: null, toasts: [], nextToastId: 1, now,
+    otp: null, terminals: {}, termSizes: {}, dirListings: {}, selected: null, toasts: [], nextToastId: 1, now,
     hubVersion: null, releaseCache: null, nodeVersions: {}, updates: {},
     credentials: [], repos: {}, branches: {}, queue: [], nodeProfiles: {}, nodeRepos: {}, lastClean: {},
     hubProfiles: [], nodeSettings: {}, stats: null,
@@ -212,6 +212,8 @@ function reduceHub(s: State, f: HubToUi): State {
       return { ...s, nodeProfiles: { ...s.nodeProfiles, [f.node]: f.profiles } };
     case 'node_repos':
       return { ...s, nodeRepos: { ...s.nodeRepos, [f.node]: f.repos } };
+    case 'dir_listing':
+      return { ...s, dirListings: { ...s.dirListings, [dirKey(f.node, f.listing.requested)]: f.listing } };
     case 'hub_config':
       return {
         ...s,
@@ -254,6 +256,27 @@ export const streams = (s: State, agent: string): boolean => {
   const n = nodeOf(s, agent);
   return n !== undefined && versionAtLeast(s.nodeVersions[n.id]?.version, STREAM_SINCE);
 };
+
+export const dirKey = (node: string, path: string): string => `${node}\0${path}`;
+
+/** Nodes from 0.1.12 list folders for the New agent folder browser. */
+export const LIST_DIR_SINCE = [0, 1, 12] as const;
+export const listsDirs = (s: State, node: string): boolean => versionAtLeast(s.nodeVersions[node]?.version, LIST_DIR_SINCE);
+
+/** Every agent id the hub may know (a new agent must not reuse one). */
+export function takenIds(s: State): Set<string> {
+  return new Set([...s.nodes.flatMap((n) => n.agents), ...Object.keys(s.statuses), ...Object.keys(s.lastFailure), ...s.queue.map((q) => q.agent)]);
+}
+
+/** An agent id from the first words of the prompt (`fix-the-login-bug`), unique against `taken`; `agent` when the
+ *  prompt has no usable letters. Matches the hub's rule: 1-64 of a-z, 0-9 and "-". */
+export function agentIdFromPrompt(prompt: string, taken: Set<string>): string {
+  const words = prompt.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  let base = words.slice(0, 4).join('-').slice(0, 40).replace(/-+$/, '') || 'agent';
+  if (!/^[a-z0-9-]{1,64}$/.test(base)) base = 'agent';
+  if (!taken.has(base)) return base;
+  for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+}
 
 /** Size a stream starts at before the terminal has measured itself. */
 export const DEFAULT_TERM_SIZE = { cols: 120, rows: 40 } as const;

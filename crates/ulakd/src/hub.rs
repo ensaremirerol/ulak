@@ -31,8 +31,9 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, WebSocketStream,
 };
 use ulak_proto::{
-    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, GitToken, HubProfile,
-    HubToDaemon, NodeId, NodeInfo, NodeSettings, ProfileInfo, ProfileKey, RepoEntry, SpawnSpec,
+    decode, encode, AgentId, AgentStatus, BlockerKind, DaemonToHub, DirListing, GitToken,
+    HubProfile, HubToDaemon, NodeId, NodeInfo, NodeSettings, ProfileInfo, ProfileKey, RepoEntry,
+    SpawnSpec,
 };
 
 /// Something the host wants the hub to hear about, outside of a command's own reply.
@@ -123,6 +124,15 @@ pub trait AgentHost: Send + Sync + 'static {
     fn install(&self, _name: String) -> impl Future<Output = Result<(), String>> + Send {
         std::future::ready(Err("this node cannot install agents".into()))
     }
+    /// Sub-folders of `path` for the folder browser; default: this host cannot list folders.
+    fn list_dir(&self, path: String) -> impl Future<Output = DirListing> + Send {
+        std::future::ready(DirListing {
+            requested: path,
+            path: String::new(),
+            dirs: Vec::new(),
+            error: Some("this node cannot list folders".into()),
+        })
+    }
     /// How often [`AgentHost::maintain`] runs.
     fn maintenance_interval(&self) -> Duration {
         Duration::from_secs(600)
@@ -154,6 +164,7 @@ enum Done {
     Cleaned(bool, Option<Cleaned>),
     Maintained(Option<Cleaned>),
     Installed(String, Result<(), String>),
+    Listed(DirListing),
 }
 
 pub type SharedProbe = Arc<Mutex<Box<dyn Probe>>>;
@@ -367,6 +378,9 @@ impl<'a, H: AgentHost> Session<'a, H> {
                 }
                 self.refresh();
             }
+            Done::Listed(l) => {
+                let _ = self.out.send(DaemonToHub::DirListing(l));
+            }
             Done::Installed(name, r) => {
                 eprintln!(
                     "ulakd: install {name}: {}",
@@ -553,6 +567,11 @@ impl<'a, H: AgentHost> Session<'a, H> {
                     }
                     .boxed(),
                 );
+            }
+            HubToDaemon::ListDir { path } => {
+                let host = self.host;
+                self.jobs()
+                    .push(async move { Done::Listed(host.list_dir(path).await) }.boxed());
             }
             HubToDaemon::CleanRepos { dry_run } => self.clean(CleanReq::All { dry_run }),
             HubToDaemon::CleanRepo { path } => self.clean(CleanReq::One { path }),

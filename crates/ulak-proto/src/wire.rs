@@ -35,6 +35,8 @@ pub enum DaemonToHub {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
+    /// Answer to `ListDir`.
+    DirListing(DirListing),
     /// The agent cannot work until the user fixes something (login) or ulakd could not install it.
     AgentBlocked {
         agent: AgentId,
@@ -151,6 +153,10 @@ pub enum HubToDaemon {
     DetachStream {
         agent: AgentId,
     },
+    /// List the sub-folders of `path` (answered with `DirListing`). Nodes before 0.1.12 ignore it.
+    ListDir {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +191,11 @@ pub enum UiToHub {
         agent: AgentId,
         cols: u16,
         rows: u16,
+    },
+    /// Browse a node's folders (New agent); every UI gets the `DirListing`.
+    ListDir {
+        node: NodeId,
+        path: String,
     },
     Kill {
         agent: AgentId,
@@ -304,6 +315,10 @@ pub enum HubToUi {
         agent: AgentId,
         #[serde(with = "b64")]
         data: Vec<u8>,
+    },
+    DirListing {
+        node: NodeId,
+        listing: DirListing,
     },
     AgentStatus {
         agent: AgentId,

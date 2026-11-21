@@ -1892,3 +1892,53 @@ async fn a_stream_viewer_that_falls_behind_is_skipped_then_resynced() {
         }
     );
 }
+
+#[tokio::test]
+async fn list_dir_reaches_the_node_and_listings_go_to_every_ui() {
+    let fx = start(fast()).await;
+    let (mut u1, mut u2) = (ui(&fx).await, ui(&fx).await);
+    let (id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    until(&mut u1, |m| {
+        matches!(m, HubToUi::NodeUpdate(_)).then_some(())
+    })
+    .await;
+    send(
+        &mut u1,
+        &UiToHub::ListDir {
+            node: id.id.clone(),
+            path: "~/src".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        recv::<HubToDaemon>(&mut d).await,
+        HubToDaemon::ListDir {
+            path: "~/src".into()
+        }
+    );
+    let listing = |dirs: Vec<String>| DirListing {
+        requested: "~/src".into(),
+        path: "/home/me/src".into(),
+        dirs,
+        error: None,
+    };
+    // An oversized listing is dropped; a sane one reaches every UI.
+    send(
+        &mut d,
+        &DaemonToHub::DirListing(listing(vec!["x".into(); 501])),
+    )
+    .await;
+    send(
+        &mut d,
+        &DaemonToHub::DirListing(listing(vec!["ulak".into()])),
+    )
+    .await;
+    for u in [&mut u1, &mut u2] {
+        let (node, l) = until(u, |m| match m {
+            HubToUi::DirListing { node, listing } => Some((node, listing)),
+            _ => None,
+        })
+        .await;
+        assert_eq!((node, l.dirs), (id.id.clone(), vec!["ulak".to_owned()]));
+    }
+}

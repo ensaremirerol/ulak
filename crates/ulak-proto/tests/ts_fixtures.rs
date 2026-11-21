@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 29;
-const HUB_VARIANTS: usize = 33;
+const UI_VARIANTS: usize = 30;
+const HUB_VARIANTS: usize = 34;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -113,6 +113,7 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::PaneInput { .. } => "pane_input",
         UiToHub::Resize { .. } => "resize",
         UiToHub::AttachStream { .. } => "attach_stream",
+        UiToHub::ListDir { .. } => "list_dir",
         UiToHub::Kill { .. } => "kill",
         UiToHub::AddDevice { .. } => "add_device",
         UiToHub::RevokeDevice { .. } => "revoke_device",
@@ -150,6 +151,7 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::MessageLogged(_) => "message_logged",
         HubToUi::PaneOutput { .. } => "pane_output",
         HubToUi::PaneStream { .. } => "pane_stream",
+        HubToUi::DirListing { .. } => "dir_listing",
         HubToUi::AgentStatus { .. } => "agent_status",
         HubToUi::OtpOffer { .. } => "otp_offer",
         HubToUi::Devices { .. } => "devices",
@@ -242,6 +244,13 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
                 agent: agent(),
                 cols: 120,
                 rows: 40,
+            },
+        ),
+        (
+            "list_dir",
+            UiToHub::ListDir {
+                node: node(),
+                path: "~/workspace".into(),
             },
         ),
         ("kill", UiToHub::Kill { agent: agent() }),
@@ -485,6 +494,32 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
             HubToUi::PaneStream {
                 agent: agent(),
                 data: vec![27, b'[', b'?', b'1', b'0', b'4', b'9', b'h', 0xe2, 0x9c],
+            },
+        ),
+        (
+            "dir_listing",
+            HubToUi::DirListing {
+                node: node(),
+                listing: DirListing {
+                    requested: "~/workspace".into(),
+                    path: "/home/me/workspace".into(),
+                    dirs: vec!["ulak".into(), "notes".into()],
+                    error: None,
+                },
+            },
+        ),
+        (
+            "dir_listing_error",
+            HubToUi::DirListing {
+                node: node(),
+                listing: DirListing {
+                    requested: "/etc".into(),
+                    path: String::new(),
+                    dirs: vec![],
+                    error: Some(
+                        "only folders under your home or a repo root can be browsed".into(),
+                    ),
+                },
             },
         ),
         ("agent_status_starting", status(AgentStatus::Starting)),

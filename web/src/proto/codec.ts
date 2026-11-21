@@ -1,6 +1,6 @@
 import { b64ToBytes, bytesToB64 } from './bytes';
 import type {
-  AgentStatus, Blocker, CleanItem, CredentialInfo, DeviceInfo, HubProfile, HubToUi, NodeSettings, HubToUiType, Message, NodeInfo, NodeState,
+  AgentStatus, Blocker, CleanItem, CredentialInfo, DirListing, DeviceInfo, HubProfile, HubToUi, NodeSettings, HubToUiType, Message, NodeInfo, NodeState,
   OtpOffer, ProfileInfo, RepoEntry, QueuedSpawn, QueueState, Question, RepoInfo, Source, SpawnSpec, Telemetry, UiToHub, UiToHubType, UnknownFrame, UpdateState,
   VersionInfo,
 } from './types';
@@ -236,6 +236,11 @@ function repoEntry(v: unknown): RepoEntry {
   };
 }
 
+function dirListing(v: unknown): DirListing {
+  const o = obj(v, 'listing');
+  return { requested: s(o.requested, 'requested'), path: s(o.path, 'path'), dirs: arr(o.dirs, 'dirs', (x) => str(x, 'dir')), error: optStr(o.error, 'error') };
+}
+
 function cleanItem(v: unknown): CleanItem {
   const o = obj(v, 'clean item');
   return { path: str(o.path, 'path'), full_name: optStr(o.full_name, 'full_name'), reason: str(o.reason, 'reason') };
@@ -272,6 +277,7 @@ const hubDecoders = {
   question_closed: (o) => ({ type: 'question_closed', id: s(o.id, 'id') }),
   message_logged: (o) => ({ type: 'message_logged', ...message(o) }),
   pane_output: (o) => ({ type: 'pane_output', agent: s(o.agent, 'agent'), data: b64ToBytes(s(o.data, 'data')) }),
+  dir_listing: (o) => ({ type: 'dir_listing', node: s(o.node, 'node'), listing: dirListing(o.listing) }),
   pane_stream: (o) => ({ type: 'pane_stream', agent: s(o.agent, 'agent'), data: b64ToBytes(s(o.data, 'data')) }),
   agent_status: (o) => ({ type: 'agent_status', agent: s(o.agent, 'agent'), node: s(o.node, 'node'), status: agentStatus(o.status) }),
   otp_offer: (o) => ({ type: 'otp_offer', ...otpOffer(o) }),
@@ -414,6 +420,7 @@ const uiDecoders = {
   detach: (o) => ({ type: 'detach', agent: s(o.agent, 'agent') }),
   pane_input: (o) => ({ type: 'pane_input', agent: s(o.agent, 'agent'), data: b64ToBytes(s(o.data, 'data')) }),
   resize: (o) => ({ type: 'resize', agent: s(o.agent, 'agent'), cols: num(o.cols, 'cols'), rows: num(o.rows, 'rows') }),
+  list_dir: (o) => ({ type: 'list_dir', node: s(o.node, 'node'), path: s(o.path, 'path') }),
   attach_stream: (o) => ({ type: 'attach_stream', agent: s(o.agent, 'agent'), cols: num(o.cols, 'cols'), rows: num(o.rows, 'rows') }),
   kill: (o) => ({ type: 'kill', agent: s(o.agent, 'agent') }),
   add_device: (o) => ({ type: 'add_device', kind: oneOf(o.kind, DEVICE_KINDS, 'kind') }),

@@ -15,7 +15,7 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use ulak_proto::{BranchName, CleanItem, NodeSettings, RepoEntry, RepoRef};
+use ulak_proto::{BranchName, CleanItem, DirListing, NodeSettings, RepoEntry, RepoRef};
 
 /// At most this many entries are reported to the hub.
 pub const INDEX_CAP: usize = 200;
@@ -115,6 +115,56 @@ impl Settings {
 }
 
 /// `~` and `~/x` become `$HOME` paths (on the node); anything else is unchanged.
+/// Sub-folders of `requested` (`~` expanded; empty = home) for the New agent folder browser.
+/// Only folders under one of `allowed` (home, repo roots) can be listed; hidden ones are skipped.
+/// Blocking: run it in `spawn_blocking`.
+pub fn list_dirs(requested: &str, allowed: &[PathBuf]) -> DirListing {
+    let fail = |e: String| DirListing {
+        requested: requested.to_owned(),
+        path: String::new(),
+        dirs: Vec::new(),
+        error: Some(e),
+    };
+    let asked = if requested.trim().is_empty() {
+        "~"
+    } else {
+        requested.trim()
+    };
+    let Ok(abs) = std::fs::canonicalize(expand_tilde(Path::new(asked))) else {
+        return fail(format!("{asked} does not exist"));
+    };
+    let inside = allowed
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .any(|r| abs.starts_with(&r));
+    if !inside {
+        return fail("only folders under your home or a repo root can be browsed".into());
+    }
+    let rd = match std::fs::read_dir(&abs) {
+        Ok(rd) => rd,
+        Err(e) => return fail(format!("cannot read {}: {e}", abs.display())),
+    };
+    let mut dirs: Vec<String> = rd
+        .flatten()
+        .take(20 * DirListing::MAX) // a huge folder must not stall the node
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            (!name.starts_with('.')
+                && name.len() <= 255
+                && std::fs::metadata(e.path()).ok()?.is_dir())
+            .then_some(name)
+        })
+        .collect();
+    dirs.sort();
+    dirs.truncate(DirListing::MAX);
+    DirListing {
+        requested: requested.to_owned(),
+        path: abs.display().to_string(),
+        dirs,
+        error: None,
+    }
+}
+
 pub fn expand_tilde(p: &Path) -> PathBuf {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     if p == Path::new("~") {
@@ -891,6 +941,43 @@ mod tests {
             parse_status("## No commits yet on main\n").0.as_deref(),
             Some("main")
         );
+    }
+
+    #[test]
+    fn list_dirs_stays_inside_the_allowed_roots() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("home");
+        for d in ["b", "a", ".hidden", "a/inner"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(t.path(), root.join("escape")).unwrap();
+        let allowed = [root.clone()];
+        let l = list_dirs(root.to_str().unwrap(), &allowed);
+        assert_eq!(l.error, None);
+        assert_eq!(l.dirs, ["a", "b", "escape"]); // sorted, no hidden, no files
+        assert_eq!(
+            l.path,
+            std::fs::canonicalize(&root).unwrap().display().to_string()
+        );
+        assert_eq!(
+            list_dirs(root.join("a").to_str().unwrap(), &allowed).dirs,
+            ["inner"]
+        );
+        // A symlink out of the root, `..` and absolute paths elsewhere are refused.
+        for bad in [
+            root.join("escape"),
+            root.join("a/../.."),
+            PathBuf::from("/etc"),
+        ] {
+            let l = list_dirs(bad.to_str().unwrap(), &allowed);
+            assert!(l.error.unwrap().contains("only folders"), "{bad:?}");
+            assert!(l.dirs.is_empty() && l.path.is_empty());
+        }
+        assert!(list_dirs("/no/such/dir", &allowed)
+            .error
+            .unwrap()
+            .contains("does not exist"));
     }
 
     #[test]

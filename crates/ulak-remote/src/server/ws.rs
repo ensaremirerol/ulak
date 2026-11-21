@@ -243,6 +243,14 @@ fn on_daemon(h: &Hub, id: &NodeId, m: DaemonToHub) -> Result<(), ServerError> {
         }
         DaemonToHub::PaneOutput { agent, data } => h.pane_output(agent, data),
         DaemonToHub::PaneStream { agent, data } => h.pane_stream(id, agent, data),
+        DaemonToHub::DirListing(listing) => {
+            if listing.is_sane() {
+                h.ui_send(HubToUi::DirListing {
+                    node: id.clone(),
+                    listing,
+                });
+            }
+        }
         DaemonToHub::Version(info) => {
             if info.proto() < MIN_DAEMON_PROTO {
                 return Err(ServerError::DaemonTooOld {
@@ -519,6 +527,12 @@ fn on_ui(
                 },
             )?;
             h.attach(conn, tx, &agent);
+        }
+        UiToHub::ListDir { node, path } => {
+            if path.len() > 4096 {
+                return Err(ServerError::BadArgs("path is too long".into()));
+            }
+            h.to_daemon(&node, HubToDaemon::ListDir { path })?;
         }
         UiToHub::AttachStream { agent, cols, rows } => {
             let node = h.node_of_agent(&agent)?;

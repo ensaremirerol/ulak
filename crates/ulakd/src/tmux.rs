@@ -17,8 +17,8 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
 use ulak_proto::{
-    AgentId, AgentStatus, BlockerKind, BranchName, CleanItem, GitToken, HubProfile, NodeSettings,
-    ProfileInfo, ProfileKey, RepoEntry, RepoRef, Source, SpawnSpec,
+    AgentId, AgentStatus, BlockerKind, BranchName, CleanItem, DirListing, GitToken, HubProfile,
+    NodeSettings, ProfileInfo, ProfileKey, RepoEntry, RepoRef, Source, SpawnSpec,
 };
 
 /// Session option that remembers the profile key, so a restarted daemon can re-adopt the agent.
@@ -1192,6 +1192,22 @@ impl AgentHost for Tmux {
     }
     fn detach_stream(&self, id: &AgentId) {
         self.unstream_agent(id);
+    }
+    async fn list_dir(&self, path: String) -> DirListing {
+        let mut allowed: Vec<PathBuf> = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        allowed.extend(self.settings().repo_roots.iter().cloned());
+        let p = path.clone();
+        tokio::task::spawn_blocking(move || crate::repos::list_dirs(&p, &allowed))
+            .await
+            .unwrap_or_else(|e| DirListing {
+                requested: path,
+                path: String::new(),
+                dirs: Vec::new(),
+                error: Some(format!("listing failed: {e}")),
+            })
     }
     async fn nudge(&self, id: &AgentId, text: &str) -> Result<(), AgentError> {
         self.nudge_agent(id, text).await

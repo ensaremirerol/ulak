@@ -1,7 +1,7 @@
 import type {
   AgentId, AgentStatus, Blocker, DeviceInfo, DeviceKind, HubToUi, Message, NodeId, NodeInfo,
   OtpOffer, Question, CredentialInfo, RepoInfo, QueuedSpawn, QuestionId, ThreadId, UpdateState, VersionInfo, BlockerId,
-  ProfileInfo, RepoEntry, CleanItem, ScopedProfile, NodeSettings, Telemetry,
+  ProfileInfo, RepoEntry, CleanItem, DirListing, ScopedProfile, NodeSettings, Telemetry,
 } from '../proto';
 import type { ConnState } from '../net';
 
@@ -37,6 +37,8 @@ export interface State {
   devices: DeviceInfo[];
   otp: OtpOffer | null;
   terminals: Record<AgentId, TermBuf>;
+  /** Folder listings by `node\0requested path` (the New agent folder browser). */
+  dirListings: Record<string, DirListing>;
   /** The last size each agent's terminal was fitted to (cells); a stream (re)attach asks for it. */
   termSizes: Record<AgentId, { cols: number; rows: number }>;
   selected: AgentId | null;
@@ -138,6 +140,7 @@ export type Intent =
   | { kind: 'kill'; agent: AgentId }
   /** The agent terminal's size in the viewer (cells); nodes from 0.1.10 resize the pane to it. */
   | { kind: 'resize'; agent: AgentId; cols: number; rows: number }
+  | { kind: 'list_dir'; node: NodeId; path: string }
   /** Restart the agent's stream for a full repaint (the buffered bytes cannot be replayed). */
   | { kind: 'reattach'; agent: AgentId }
   | { kind: 'add_device'; device: DeviceKind }

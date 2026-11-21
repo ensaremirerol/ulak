@@ -45,40 +45,46 @@ describe('repo preference (mirrors the hub)', () => {
 });
 
 describe('SpawnDialog: profiles and fresh', () => {
+  const toWhere = () => fireEvent.click(screen.getByRole('button', { name: /^Where/ }));
   const folder = () => {
     render(<SpawnDialog onClose={onClose} />);
-    fireEvent.click(screen.getByRole('radio', { name: 'Folder on the node' }));
+    toWhere();
+    fireEvent.click(screen.getByRole('radio', { name: 'Folder on a node' }));
+    type('Path', '/srv/p');
+    fireEvent.click(screen.getByRole('button', { name: 'Use this folder' }));
+    type('What should it do?', 'go');
     type('Agent id', 'w-1');
-    type('Prompt', 'go');
-    type('Working directory', '/srv/p');
   };
+  const agents = () => [...(screen.getByLabelText('Agent') as HTMLSelectElement).options].map((o) => o.text);
+  const runOn = () => [...(screen.getByLabelText('Run on') as HTMLSelectElement).options].map((o) => o.text);
+  const pick = (name: string) => fireEvent.change(screen.getByLabelText('Agent'), { target: { value: name } });
 
   it('picker is the union of node profiles with where each lives; legacy list without reports', () => {
     render(<SpawnDialog onClose={onClose} />);
-    expect(within(screen.getByRole('radiogroup', { name: 'Profile' })).getAllByRole('radio').map((r) => r.textContent)).toEqual(['claude', 'antigravity', 'custom']);
+    expect(agents()).toEqual(['claude', 'antigravity', 'custom']);
     act(() => feed(
       { type: 'node_profiles', node: 'n1', profiles: [prof('claude-work', { config_dir: '/h/.cw' }), prof('antigravity', { installed: false })] },
       { type: 'node_profiles', node: 'n2', profiles: [prof('claude-work', { login_blocked: true })] },
     ));
-    expect(within(screen.getByRole('radiogroup', { name: 'Profile' })).getAllByRole('radio').map((r) => r.textContent)).toEqual(['claude-work', 'antigravity', 'custom']);
+    expect(agents()).toEqual(['claude-work', 'antigravity', 'custom']);
     expect(screen.getByText('On alpha: config /h/.cw; beta: login required')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'beta - login required' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('radio', { name: 'antigravity' }));
-    expect(screen.getByText('On alpha: not installed, installs on first spawn')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'beta - no antigravity' })).toBeTruthy();
+    expect(runOn()).toContain('beta - login required');
+    pick('antigravity');
+    expect(screen.getByText('On alpha: not installed, installs on first start')).toBeTruthy();
+    expect(runOn()).toContain('beta - no antigravity');
     // An offline node's last report is not offered.
     act(() => feed({ type: 'node_update', ...node('n1', 'alpha', [], 'Offline') }));
-    expect(within(screen.getByRole('radiogroup', { name: 'Profile' })).getAllByRole('radio').map((r) => r.textContent)).toEqual(['claude-work', 'custom']);
+    expect(agents()).toEqual(['claude-work', 'custom']);
   });
 
-  it('spawns with the chosen profile name, remembers it, hides the config dir under Advanced', () => {
+  it('spawns with the chosen profile name, remembers it, keeps the config folder under More options', () => {
     feed({ type: 'node_profiles', node: 'n1', profiles: [prof('claude-work'), prof('claude-personal')] });
     folder();
-    expect(screen.getByLabelText('CLAUDE_CONFIG_DIR (optional)').closest('details')!.open).toBe(false);
-    fireEvent.click(screen.getByRole('radio', { name: 'claude-personal' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Spawn' }));
-    expect(sent).toEqual([{
-      type: 'spawn', target: 'Auto',
+    expect(screen.getByLabelText('Config folder (CLAUDE_CONFIG_DIR)').closest('details')!.open).toBe(false);
+    pick('claude-personal');
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(sent.filter((f) => f.type === 'spawn')).toEqual([{
+      type: 'spawn', target: { Node: 'n1' },
       spec: { agent_id: 'w-1', profile: { binary: 'claude-personal', args: [], config_dir: null }, workdir: '/srv/p', prompt: 'go', env: {} },
     }]);
     expect(localStorage.getItem('ulak.spawn.profile')).toBe('claude-personal');
@@ -88,7 +94,7 @@ describe('SpawnDialog: profiles and fresh', () => {
     localStorage.setItem('ulak.spawn.profile', 'claude-personal');
     feed({ type: 'node_profiles', node: 'n1', profiles: [prof('claude-work'), prof('claude-personal')] });
     render(<SpawnDialog onClose={onClose} />);
-    expect(screen.getByRole('radio', { name: 'claude-personal' }).getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByLabelText('Agent') as HTMLSelectElement).value).toBe('claude-personal');
   });
 
   it('a node lacking the profile is not a target: the spawn queues', () => {
@@ -98,48 +104,55 @@ describe('SpawnDialog: profiles and fresh', () => {
       { type: 'node_profiles', node: 'n2', profiles: [prof('claude-solo')] },
     );
     folder();
-    expect(screen.getByRole('button', { name: 'Spawn' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('radio', { name: 'claude-solo' }));
-    expect(screen.getByRole('button', { name: 'alpha - no claude-solo' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start agent' })).toBeTruthy();
+    pick('claude-solo');
+    expect(runOn()).toContain('alpha - no claude-solo');
     expect(screen.getByRole('button', { name: 'Add to queue' })).toBeTruthy();
   });
 
-  it('agent id looks required and says so when missing', () => {
+  it('a cleared agent id is required, says so and sends nothing', () => {
     folder();
     type('Agent id', '');
     const input = screen.getByLabelText('Agent id');
     expect(input.getAttribute('aria-required')).toBe('true');
-    expect(screen.queryByText('Agent id is required.')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Spawn' }));
     expect(screen.getByText('Agent id is required.')).toBeTruthy();
-    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
+    expect(sent.filter((f) => f.type === 'spawn')).toEqual([]);
   });
 
   it('repo spawn: fresh switch (off by default) and the reuse hint', () => {
     feed({ type: 'credentials', credentials: [cred] }, { type: 'node_repos', node: 'n2', repos: [entry('octocat/hello-world')] });
     render(<SpawnDialog onClose={onClose} />);
-    act(() => feed({ type: 'repos', credential: 'cred-1', query: null, has_more: false, repos: [{ full_name: 'octocat/hello-world', private: false, default_branch: 'main', pushed_at_ms: 1, description: '' }] }));
-    fireEvent.click(screen.getByText('octocat/hello-world'));
-    act(() => feed({ type: 'branches', credential: 'cred-1', repo: 'octocat/hello-world', branches: ['main'], default_branch: 'main' }));
-    expect(screen.getByRole('status').textContent).toBe('Already on beta (clean)');
-    const fresh = screen.getByRole('switch', { name: 'Fresh clone' }) as HTMLInputElement;
-    expect(fresh.checked).toBe(false);
-    expect(screen.getByText('Off: reuse an existing clone on the node when possible.')).toBeTruthy();
-    expect(screen.queryByLabelText('CLAUDE_CONFIG_DIR (optional)')).toBeNull();
+    const chooseRepo = (freshOn: boolean) => {
+      toWhere();
+      act(() => feed({ type: 'repos', credential: 'cred-1', query: null, has_more: false, repos: [{ full_name: 'octocat/hello-world', private: false, default_branch: 'main', pushed_at_ms: 1, description: '' }] }));
+      fireEvent.click(screen.getByText('octocat/hello-world'));
+      act(() => feed({ type: 'branches', credential: 'cred-1', repo: 'octocat/hello-world', branches: ['main'], default_branch: 'main' }));
+      expect(screen.getByText('Already on beta (clean)')).toBeTruthy();
+      const fresh = screen.getByRole('switch', { name: 'Fresh clone' }) as HTMLInputElement;
+      if (freshOn) fireEvent.click(fresh);
+      else {
+        expect(fresh.checked).toBe(false);
+        expect(screen.getByText('Off: reuse an existing clone on the node when possible.')).toBeTruthy();
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Use hello-world @ main' }));
+    };
+    chooseRepo(false);
+    expect(screen.queryByLabelText('Config folder (CLAUDE_CONFIG_DIR)')).toBeNull();
+    type('What should it do?', 'go');
     type('Agent id', 'r-1');
-    type('Prompt', 'go');
     const src = { kind: 'repo', repo: 'octocat/hello-world', branch: 'main', credential: 'cred-1', allow_push: false };
     const frame = (source: object) => ({
       type: 'spawn', target: 'Auto',
       spec: { agent_id: 'r-1', profile: { binary: 'claude', args: [], config_dir: null }, workdir: '', prompt: 'go', env: {}, source },
     });
     sent.length = 0;
-    fireEvent.click(screen.getByRole('button', { name: 'Spawn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
     expect(sent).toEqual([frame(src)]);
     act(() => feed({ type: 'error', message: 'nope' }));
-    fireEvent.click(fresh);
+    chooseRepo(true);
     sent.length = 0;
-    fireEvent.click(screen.getByRole('button', { name: 'Spawn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
     expect(sent).toEqual([frame({ ...src, fresh: true })]);
   });
 });

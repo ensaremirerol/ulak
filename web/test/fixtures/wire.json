@@ -157,6 +157,29 @@
       ],
       "type": "devices"
     },
+    "dir_listing": {
+      "listing": {
+        "dirs": [
+          "ulak",
+          "notes"
+        ],
+        "error": null,
+        "path": "/home/me/workspace",
+        "requested": "~/workspace"
+      },
+      "node": "vps-fra",
+      "type": "dir_listing"
+    },
+    "dir_listing_error": {
+      "listing": {
+        "dirs": [],
+        "error": "only folders under your home or a repo root can be browsed",
+        "path": "",
+        "requested": "/etc"
+      },
+      "node": "vps-fra",
+      "type": "dir_listing"
+    },
     "error": {
       "message": "node vps-fra is offline",
       "type": "error"
@@ -676,6 +699,11 @@
     },
     "list_devices": {
       "type": "list_devices"
+    },
+    "list_dir": {
+      "node": "vps-fra",
+      "path": "~/workspace",
+      "type": "list_dir"
     },
     "list_queue": {
       "type": "list_queue"

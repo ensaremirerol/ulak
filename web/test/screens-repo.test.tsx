@@ -26,11 +26,13 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 const type = (label: string, value: string) => fireEvent.input(screen.getByLabelText(label), { target: { value } });
+const toWhere = () => fireEvent.click(screen.getByRole('button', { name: /^Where/ }));
 
 describe('SpawnDialog: repository source', () => {
-  it('opens on Repository and asks for a token when there is no credential; the token is write-only', () => {
+  it('Where opens on GitHub repository and asks for a token when there is no credential; the token is write-only', () => {
     render(<SpawnDialog onClose={onClose} />);
-    expect(screen.getByRole('radio', { name: 'Repository' }).getAttribute('aria-checked')).toBe('true');
+    toWhere();
+    expect(screen.getByRole('radio', { name: 'GitHub repository' }).getAttribute('aria-checked')).toBe('true');
     const link = screen.getByRole('link', { name: /Contents: read/ });
     expect(link.getAttribute('href')).toBe('https://github.com/settings/personal-access-tokens/new');
     expect(link.getAttribute('rel')).toBe('noopener noreferrer');
@@ -49,6 +51,7 @@ describe('SpawnDialog: repository source', () => {
   function open() {
     feed({ type: 'credentials', credentials: [cred] });
     render(<SpawnDialog onClose={onClose} />);
+    toWhere();
   }
 
   it('lists repos, debounces search by 300 ms, loads more', () => {
@@ -94,25 +97,34 @@ describe('SpawnDialog: repository source', () => {
     const push = screen.getByRole('switch', { name: 'Allow this agent to push' }) as HTMLInputElement;
     expect(push.checked).toBe(false);
     expect(screen.queryByText(/hold your GitHub token/)).toBeNull();
+    fireEvent.click(push);
+    expect(screen.getByText(/hold your GitHub token/)).toBeTruthy();
+    fireEvent.click(push);
+    fireEvent.click(screen.getByRole('button', { name: 'Use hello-world @ main' }));
+    expect(screen.getByRole('button', { name: /^Where/ }).textContent).toContain('octocat/hello-world @ main');
+    type('What should it do?', 'fix the bug');
     type('Agent id', 'reviewer-2');
-    type('Prompt', 'fix the bug');
     sent.length = 0;
-    fireEvent.click(screen.getByRole('button', { name: 'Spawn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start agent' }));
     expect(sent).toEqual([{
       type: 'spawn', target: 'Auto',
       spec: { agent_id: 'reviewer-2', env: {}, profile: { args: [], binary: 'claude', config_dir: null }, prompt: 'fix the bug', workdir: '',
         source: { kind: 'repo', repo: 'octocat/hello-world', branch: 'main', credential: 'cred-1', allow_push: false } },
     }]);
-    fireEvent.click(push);
-    expect(screen.getByText(/hold your GitHub token/)).toBeTruthy();
   });
 
-  it('Spawn stays disabled until a repo and branch are chosen; folder stays available', () => {
-    open();
-    expect((screen.getByRole('button', { name: 'Spawn' }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('radio', { name: 'Folder on the node' }));
-    expect(screen.getByLabelText('Working directory')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Spawn' }) as HTMLButtonElement).disabled).toBe(false);
+  it('Use stays disabled until a repo and branch are chosen; Start until Where is set; Back keeps the form', () => {
+    feed({ type: 'credentials', credentials: [cred] });
+    render(<SpawnDialog onClose={onClose} />);
+    type('What should it do?', 'keep me');
+    expect((screen.getByRole('button', { name: 'Start agent' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Choose where it works.')).toBeTruthy();
+    toWhere();
+    expect((screen.getByRole('button', { name: 'Pick a repository' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: 'Folder on a node' }));
+    expect(screen.getByLabelText('Path')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect((screen.getByLabelText('What should it do?') as HTMLTextAreaElement).value).toBe('keep me');
   });
 
   it('Remove is a two-click delete_credential', () => {
@@ -125,10 +137,10 @@ describe('SpawnDialog: repository source', () => {
 });
 
 describe('queue', () => {
-  it('normal state: no notice, button says Spawn', () => {
+  it('normal state: no notice, button says Start agent', () => {
     render(<SpawnDialog onClose={onClose} />);
     expect(screen.queryByText(/wait in the queue/)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Spawn' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start agent' })).toBeTruthy();
   });
 
   it('no eligible node: notice and Add to queue', () => {

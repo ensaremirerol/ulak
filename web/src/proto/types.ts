@@ -210,6 +210,16 @@ export interface NodeSettingsEntry {
   settings: NodeSettings;
 }
 
+/** Sub-folders of one folder on a node (the folder browser). */
+export interface DirListing {
+  /** The path as asked (`~` allowed). */
+  requested: string;
+  /** The absolute folder listed ('' on error). */
+  path: string;
+  dirs: string[];
+  error: string | null;
+}
+
 /** A git checkout on a node. */
 export interface RepoEntry {
   full_name: RepoRef;
@@ -248,6 +258,7 @@ export type UiToHub =
   | { type: 'pane_input'; agent: AgentId; data: Uint8Array }
   | { type: 'resize'; agent: AgentId; cols: number; rows: number }
   | { type: 'attach_stream'; agent: AgentId; cols: number; rows: number }
+  | { type: 'list_dir'; node: NodeId; path: string }
   | { type: 'kill'; agent: AgentId }
   | { type: 'add_device'; kind: DeviceKind }
   | { type: 'revoke_device'; id: NodeId }
@@ -284,6 +295,7 @@ export type HubToUi =
   | { type: 'pane_output'; agent: AgentId; data: Uint8Array }
   /** Raw bytes of the agent's tmux client (after `attach_stream`): a byte stream, not redraws. */
   | { type: 'pane_stream'; agent: AgentId; data: Uint8Array }
+  | { type: 'dir_listing'; node: NodeId; listing: DirListing }
   | { type: 'agent_status'; agent: AgentId; node: NodeId; status: AgentStatus }
   | ({ type: 'otp_offer' } & OtpOffer)
   | { type: 'devices'; devices: DeviceInfo[] }

@@ -979,3 +979,31 @@ pub struct DeviceInfo {
     pub created_ms: u64,
     pub revoked: bool,
 }
+
+/// Sub-folders of one folder on a node (the New agent folder browser). Only folders under the
+/// node user's home or a repo root are listed; hidden ones are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirListing {
+    /// The path as asked (`~` and relative forms allowed).
+    pub requested: String,
+    /// The absolute folder listed (empty on error).
+    pub path: String,
+    /// Sub-folder names, sorted, at most [`DirListing::MAX`].
+    pub dirs: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl DirListing {
+    pub const MAX: usize = 500;
+    /// Bounds a relayed listing (a node is not trusted to keep them).
+    pub fn is_sane(&self) -> bool {
+        self.requested.len() <= 4096
+            && self.path.len() <= 4096
+            && self.dirs.len() <= Self::MAX
+            && self
+                .dirs
+                .iter()
+                .all(|d| !d.is_empty() && d.len() <= 255 && !d.contains('/'))
+            && self.error.as_ref().is_none_or(|e| e.len() <= 512)
+    }
+}
