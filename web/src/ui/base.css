@@ -240,3 +240,14 @@ a.tab[aria-current='page'] { border-bottom-color: var(--accent); color: var(--te
 .var-chip { cursor: pointer; background: transparent; }
 .var-chip:hover { border-color: var(--accent); }
 .input.num { width: 80px; }
+/* inbox */
+.inbox-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-lg); }
+.inbox-card.warn { border-left-color: var(--warn); }
+.inbox-card.info { border-left-color: var(--info); }
+.inbox-card.bad { border-left-color: var(--bad); }
+.inbox-card strong { overflow-wrap: anywhere; }
+.inbox-kind { flex: none; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.inbox-kind.warn { color: var(--warn); } .inbox-kind.info { color: var(--info); } .inbox-kind.bad { color: var(--bad); }
+.ok-note { margin: 0; color: var(--ok); }
+.node-card { display: flex; flex-direction: column; gap: 10px; }
+.warn-link { color: var(--warn); }

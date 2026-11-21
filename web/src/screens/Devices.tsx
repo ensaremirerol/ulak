@@ -69,7 +69,7 @@ function CommandBlock({ title, note, cmd }: { title: string; note: string; cmd: 
   );
 }
 
-function NodeInstall({ otp, fp }: { otp: string; fp: string }) {
+export function NodeInstall({ otp, fp }: { otp: string; fp: string }) {
   const [raw, setRaw] = useState(`https://${location.host}`);
   const hub = hubOrigin(raw);
   const v = store.state.value.hubVersion?.version ?? null;

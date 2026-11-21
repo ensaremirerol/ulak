@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { UiToHub, UpdateState, VersionInfo } from '../src/proto';
 import { Nodes } from '../src/screens/Nodes';
@@ -75,10 +75,19 @@ describe('Nodes', () => {
     expect(sent).toEqual([{ type: 'check_update', node: null }]);
     status('n1', { state: 'available', version: '2.0.0' });
     rerender(<Nodes />);
-    fireEvent.click(screen.getByRole('button', { name: 'Update all' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update all (1)' }));
     expect(sent).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Restarts every updated node: confirm' }));
     expect(sent[1]).toEqual({ type: 'update_node', node: null });
+  });
+
+  it('Add node creates a node code and shows the install command for this hub', () => {
+    render(<Nodes />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add node' })[0]!);
+    expect(sent).toEqual([{ type: 'add_device', kind: 'node' }]);
+    act(() => feed({ type: 'otp_offer', kind: 'node', otp: 'ABCD1234', hub_fingerprint: 'fp', expires_ms: 2_000_000 }));
+    const dialog = screen.getByRole('dialog', { name: 'Add node' });
+    expect(dialog.textContent).toContain(`ULAKD_OTP='ABCD1234' ULAKD_FINGERPRINT='fp' sh -s -- 'https://${location.host}'`);
   });
 
   it('shows hub version and mismatch markers', () => {
