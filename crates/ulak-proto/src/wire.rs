@@ -282,6 +282,23 @@ pub enum UiToHub {
         node: NodeId,
         path: String,
     },
+    /// `Spawn` for a GitHub issue: the hub links the agent to it (Issues, comments, routing).
+    SpawnForIssue {
+        target: SpawnTarget,
+        spec: SpawnSpec,
+        issue: IssueStart,
+    },
+    /// Open issues of your repositories and the tagged ones. Reply: `Issues` (requester only).
+    ListIssues,
+    /// Replace templates, tagged repositories and routing. Reply: `IssueSettings` (broadcast).
+    SaveIssueSettings {
+        settings: IssueSettings,
+    },
+    /// An Inbox forward: `to: Some` hands it to that running agent, `None` leaves it in Issues.
+    ResolveForward {
+        id: String,
+        to: Option<AgentId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -429,6 +446,23 @@ pub enum HubToUi {
         dry_run: bool,
         removed: Vec<CleanItem>,
         kept: Vec<CleanItem>,
+    },
+    Issues {
+        issues: Vec<Issue>,
+        /// One line per source that failed (e.g. a tagged repository that is gone).
+        errors: Vec<String>,
+    },
+    /// On connect and after every change.
+    IssueSettings {
+        settings: IssueSettings,
+    },
+    /// Every agent started for an issue (on connect and after every change).
+    IssueLinks {
+        links: Vec<IssueLink>,
+    },
+    /// The last forwards, newest first (on connect and after every change).
+    Forwards {
+        forwards: Vec<Forward>,
     },
     Error {
         message: String,

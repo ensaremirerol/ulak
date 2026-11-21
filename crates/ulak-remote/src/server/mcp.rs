@@ -41,7 +41,7 @@ pub(crate) async fn handle(State(h): State<Arc<Hub>>, headers: HeaderMap, body: 
                    "serverInfo": {"name": "ulak-hub", "version": env!("CARGO_PKG_VERSION")}}),
         ),
         Some("ping") => rpc_ok(id, json!({})),
-        Some("tools/list") => rpc_ok(id, json!({"tools": tools()})),
+        Some("tools/list") => rpc_ok(id, json!({"tools": tools(h.can_forward(&from))})),
         Some("tools/call") => {
             let name = params
                 .get("name")
@@ -85,10 +85,11 @@ fn rpc_err(id: Value, code: i32, message: &str) -> Response {
         .into_response()
 }
 
-fn tools() -> Value {
+/// `route`: the agent has the `ulak-route` skill and also gets `ulak_forward_issue`.
+fn tools(route: bool) -> Value {
     let obj =
         |props: Value, req: Value| json!({"type": "object", "properties": props, "required": req});
-    json!([
+    let mut t = json!([
         {"name": "send_message", "description": "Send a message to another agent.",
          "inputSchema": obj(json!({"to": {"type": "string"}, "body": {"type": "string"}, "thread": {"type": "string"}}), json!(["to", "body"]))},
         {"name": "read_inbox", "description": "Read your pending messages, oldest first.",
@@ -97,7 +98,15 @@ fn tools() -> Value {
          "inputSchema": obj(json!({"question": {"type": "string"}}), json!(["question"]))},
         {"name": "check_answer", "description": "Fetch the answer to an earlier ask_human question.",
          "inputSchema": obj(json!({"question_id": {"type": "string"}}), json!(["question_id"]))},
-    ])
+    ]);
+    if route {
+        if let Some(a) = t.as_array_mut() {
+            a.push(json!({"name": "ulak_forward_issue",
+                "description": "Hand a GitHub issue, or part of your task, to the agent that owns that area. to: \"auto\" (routing rules decide), an agent name, or \"new\" (start a new agent). Returns {forwarded_to} or {waiting_for: \"you\"}.",
+                "inputSchema": obj(json!({"issue": {"type": "string", "description": "owner/name#number"}, "to": {"type": "string"}, "reason": {"type": "string"}}), json!(["issue", "to", "reason"]))}));
+        }
+    }
+    t
 }
 
 #[derive(Deserialize)]
@@ -115,6 +124,12 @@ struct AskArgs {
     question: String,
 }
 #[derive(Deserialize)]
+struct ForwardArgs {
+    issue: String,
+    to: String,
+    reason: String,
+}
+#[derive(Deserialize)]
 struct CheckArgs {
     question_id: QuestionId,
 }
@@ -123,7 +138,7 @@ fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ServerError> {
     serde_json::from_value(v).map_err(|e| ServerError::BadArgs(e.to_string()))
 }
 
-async fn call(h: &Hub, from: &AgentId, name: &str, a: Value) -> Result<String, ServerError> {
+async fn call(h: &Arc<Hub>, from: &AgentId, name: &str, a: Value) -> Result<String, ServerError> {
     let now = now_ms();
     match name {
         "send_message" => {
@@ -168,6 +183,14 @@ async fn call(h: &Hub, from: &AgentId, name: &str, a: Value) -> Result<String, S
                 return Err(QuestionError::NotFound(a.question_id).into());
             }
             answer_or_pending(h, &a.question_id)
+        }
+        "ulak_forward_issue" => {
+            let a: ForwardArgs = args(a)?;
+            let (h, from) = (h.clone(), from.clone());
+            tokio::task::spawn_blocking(move || h.forward_issue(&from, &a.issue, &a.to, &a.reason))
+                .await
+                .map_err(|_| ServerError::BadArgs("internal error".into()))?
+                .map(|v| v.to_string())
         }
         other => Err(ServerError::BadArgs(format!("unknown tool {other:?}"))),
     }

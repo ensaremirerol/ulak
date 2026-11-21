@@ -331,6 +331,16 @@ async fn ui_loop(h: Arc<Hub>, id: NodeId, sess: NodeId, mut s: WebSocket) {
     if !send(&mut s, &config).await {
         return;
     }
+    let issues = h.issue_frames().unwrap_or_else(|e| {
+        vec![HubToUi::Error {
+            message: e.to_string(),
+        }]
+    });
+    for f in issues {
+        if !send(&mut s, &f).await {
+            return;
+        }
+    }
     let known: Vec<_> = h
         .versions
         .lock()
@@ -751,6 +761,20 @@ fn on_ui(
         UiToHub::CancelQueued { id } => {
             Queue::cancel_queued(&*h.store, &id)?;
             h.ui_send(HubToUi::QueueRemoved { id });
+        }
+        UiToHub::SpawnForIssue {
+            target,
+            spec,
+            issue,
+        } => run_blocking(h, tx, move |h| {
+            h.spawn_for_issue(target, spec, issue, now_ms())
+        }),
+        UiToHub::ListIssues => reply_blocking(h, tx, |h| h.list_issues()),
+        UiToHub::SaveIssueSettings { settings } => {
+            run_blocking(h, tx, move |h| h.save_issue_settings(settings));
+        }
+        UiToHub::ResolveForward { id, to } => {
+            run_blocking(h, tx, move |h| h.resolve_forward(&id, to));
         }
         UiToHub::ListQueue => {
             let items = Queue::queue_list(&*h.store)?

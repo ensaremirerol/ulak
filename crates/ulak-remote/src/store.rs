@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS queue(
   state TEXT NOT NULL, created_ms INTEGER NOT NULL, placed_ms INTEGER, error TEXT);
 CREATE TABLE IF NOT EXISTS hub_profiles(
   node TEXT NOT NULL, name TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(node, name));
-CREATE TABLE IF NOT EXISTS node_settings(node TEXT PRIMARY KEY, json TEXT NOT NULL);";
+CREATE TABLE IF NOT EXISTS node_settings(node TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, json TEXT NOT NULL);";
 
 pub struct Store(Mutex<Connection>);
 
@@ -60,6 +61,28 @@ impl Store {
             c.execute("ALTER TABLE devices ADD COLUMN renewed_ms INTEGER", [])?;
         }
         Ok(Self(Mutex::new(c)))
+    }
+    /// A small hub-wide JSON document (issue settings, links, forwards); `None` if never saved.
+    pub(crate) fn kv_get<T: serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>, HubProfileError> {
+        let json: Option<String> = self
+            .conn()
+            .query_row("SELECT json FROM kv WHERE key=?1", [key], |r| r.get(0))
+            .optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+    }
+    pub(crate) fn kv_put<T: serde::Serialize>(
+        &self,
+        key: &str,
+        v: &T,
+    ) -> Result<(), HubProfileError> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO kv(key,json) VALUES (?1,?2)",
+            params![key, serde_json::to_string(v)?],
+        )?;
+        Ok(())
     }
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0

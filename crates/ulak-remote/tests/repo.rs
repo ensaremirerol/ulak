@@ -343,10 +343,56 @@ fn route(path: &str) -> (u16, Vec<(String, String)>, String) {
     if path == "/repos/o/n" {
         return ok(json!({"default_branch": "trunk"}).to_string());
     }
+    if let Some(r) = issue_route(path) {
+        return r;
+    }
     if path == "/repos/o/n/branches?per_page=100" {
         return ok(json!([{"name": "trunk"}, {"name": "dev"}]).to_string());
     }
     (404, vec![], "{}".into())
+}
+
+fn gh_issue(repo: &str, n: u64, assoc: &str, labels: &[&str]) -> Value {
+    json!({"number": n, "title": format!("Issue {n}"), "body": "text\u{1b}[31m red",
+        "user": {"login": "someone"}, "author_association": assoc,
+        "labels": labels.iter().map(|l| json!({"name": l})).collect::<Vec<_>>(),
+        "comments": 2, "updated_at": format!("2024-05-0{}T12:00:00Z", n % 9 + 1),
+        "html_url": format!("https://github.com/{repo}/issues/{n}"),
+        "repository_url": format!("https://api.github.com/repos/{repo}")})
+}
+
+type Answer = (u16, Vec<(String, String)>, String);
+
+/// Issues: o/n#5 (bug) and o/n#6 (labeled ulak by octo) are yours, t/x#9 is in a tagged repo.
+fn issue_route(path: &str) -> Option<Answer> {
+    let ok = |v: Value| Some((200, vec![], v.to_string()));
+    let (p, _) = path.split_once('?').unwrap_or((path, ""));
+    match p {
+        "/user/issues" if path.contains("labels=ulak") => {
+            ok(json!([gh_issue("o/n", 6, "OWNER", &["ulak"])]))
+        }
+        "/user/issues" => {
+            let mut pr = gh_issue("o/n", 7, "OWNER", &[]);
+            pr["pull_request"] = json!({});
+            ok(json!([
+                gh_issue("o/n", 5, "OWNER", &["bug"]),
+                pr,
+                gh_issue("o/n", 6, "OWNER", &["ulak"])
+            ]))
+        }
+        "/repos/t/x/issues" => ok(json!([gh_issue("t/x", 9, "NONE", &[])])),
+        "/repos/o/n/issues/5" => ok(gh_issue("o/n", 5, "OWNER", &["bug"])),
+        "/repos/o/n/issues/6" => ok(gh_issue("o/n", 6, "OWNER", &["ulak"])),
+        "/repos/o/n/issues/6/events" => ok(json!([
+            {"event": "labeled", "label": {"name": "ulak"}, "actor": {"login": "stranger"}},
+            {"event": "labeled", "label": {"name": "ulak"}, "actor": {"login": "octo"}}])),
+        "/repos/o/n/pulls" if path.contains("head=o:issue-5") => ok(json!([{"number": 11}])),
+        "/repos/o/n/pulls" => ok(json!([])),
+        "/repos/o/n/issues/5/comments" | "/repos/o/n/issues/6/comments" => {
+            Some((201, vec![], "{}".into()))
+        }
+        _ => None,
+    }
 }
 
 fn fake_github() -> Fake {
@@ -412,6 +458,7 @@ fn cfg_in(dir: &std::path::Path, f: &Fake) -> HubConfig {
         github_api: f.api(),
         secrets_key_path: Some(dir.join("secrets.key")),
         queue_tick: Duration::from_millis(50),
+        issues_tick: Duration::from_millis(100),
         ..fast()
     }
 }
@@ -1413,4 +1460,231 @@ async fn repo_spawns_prefer_a_node_with_a_reusable_clone() {
     assert_eq!(spawned_on(&mut dc).await, agent("r-2"));
     assert!(drain_d(&mut da, 100).await.is_empty());
     assert!(drain_d(&mut db, 100).await.is_empty());
+}
+
+// ---- issues ----
+
+async fn issue_settings(u: &mut Ws, s: IssueSettings) {
+    send(u, &UiToHub::SaveIssueSettings { settings: s }).await;
+    until(u, |m| match m {
+        HubToUi::IssueSettings { .. } => Some(()),
+        HubToUi::Error { message } => panic!("{message}"),
+        _ => None,
+    })
+    .await;
+}
+
+fn issue_spawn(a: &str, c: &CredentialId, n: u64, route: bool) -> UiToHub {
+    UiToHub::SpawnForIssue {
+        target: SpawnTarget::Auto,
+        spec: repo_spec(a, c),
+        issue: IssueStart {
+            issue: IssueRef::parse(&format!("o/n#{n}")).unwrap(),
+            branch: Some(format!("issue-{n}")),
+            comment: true,
+            route,
+        },
+    }
+}
+
+async fn spawned(d: &mut Ws) -> SpawnSpec {
+    loop {
+        if let HubToDaemon::Spawn(s) = recv::<HubToDaemon>(d).await {
+            return s;
+        }
+    }
+}
+
+#[tokio::test]
+async fn issues_list_yours_and_tagged_without_prs() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    add_cred(&mut u).await;
+    let s = IssueSettings {
+        tagged: vec![RepoRef::new("t/x").unwrap()],
+        ..IssueSettings::default()
+    };
+    issue_settings(&mut u, s).await;
+    send(&mut u, &UiToHub::ListIssues).await;
+    let (issues, errors) = until(&mut u, |m| match m {
+        HubToUi::Issues { issues, errors } => Some((issues, errors)),
+        HubToUi::Error { message } => panic!("{message}"),
+        _ => None,
+    })
+    .await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let refs: Vec<String> = issues.iter().map(|i| i.issue.to_string()).collect();
+    assert_eq!(refs.len(), 3, "{refs:?}");
+    assert!(!refs.contains(&"o/n#7".to_owned()), "a PR is not an issue");
+    let mine = issues.iter().find(|i| i.issue.number == 5).unwrap();
+    let tagged = issues.iter().find(|i| i.issue.number == 9).unwrap();
+    assert!(mine.trusted && !mine.tagged && mine.labels == ["bug"]);
+    assert!(tagged.tagged && !tagged.trusted);
+    assert_eq!(mine.body, "text[31m red", "control characters are stripped");
+    // Bad settings are refused.
+    let mut bad = IssueSettings::default();
+    bad.routing.max_forwards = 0;
+    send(&mut u, &UiToHub::SaveIssueSettings { settings: bad }).await;
+    assert!(next_error(&mut u).await.contains("forwarded"));
+}
+
+#[tokio::test]
+async fn an_issue_agent_is_linked_commented_on_and_finds_its_pr() {
+    let (fx, f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let c = add_cred(&mut u).await;
+    let (_id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    send(&mut u, &issue_spawn("fix-5", &c, 5, true)).await;
+    let s = spawned(&mut d).await;
+    assert!(s
+        .prompt()
+        .starts_with("go\n\nYou are one of several ulak agents."));
+    assert!(s.prompt().contains("ulak_forward_issue"));
+    send(
+        &mut d,
+        &DaemonToHub::AgentStatus {
+            agent: agent("fix-5"),
+            status: AgentStatus::Running,
+        },
+    )
+    .await;
+    let link = until(&mut u, |m| match m {
+        HubToUi::IssueLinks { links } => links
+            .into_iter()
+            .find(|l| l.pr.is_some() && l.commented_start),
+        _ => None,
+    })
+    .await;
+    assert_eq!((link.agent, link.pr), (agent("fix-5"), Some(11)));
+    let comments = f
+        .paths()
+        .iter()
+        .filter(|p| *p == "/repos/o/n/issues/5/comments")
+        .count();
+    assert_eq!(comments, 2, "one when it started, one for the PR");
+}
+
+#[tokio::test]
+async fn forwards_follow_rules_limits_and_inbox() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    let c = add_cred(&mut u).await;
+    let (_id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    send(&mut u, &issue_spawn("fix-5", &c, 5, true)).await;
+    spawned(&mut d).await;
+    send(&mut u, &issue_spawn("plain-1", &c, 9, false)).await;
+    spawned(&mut d).await;
+    for a in ["fix-5", "plain-1"] {
+        send(
+            &mut d,
+            &DaemonToHub::AgentStatus {
+                agent: agent(a),
+                status: AgentStatus::Running,
+            },
+        )
+        .await;
+    }
+    // Only agents with the skill see (and may call) the tool.
+    let t = token(&fx, &agent("fix-5"));
+    let list = mcp(&fx, &t, "tools/list", json!({})).await;
+    assert!(list.to_string().contains("ulak_forward_issue"));
+    let plain = token(&fx, &agent("plain-1"));
+    assert!(!mcp(&fx, &plain, "tools/list", json!({}))
+        .await
+        .to_string()
+        .contains("ulak_forward_issue"));
+    // Its own issue: refused.
+    let own = mcp(&fx, &t, "tools/call", json!({"name": "ulak_forward_issue", "arguments": {"issue": "o/n#5", "to": "auto", "reason": "r"}})).await;
+    assert_eq!(own["result"]["isError"], true);
+    // No rule matches: Inbox.
+    let out = tool(
+        &fx,
+        &t,
+        "ulak_forward_issue",
+        json!({"issue": "o/n#6", "to": "auto", "reason": "not mine"}),
+    )
+    .await;
+    assert_eq!(out, json!({"waiting_for": "you"}));
+    let fw = until(&mut u, |m| match m {
+        HubToUi::Forwards { forwards } => forwards.into_iter().next(),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        (fw.status, fw.title.as_str()),
+        (ForwardStatus::NeedsOwner, "Issue 6")
+    );
+    // To a running agent: delivered to its inbox and nudged.
+    let out = tool(
+        &fx,
+        &t,
+        "ulak_forward_issue",
+        json!({"issue": "o/n#6", "to": "plain-1", "reason": "yours"}),
+    )
+    .await;
+    assert_eq!(out, json!({"forwarded_to": "plain-1"}));
+    loop {
+        if let HubToDaemon::Nudge { agent: a, .. } = recv::<HubToDaemon>(&mut d).await {
+            assert_eq!(a, agent("plain-1"));
+            break;
+        }
+    }
+    let inbox = tool(&fx, &plain, "read_inbox", json!({})).await;
+    assert!(inbox[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Forwarded issue o/n#6 from fix-5: yours"));
+    // Two forwards already: the third goes to Inbox whatever it asks for.
+    let out = tool(
+        &fx,
+        &t,
+        "ulak_forward_issue",
+        json!({"issue": "o/n#6", "to": "new", "reason": "again"}),
+    )
+    .await;
+    assert_eq!(out, json!({"waiting_for": "you"}));
+    // You leave the first one in Issues.
+    send(
+        &mut u,
+        &UiToHub::ResolveForward {
+            id: fw.id.clone(),
+            to: None,
+        },
+    )
+    .await;
+    until(&mut u, |m| match m {
+        HubToUi::Forwards { forwards } => forwards
+            .iter()
+            .any(|f| f.id == fw.id && f.status == ForwardStatus::Dismissed)
+            .then_some(()),
+        HubToUi::Error { message } => panic!("{message}"),
+        _ => None,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn auto_start_only_for_your_own_label() {
+    let (fx, _f, _d) = start_fake().await;
+    let mut u = ui(&fx).await;
+    add_cred(&mut u).await;
+    let (_id, mut d) = daemon(&fx, "box", NodeState::Idle, vec![]).await;
+    let mut s = IssueSettings::default();
+    s.templates[0].auto_start = true;
+    issue_settings(&mut u, s).await;
+    let spec = spawned(&mut d).await;
+    assert_eq!(spec.agent_id(), &agent("issue-6"));
+    assert!(spec.prompt().contains("Fix issue #6 in o/n:"));
+    assert!(spec.prompt().contains("```issue\ntext[31m red\n```"));
+    // Linked, so the next ticks do not start it again.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let again = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let HubToDaemon::Spawn(_) = recv::<HubToDaemon>(&mut d).await {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(again.is_err(), "started twice");
 }

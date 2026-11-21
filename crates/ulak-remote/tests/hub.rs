@@ -222,6 +222,12 @@ async fn ui(fx: &Fx) -> Ws {
         recv::<HubToUi>(&mut ws).await,
         HubToUi::HubConfig { .. }
     ));
+    for _ in 0..3 {
+        assert!(matches!(
+            recv::<HubToUi>(&mut ws).await,
+            HubToUi::IssueSettings { .. } | HubToUi::IssueLinks { .. } | HubToUi::Forwards { .. }
+        ));
+    }
     ws
 }
 

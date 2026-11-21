@@ -3,7 +3,7 @@
 use crate::ServerError;
 use std::{net::IpAddr, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use ulak_proto::{BranchName, GitToken, RepoInfo, RepoRef};
+use ulak_proto::{clean_text, BranchName, GitToken, Issue, IssueRef, RepoInfo, RepoRef};
 
 const MAX_BODY: u64 = 2 << 20;
 const PAGE: usize = 30;
@@ -74,18 +74,40 @@ impl GitHub {
 
     /// `(json, has_next_page)`.
     fn get(&self, path: &str, token: &GitToken) -> Result<(serde_json::Value, bool), ServerError> {
-        let mut resp = self
-            .agent
-            .get(&format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", token.expose()))
-            .header(
-                "User-Agent",
-                concat!("ulak-remote/", env!("CARGO_PKG_VERSION")),
-            )
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .call()
-            .map_err(|_| gh("cannot reach the GitHub API (network error or timeout)"))?;
+        self.request(path, token, None)
+    }
+
+    /// GET, or POST of a JSON `body` (which must answer 201).
+    fn request(
+        &self,
+        path: &str,
+        token: &GitToken,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(serde_json::Value, bool), ServerError> {
+        let url = format!("{}{path}", self.base);
+        let auth = format!("Bearer {}", token.expose());
+        let ua = concat!("ulak-remote/", env!("CARGO_PKG_VERSION"));
+        let sent = match body {
+            None => self
+                .agent
+                .get(&url)
+                .header("Authorization", &auth)
+                .header("User-Agent", ua)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .call(),
+            Some(b) => self
+                .agent
+                .post(&url)
+                .header("Authorization", &auth)
+                .header("User-Agent", ua)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .header("Content-Type", "application/json")
+                .send(b.to_string()),
+        };
+        let mut resp =
+            sent.map_err(|_| gh("cannot reach the GitHub API (network error or timeout)"))?;
         let status = resp.status().as_u16();
         let h = |n: &str| {
             resp.headers()
@@ -93,7 +115,8 @@ impl GitHub {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
         };
-        if status != 200 {
+        let want = if body.is_some() { 201 } else { 200 };
+        if status != want {
             return Err(gh(match status {
                 401 => "token rejected (invalid, expired or revoked)".to_owned(),
                 429 => "rate limit exceeded; try again later".to_owned(),
@@ -292,6 +315,175 @@ impl GitHub {
             .collect();
         Ok((names, default))
     }
+}
+
+/// Issue lists hold at most this many; bodies are cut to `BODY_MAX` characters.
+const ISSUES_MAX: usize = 100;
+const BODY_MAX: usize = 8000;
+
+impl GitHub {
+    fn issue_list(
+        &self,
+        path: &str,
+        token: &GitToken,
+        tagged: bool,
+    ) -> Result<Vec<Issue>, ServerError> {
+        let (j, _) = self.get(path, token)?;
+        Ok(j.as_array()
+            .ok_or_else(|| gh("unexpected response shape"))?
+            .iter()
+            .filter_map(|v| issue_of(v, tagged))
+            .take(ISSUES_MAX)
+            .collect())
+    }
+
+    /// Open issues in repositories you own or belong to (PRs dropped), newest activity first.
+    /// `label`: only issues that carry it.
+    pub fn my_issues(
+        &self,
+        token: &GitToken,
+        label: Option<&str>,
+    ) -> Result<Vec<Issue>, ServerError> {
+        let label = label.map_or(String::new(), |l| format!("&labels={l}"));
+        self.issue_list(
+            &format!("/user/issues?filter=repos&state=open&sort=updated&per_page=100{label}"),
+            token,
+            false,
+        )
+    }
+
+    /// Open issues of one repository (PRs dropped).
+    pub fn repo_issues(
+        &self,
+        token: &GitToken,
+        repo: &RepoRef,
+        tagged: bool,
+    ) -> Result<Vec<Issue>, ServerError> {
+        self.issue_list(
+            &format!(
+                "/repos/{}/issues?state=open&sort=updated&per_page=50",
+                repo.as_str()
+            ),
+            token,
+            tagged,
+        )
+    }
+
+    pub fn issue(
+        &self,
+        token: &GitToken,
+        r: &IssueRef,
+        tagged: bool,
+    ) -> Result<Issue, ServerError> {
+        let (j, _) = self.get(
+            &format!("/repos/{}/issues/{}", r.repo.as_str(), r.number),
+            token,
+        )?;
+        issue_of(&j, tagged)
+            .ok_or_else(|| gh("not an issue (a pull request, or an unreadable answer)"))
+    }
+
+    /// Who last added `label` to the issue (first 100 events only).
+    // ponytail: one page of events; an issue with more than 100 events reads as "not labeled".
+    pub fn labeled_by(
+        &self,
+        token: &GitToken,
+        r: &IssueRef,
+        label: &str,
+    ) -> Result<Option<String>, ServerError> {
+        let (j, _) = self.get(
+            &format!(
+                "/repos/{}/issues/{}/events?per_page=100",
+                r.repo.as_str(),
+                r.number
+            ),
+            token,
+        )?;
+        Ok(j.as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .filter(|e| {
+                e["event"] == "labeled"
+                    && e["label"]["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(label))
+            })
+            .filter_map(|e| e["actor"]["login"].as_str().map(str::to_owned))
+            .next())
+    }
+
+    /// The number of a PR (any state) opened from `branch` of the repository itself.
+    pub fn pr_for_branch(
+        &self,
+        token: &GitToken,
+        repo: &RepoRef,
+        branch: &str,
+    ) -> Result<Option<u64>, ServerError> {
+        if BranchName::new(branch).is_err() {
+            return Ok(None);
+        }
+        let (j, _) = self.get(
+            &format!(
+                "/repos/{}/pulls?state=all&per_page=1&head={}:{branch}",
+                repo.as_str(),
+                repo.owner()
+            ),
+            token,
+        )?;
+        Ok(j.as_array()
+            .and_then(|a| a.first())
+            .and_then(|p| p["number"].as_u64()))
+    }
+
+    pub fn comment(&self, token: &GitToken, r: &IssueRef, body: &str) -> Result<(), ServerError> {
+        self.request(
+            &format!("/repos/{}/issues/{}/comments", r.repo.as_str(), r.number),
+            token,
+            Some(&serde_json::json!({ "body": body })),
+        )
+        .map(|_| ())
+    }
+}
+
+fn issue_of(v: &serde_json::Value, tagged: bool) -> Option<Issue> {
+    if v.get("pull_request").is_some() {
+        return None;
+    }
+    let repo = v["repository_url"].as_str()?.rsplit_once("/repos/")?.1;
+    let issue = IssueRef {
+        repo: RepoRef::new(repo).ok()?,
+        number: v["number"].as_u64().filter(|n| *n > 0)?,
+    };
+    let url = v["html_url"]
+        .as_str()
+        .filter(|u| u.starts_with("https://") && u.len() < 500)?;
+    let updated_ms = v["updated_at"]
+        .as_str()
+        .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
+        .map_or(0, |t| (t.unix_timestamp_nanos() / 1_000_000).max(0) as u64);
+    Some(Issue {
+        issue,
+        title: clean_text(v["title"].as_str().unwrap_or_default(), 300, false),
+        body: clean_text(v["body"].as_str().unwrap_or_default(), BODY_MAX, true),
+        author: clean_text(v["user"]["login"].as_str().unwrap_or("ghost"), 100, false),
+        trusted: matches!(
+            v["author_association"].as_str(),
+            Some("OWNER" | "MEMBER" | "COLLABORATOR")
+        ),
+        labels: v["labels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l["name"].as_str())
+            .map(|l| clean_text(l, 50, false))
+            .take(20)
+            .collect(),
+        comments: v["comments"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+        updated_ms,
+        url: url.to_owned(),
+        tagged,
+    })
 }
 
 fn repo_info(v: &serde_json::Value) -> Option<RepoInfo> {

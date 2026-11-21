@@ -98,6 +98,8 @@ pub struct HubConfig {
     pub release_credential: Option<CredentialId>,
     /// How often the cache is refreshed on its own.
     pub release_interval: Duration,
+    /// How often issue comments, PRs of issue agents and auto-start are checked.
+    pub issues_tick: Duration,
 }
 
 impl Default for HubConfig {
@@ -130,6 +132,7 @@ impl Default for HubConfig {
             release_token: None,
             release_credential: None,
             release_interval: Duration::from_secs(6 * 3600),
+            issues_tick: Duration::from_secs(60),
         }
     }
 }
@@ -755,9 +758,21 @@ impl Hub {
                 h.refresh_releases(true).await;
             }
         });
+        let h = self.clone();
+        let issues = tokio::spawn(async move {
+            let mut t = tokio::time::interval(h.cfg.issues_tick);
+            loop {
+                t.tick().await;
+                let h = h.clone();
+                let r = tokio::task::spawn_blocking(move || h.issues_once(now_ms())).await;
+                if let Ok(Err(e)) = r {
+                    eprintln!("issues: {e}");
+                }
+            }
+        });
         Ok(Running {
             addr,
-            tasks: vec![accept, nudges, expiry, scheduler, release_loop],
+            tasks: vec![accept, nudges, expiry, scheduler, release_loop, issues],
         })
     }
 

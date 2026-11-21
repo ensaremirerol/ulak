@@ -1,6 +1,7 @@
 //! Part 2c: the HTTPS hub. mTLS WebSockets for daemons and UIs, `/enroll` and `/mcp` without a client cert.
 mod config;
 mod hub;
+mod issues;
 mod mcp;
 mod place;
 pub(crate) mod releases;

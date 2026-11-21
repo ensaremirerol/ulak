@@ -438,6 +438,11 @@ impl SpawnSpec {
             path: self.workdir.clone(),
         })
     }
+    /// Same spec with another prompt (the hub adds the `ulak-route` block).
+    pub fn with_prompt(mut self, prompt: String) -> Self {
+        self.prompt = prompt;
+        self
+    }
     /// Same spec with another environment (the hub adds the agent token and MCP URL).
     pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
         self.env = env;

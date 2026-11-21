@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use ulak_proto::*;
 
-const UI_VARIANTS: usize = 30;
-const HUB_VARIANTS: usize = 34;
+const UI_VARIANTS: usize = 34;
+const HUB_VARIANTS: usize = 38;
 
 fn agent() -> AgentId {
     AgentId::new("reviewer-2").unwrap()
@@ -136,6 +136,10 @@ fn ui_name(f: &UiToHub) -> &'static str {
         UiToHub::SaveNodeSettings { .. } => "save_node_settings",
         UiToHub::NodeStats { .. } => "node_stats",
         UiToHub::InstallProfile { .. } => "install_profile",
+        UiToHub::SpawnForIssue { .. } => "spawn_for_issue",
+        UiToHub::ListIssues => "list_issues",
+        UiToHub::SaveIssueSettings { .. } => "save_issue_settings",
+        UiToHub::ResolveForward { .. } => "resolve_forward",
     }
 }
 
@@ -174,10 +178,34 @@ fn hub_name(f: &HubToUi) -> &'static str {
         HubToUi::HubConfig { .. } => "hub_config",
         HubToUi::NodeStats { .. } => "node_stats",
         HubToUi::InstallStatus { .. } => "install_status",
+        HubToUi::Issues { .. } => "issues",
+        HubToUi::IssueSettings { .. } => "issue_settings",
+        HubToUi::IssueLinks { .. } => "issue_links",
+        HubToUi::Forwards { .. } => "forwards",
         HubToUi::Error { .. } => "error",
     }
 }
 
+fn issue_ref() -> IssueRef {
+    IssueRef::parse("octocat/hello-world#64").unwrap()
+}
+fn issue_settings() -> IssueSettings {
+    let mut s = IssueSettings {
+        credential: Some(CredentialId::new("cred-1").unwrap()),
+        tagged: vec![RepoRef::new("oxigraph/oxigraph").unwrap()],
+        ..IssueSettings::default()
+    };
+    s.templates.truncate(1);
+    s.templates[0].comment = true;
+    s.routing.rules.push(RouteRule {
+        repo: Some(RepoRef::new("octocat/hello-world").unwrap()),
+        label: Some("docs".into()),
+        words: vec!["readme".into()],
+        to: AgentId::new("docs-sync").unwrap(),
+        fallback: RouteFallback::NewAgent,
+    });
+    s
+}
 fn hub_profile() -> HubProfile {
     HubProfile {
         name: "claude-work".into(),
@@ -396,6 +424,33 @@ fn ui_frames() -> Vec<(&'static str, UiToHub)> {
             UiToHub::CleanRepo {
                 node: node(),
                 path: "/home/u/.config/ulakd/work/reviewer-2/hello-world".into(),
+            },
+        ),
+        (
+            "spawn_for_issue",
+            UiToHub::SpawnForIssue {
+                target: SpawnTarget::Auto,
+                spec: repo_spec(),
+                issue: IssueStart {
+                    issue: issue_ref(),
+                    branch: Some("issue-64".into()),
+                    comment: true,
+                    route: true,
+                },
+            },
+        ),
+        ("list_issues", UiToHub::ListIssues),
+        (
+            "save_issue_settings",
+            UiToHub::SaveIssueSettings {
+                settings: issue_settings(),
+            },
+        ),
+        (
+            "resolve_forward",
+            UiToHub::ResolveForward {
+                id: "f-1".into(),
+                to: Some(agent()),
             },
         ),
         ("check_update_all", UiToHub::CheckUpdate { node: None }),
@@ -807,6 +862,61 @@ fn hub_frames() -> Vec<(&'static str, HubToUi)> {
                 done: true,
                 ok: false,
                 detail: "installing claude failed (exit status: 1): npm ERR! EACCES".into(),
+            },
+        ),
+        (
+            "issues",
+            HubToUi::Issues {
+                issues: vec![Issue {
+                    issue: issue_ref(),
+                    title: "Install fails without root".into(),
+                    body: "npm needs root\n```\nEACCES\n```".into(),
+                    author: "octocat".into(),
+                    trusted: true,
+                    labels: vec!["bug".into()],
+                    comments: 3,
+                    updated_ms: 1_700_000_004_000,
+                    url: "https://github.com/octocat/hello-world/issues/64".into(),
+                    tagged: false,
+                }],
+                errors: vec!["other/gone: not found (or the token cannot see it)".into()],
+            },
+        ),
+        (
+            "issue_settings",
+            HubToUi::IssueSettings {
+                settings: issue_settings(),
+            },
+        ),
+        (
+            "issue_links",
+            HubToUi::IssueLinks {
+                links: vec![IssueLink {
+                    agent: agent(),
+                    issue: issue_ref(),
+                    branch: Some("issue-64".into()),
+                    comment: true,
+                    route: false,
+                    at_ms: 1_700_000_005_000,
+                    commented_start: true,
+                    pr: Some(65),
+                }],
+            },
+        ),
+        (
+            "forwards",
+            HubToUi::Forwards {
+                forwards: vec![Forward {
+                    id: "f-1".into(),
+                    issue: issue_ref(),
+                    from: agent(),
+                    to: None,
+                    reason: "nobody owns this".into(),
+                    status: ForwardStatus::NeedsOwner,
+                    note: "No routing rule matched.".into(),
+                    title: "Install fails without root".into(),
+                    at_ms: 1_700_000_006_000,
+                }],
             },
         ),
         (
