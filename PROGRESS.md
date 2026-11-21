@@ -532,3 +532,19 @@ Live: typing, `stty size` = fitted size, wheel scrolls tmux history (5 lines per
 after the client's holder is SIGKILLed. Not checked: drag-to-copy end to end in a real browser (the automation's drag
 sends no motion), tmux 3.3a (Debian 12) Esc delay. Observed once: an earlier test hub ignored SIGTERM for 2 h (it
 exited normally in the next run); not reproduced.
+
+## Redesign screens: Issues, templates, routing, Inbox, Nodes (2026-11-21, unreleased)
+
+Built (hub + web; nodes need no update):
+- Issues: your repositories' open issues plus tagged repositories (PRs dropped), filters, detail, linked agents/PRs.
+- New agent for an issue: template-filled prompt (issue body fenced as data), branch, agent, node, ulak-route, comment.
+- Templates (Settings): variables, label suggestions, defaults (route, comment, auto-start), preview.
+- Auto-start: issues in your repositories that your own account labeled `ulak`; never tagged repos; once per issue.
+- Comments: when a linked agent starts and when a PR from its branch opens (polled every 60 s for 7 days).
+- Issue routing (Settings): MCP tool `ulak_forward_issue` for agents with the skill; rules (repo/label/title words),
+  fallback new agent or Inbox, max forwards, no A->B->A, tagged repos never start agents, ask-first; recent forwards.
+- Inbox: install failed (output, retry, edit command, stop paused agents), forwards nobody owns, questions, login.
+- Nodes: cards, Update all (n), Add node dialog with the install command. Settings tabs incl. Devices; nav without Mailbox/Devices.
+
+Left out on purpose: quick-answer buttons on questions and "Send to <agent> (owns ...)" in the issue panel (no data
+behind them); auto-start and forward-started agents use the `claude` profile.
